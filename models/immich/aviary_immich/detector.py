@@ -53,21 +53,30 @@ class PretrainedBirdDetector:
             raise ValueError(f"Model {model_name} does not expose any of these labels: {sorted(self.bird_labels)}")
 
     def predict(self, image_path: Path) -> BirdPrediction:
+        return self.predict_batch([image_path], batch_size=1)[0]
+
+    def predict_batch(self, image_paths: Iterable[Path], batch_size: int = 64) -> list[BirdPrediction]:
+        paths = list(image_paths)
+        if not paths:
+            return []
+
         results = self.model.predict(
-            source=str(image_path),
+            source=[str(path) for path in paths],
+            batch=max(1, batch_size),
             conf=self.threshold,
             device=self.device,
             classes=sorted(self.bird_class_ids),
             verbose=False,
         )
 
+        return [self._prediction_from_result(result) for result in results]
+
+    def _prediction_from_result(self, result) -> BirdPrediction:
         detections: list[dict[str, float | int | str]] = []
         max_confidence = 0.0
-        if not results:
-            return BirdPrediction(has_bird=False, max_confidence=0.0, detections=[])
 
         names = self.model.names
-        for box in results[0].boxes:
+        for box in result.boxes:
             class_id = int(box.cls[0].item())
             confidence = float(box.conf[0].item())
             x1, y1, x2, y2 = (int(round(value)) for value in box.xyxy[0].tolist())

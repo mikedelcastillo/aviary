@@ -79,18 +79,17 @@ Create one Immich API key per account, copy
 `models/immich/config/accounts.example.yaml` to `models/immich/config/accounts.yaml`, and
 fill `.env` with `IMMICH_BASE_URL` plus the account API keys.
 
-Start with:
+On Windows, install the Immich dependencies in the local virtual environment,
+then use the root PowerShell wrapper to generate the `Birds` albums:
 
-```bash
-python models/immich/generate_albums.py --dry-run --limit 25
+```powershell
+.\scripts\immich_generate_albums.ps1
 ```
 
-Then generate real `Birds` albums and download them:
-
-```bash
-python models/immich/generate_albums.py
-python models/immich/download_immich_birds.py
-```
+Reruns are resumable. Previously scanned assets are read from
+`models/immich/state/`, previously manifested bird IDs are read from
+`models/immich/manifests/`, and existing album asset IDs are checked before
+adding new assets so the script does not intentionally re-add duplicates.
 
 ## External References
 
