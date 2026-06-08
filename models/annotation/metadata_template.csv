@@ -1,0 +1,4 @@
+filename,source,camera,lighting,capture_date,known_birds,notes
+room-main_day_2026-06-08_00123.jpg,camera,room-main,day,2026-06-08,"bird_1;bird_3",""
+room-main_ir_2026-06-08_00042.jpg,camera,room-main,ir,2026-06-08,"unknown_bird","identity unclear in infrared"
+phone_pixel8_2026-05-18_00012.jpg,phone,,day,2026-05-18,"bird_2","close-up"

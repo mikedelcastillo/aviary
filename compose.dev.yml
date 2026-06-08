@@ -1,0 +1,24 @@
+services:
+  aviary-server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    env_file:
+      - .env
+    environment:
+      AVIARY_MODEL_PATH: /app/models/current/bird_detector.pt
+      AVIARY_SNAPSHOT_DIR: /app/snapshots
+    volumes:
+      - ./server/config:/app/config:ro
+      - ./server/models:/app/models:ro
+      - ./server/snapshots:/app/snapshots
+    restart: unless-stopped
+
+    # For Linux NVIDIA hosts, install nvidia-container-toolkit and uncomment:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]

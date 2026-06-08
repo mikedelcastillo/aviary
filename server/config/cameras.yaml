@@ -1,0 +1,46 @@
+snapshot_dir: ${AVIARY_SNAPSHOT_DIR}
+
+model:
+  path: ${AVIARY_MODEL_PATH}
+  confidence: 0.45
+  iou: 0.5
+  image_size: 960
+  device: auto
+
+telegram:
+  enabled: true
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+  user_ids: ${TELEGRAM_USER_IDS}
+  cooldown_seconds: 600
+  include_snapshot: true
+
+cameras:
+  - name: room-main
+    enabled: true
+    rtsp_url: ${TAPO_ROOM_MAIN_RTSP}
+    sample_fps: 1.0
+    reconnect_seconds: 5.0
+    alert_zones: []
+
+  - name: room-side
+    enabled: false
+    rtsp_url: ${TAPO_ROOM_SIDE_RTSP}
+    sample_fps: 1.0
+    reconnect_seconds: 5.0
+    alert_zones: []
+
+  - name: room-perch
+    enabled: false
+    rtsp_url: ${TAPO_ROOM_PERCH_RTSP}
+    sample_fps: 1.0
+    reconnect_seconds: 5.0
+    # Example zone shape in image pixel coordinates:
+    # alert_zones:
+    #   - name: floor-risk
+    #     polygon:
+    #       - [0, 600]
+    #       - [1920, 600]
+    #       - [1920, 1080]
+    #       - [0, 1080]
+    #     alert: true
+    alert_zones: []

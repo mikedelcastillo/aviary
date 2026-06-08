@@ -1,0 +1,59 @@
+# Annotation Workflow
+
+Use CVAT to label bird bounding boxes. Keep the images local where possible.
+
+## Start CVAT
+
+CVAT changes its Docker Compose stack over time, so this project intentionally
+uses the official CVAT repository instead of copying a large Compose file here.
+
+```bash
+cd annotation
+git clone https://github.com/cvat-ai/cvat.git cvat
+cd cvat
+docker compose up -d
+```
+
+Open CVAT at `http://localhost:8080`, create a user, and create one task per
+image source or capture session.
+
+## Label Schema
+
+Use the labels in `labeling_schema.yaml`. Each visible bird gets exactly one
+bounding box. Label the box with the bird identity if you are confident. Use
+`unknown_bird` when the bird is visible but identity is not clear.
+
+Do not draw boxes around reflections, toys, shadows, or bird-shaped objects.
+
+## Folder Use
+
+- `raw/phone_photos/`: phone images from your library.
+- `raw/immich_birds/`: downloaded images from Immich `Birds` albums.
+- `raw/camera_frames/day/`: extracted visible-light camera frames.
+- `raw/camera_frames/ir/`: extracted infrared/night-mode frames.
+- `exports/`: CVAT YOLO exports, one folder per dataset version.
+
+Keep raw image filenames descriptive enough to preserve source context:
+
+```text
+room-main_day_2026-06-08_00123.jpg
+room-side_ir_2026-06-08_00042.jpg
+phone_pixel8_2026-05-18_00012.jpg
+```
+
+## Export
+
+In CVAT, export tasks as YOLO format. Unzip each export under:
+
+```text
+models/annotation/exports/v001/
+models/annotation/exports/v002/
+```
+
+Then normalize the export for training:
+
+```bash
+python models/training/scripts/prepare_dataset.py \
+  --source models/annotation/exports/v001 \
+  --output models/training/datasets/v001
+```
