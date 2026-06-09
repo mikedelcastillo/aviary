@@ -8,14 +8,18 @@ from pathlib import Path
 import pytest
 
 from aviary_immich.config import (
+    ALBUM_RULES,
     ANIMAL_ALBUMS,
     ANIMAL_LABELS,
+    MODELS,
     AccountConfig,
     ImmichConfig,
     _load_account,
+    album_names,
     load_accounts_config,
     load_env_file,
     normalize_base_url,
+    yolo_labels,
 )
 
 
@@ -23,11 +27,38 @@ from aviary_immich.config import (
 
 
 def test_animal_albums_mapping():
-    assert ANIMAL_ALBUMS == {"bird": "Birds", "dog": "Dogs", "cat": "Cats"}
+    # Back-compat shim, now derived from the YOLO signals in ALBUM_RULES (includes the racket).
+    assert ANIMAL_ALBUMS == {
+        "bird": "Birds",
+        "dog": "Dogs",
+        "cat": "Cats",
+        "tennis racket": "Tennis",
+    }
 
 
 def test_animal_labels_tuple():
-    assert ANIMAL_LABELS == ("bird", "dog", "cat")
+    assert ANIMAL_LABELS == ("bird", "dog", "cat", "tennis racket")
+
+
+def test_album_names_in_declaration_order():
+    assert album_names() == ("Birds", "Dogs", "Cats", "Tennis")
+
+
+def test_yolo_labels_union_across_specs():
+    assert yolo_labels() == ("bird", "dog", "cat", "tennis racket")
+
+
+def test_clip_spec_present_but_disabled_by_default(monkeypatch):
+    # CLIP is opt-in (IMMICH_CLIP); the spec exists but ships disabled so a stock run needs no
+    # extra dependency. The Tennis rule still unions the YOLO racket with the CLIP court signal.
+    clip = next(spec for spec in MODELS if spec.kind == "clip")
+    assert clip.enabled is False
+    tennis = next(rule for rule in ALBUM_RULES if rule.album_name == "Tennis")
+    assert {(s.model, s.tag) for s in tennis.signals} == {
+        ("yolo", "tennis racket"),
+        ("clip", "tennis court"),
+    }
+    assert tennis.mode == "union"
 
 
 # --------------------------------------------------------------------------- normalize_base_url

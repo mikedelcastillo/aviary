@@ -14,7 +14,7 @@ import threading
 import pytest
 
 from aviary_immich import workers
-from fakes import FakeDetector, FakeImmichClient, OutOfMemoryError, make_asset, make_prediction
+from fakes import FakeImmichClient, FakeModel, OutOfMemoryError, make_asset, make_output
 
 
 # --------------------------------------------------------------------------- thread_local_client_factory
@@ -83,48 +83,50 @@ def test_factory_gives_each_thread_its_own_instance(counting_client):
     assert len(counting_client.instances) == 2
 
 
-# --------------------------------------------------------------------------- scan_asset_worker_with_detector
+# --------------------------------------------------------------------------- scan_asset_worker_with_models
 
 
-def test_worker_with_detector_returns_match_record(tmp_path):
+def test_worker_with_models_returns_match_record(tmp_path):
     asset = make_asset(id="asset-1", name="pic.jpg")
     client = FakeImmichClient()
-    detector = FakeDetector(responder=lambda items: [make_prediction(labels=["bird"]) for _ in items])
+    model = FakeModel(name="yolo", responder=lambda items: [make_output(labels=["bird"]) for _ in items])
 
-    record = workers.scan_asset_worker_with_detector(
-        asset, client, detector, tmp_path, "acct", "preview"
+    record = workers.scan_asset_worker_with_models(
+        asset, client, [model], tmp_path, "acct", "preview"
     )
 
     assert record["decision"] == "match"
     assert record["asset_id"] == "asset-1"
     assert record["account"] == "acct"
     assert record["labels"] == ["bird"]
+    # Provenance is keyed by the model name.
+    assert record["model_tags"] == {"yolo": {"bird": 0.9}}
     # The thumbnail was downloaded through the fake client.
     assert client.downloaded == ["asset-1"]
 
 
-def test_worker_with_detector_uses_predict_single_path(tmp_path):
+def test_worker_with_models_uses_predict_single_path(tmp_path):
     asset = make_asset(id="asset-1")
     client = FakeImmichClient()
-    detector = FakeDetector(responder=lambda items: [make_prediction(labels=["bird"]) for _ in items])
+    model = FakeModel(name="yolo", responder=lambda items: [make_output(labels=["bird"]) for _ in items])
 
-    workers.scan_asset_worker_with_detector(asset, client, detector, tmp_path, "acct", "preview")
+    workers.scan_asset_worker_with_models(asset, client, [model], tmp_path, "acct", "preview")
 
-    # predict() routes through predict_batch with a single path and batch_size=1.
-    assert detector.calls == [("paths", 1, 1)]
+    # The worker routes through predict_paths with a single path and batch_size=1.
+    assert model.calls == [("paths", 1, 1)]
 
 
-def test_worker_with_detector_returns_error_record_on_raise(tmp_path):
+def test_worker_with_models_returns_error_record_on_raise(tmp_path):
     asset = make_asset(id="asset-err")
     client = FakeImmichClient()
 
     def boom(items):
         raise OutOfMemoryError("CUDA out of memory")
 
-    detector = FakeDetector(responder=boom)
+    model = FakeModel(name="yolo", responder=boom)
 
-    record = workers.scan_asset_worker_with_detector(
-        asset, client, detector, tmp_path, "acct", "preview"
+    record = workers.scan_asset_worker_with_models(
+        asset, client, [model], tmp_path, "acct", "preview"
     )
 
     assert record["decision"] == "error"
@@ -135,13 +137,13 @@ def test_worker_with_detector_returns_error_record_on_raise(tmp_path):
     assert "labels" not in record
 
 
-def test_worker_with_detector_no_bird_is_not_match(tmp_path):
+def test_worker_with_models_no_bird_is_not_match(tmp_path):
     asset = make_asset(id="asset-empty")
     client = FakeImmichClient()
-    detector = FakeDetector(responder=lambda items: [make_prediction(labels=[]) for _ in items])
+    model = FakeModel(name="yolo", responder=lambda items: [make_output(labels=[]) for _ in items])
 
-    record = workers.scan_asset_worker_with_detector(
-        asset, client, detector, tmp_path, "acct", "preview"
+    record = workers.scan_asset_worker_with_models(
+        asset, client, [model], tmp_path, "acct", "preview"
     )
 
     assert record["decision"] == "not_match"

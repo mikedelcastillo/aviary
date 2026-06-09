@@ -15,12 +15,18 @@ from aviary_immich.records import (
     record_from_prediction,
     scan_postfix,
 )
+from aviary_immich.records import (
+    aggregate_video_outputs,
+    record_from_outputs,
+)
 from fakes import (
     OutOfMemoryError,
     make_asset,
     make_detection,
+    make_output,
     make_prediction,
     make_record,
+    make_tag,
 )
 
 KNOWN = {"bird", "dog", "cat"}
@@ -167,13 +173,13 @@ def test_bump_decision_error_does_not_count_labels():
 def test_bump_decision_increments_per_matched_label():
     stats: dict[str, int] = {}
     bump_decision(stats, make_record(labels=["bird", "dog"]))
-    assert stats == {"birds": 1, "dogs": 1}
+    assert stats == {"Birds": 1, "Dogs": 1}
 
 
 def test_bump_decision_cat_label():
     stats: dict[str, int] = {}
     bump_decision(stats, make_record(labels=["cat"]))
-    assert stats == {"cats": 1}
+    assert stats == {"Cats": 1}
 
 
 def test_bump_decision_no_match_increments_other():
@@ -193,13 +199,13 @@ def test_bump_decision_accumulates_across_calls():
     bump_decision(stats, make_record(labels=["bird"]))
     bump_decision(stats, make_record(labels=["bird"]))
     bump_decision(stats, make_record(decision="error"))
-    assert stats == {"birds": 2, "errors": 1}
+    assert stats == {"Birds": 2, "errors": 1}
 
 
 def test_bump_decision_uses_detections_fallback():
     stats: dict[str, int] = {}
     bump_decision(stats, make_record(labels=None, detections=[make_detection("dog")]))
-    assert stats == {"dogs": 1}
+    assert stats == {"Dogs": 1}
 
 
 # --------------------------------------------------------------------------- chunks
@@ -233,20 +239,20 @@ def test_chunks_empty_list_yields_nothing():
 
 
 def test_scan_postfix_full_stats():
-    stats = {"birds": 1, "dogs": 2, "cats": 3, "errors": 4}
-    assert scan_postfix(stats) == "birds=1 dogs=2 cats=3 err=4"
+    stats = {"Birds": 1, "Dogs": 2, "Cats": 3, "Tennis": 7, "errors": 4}
+    assert scan_postfix(stats) == "Birds=1 Dogs=2 Cats=3 Tennis=7 err=4"
 
 
 def test_scan_postfix_missing_keys_default_zero():
-    assert scan_postfix({}) == "birds=0 dogs=0 cats=0 err=0"
+    assert scan_postfix({}) == "Birds=0 Dogs=0 Cats=0 Tennis=0 err=0"
 
 
 def test_scan_postfix_prepends_prefix():
-    assert scan_postfix({}, prefix="scan ") == "scan birds=0 dogs=0 cats=0 err=0"
+    assert scan_postfix({}, prefix="scan ") == "scan Birds=0 Dogs=0 Cats=0 Tennis=0 err=0"
 
 
 def test_scan_postfix_partial_stats():
-    assert scan_postfix({"birds": 5}) == "birds=5 dogs=0 cats=0 err=0"
+    assert scan_postfix({"Birds": 5}) == "Birds=5 Dogs=0 Cats=0 Tennis=0 err=0"
 
 
 # --------------------------------------------------------------------------- record_from_prediction
@@ -266,7 +272,12 @@ def test_record_from_prediction_match_with_detections(monkeypatch):
     assert record["asset_id"] == "a7"
     assert record["original_file_name"] == "photo.jpg"
     assert record["scanned_at"] == "FIXED-TS"
-    assert record["detections"] == prediction.detections
+    assert record["model_tags"] == {"yolo": {"bird": pytest.approx(0.8)}}
+    assert len(record["detections"]) == 1
+    detection = record["detections"][0]
+    assert detection["label"] == "bird"
+    assert detection["confidence"] == pytest.approx(0.8)
+    assert detection["model"] == "yolo"
 
 
 def test_record_from_prediction_not_match_without_detections(monkeypatch):
@@ -313,6 +324,55 @@ def test_record_from_prediction_uses_id_fallback_for_name(monkeypatch):
     prediction = make_prediction(detections=[])
     record = record_from_prediction(asset, "acct", prediction)
     assert record["original_file_name"] == "a9"
+
+
+# --------------------------------------------------------------------------- record_from_outputs
+
+
+def test_record_from_outputs_merges_two_models(monkeypatch):
+    import aviary_immich.state as state
+
+    monkeypatch.setattr(state, "utc_now", lambda: "TS")
+    asset = make_asset(id="a1", name="photo.jpg")
+    outputs = {
+        "yolo": make_output(tags=[make_tag("bird", 0.8)], max_confidence=0.8),
+        "clip": make_output(tags=[make_tag("cat", 0.6, box=None)], max_confidence=0.6),
+    }
+    record = record_from_outputs(asset, "acct", outputs)
+    assert record["model_tags"] == {
+        "yolo": {"bird": pytest.approx(0.8)},
+        "clip": {"cat": pytest.approx(0.6)},
+    }
+    assert record["labels"] == ["bird", "cat"]
+    assert record["decision"] == "match"
+    assert record["max_confidence"] == pytest.approx(0.8)
+    # The scene tag (box=None) contributes to labels/model_tags but not detections.
+    assert len(record["detections"]) == 1
+    assert record["detections"][0]["model"] == "yolo"
+    assert record["detections"][0]["label"] == "bird"
+
+
+# --------------------------------------------------------------------------- aggregate_video_outputs
+
+
+def test_aggregate_video_outputs_keeps_best_tag_across_frames(monkeypatch):
+    import aviary_immich.state as state
+
+    monkeypatch.setattr(state, "utc_now", lambda: "TS")
+    asset = make_asset(id="vid1", name="clip.mp4")
+    frame_outputs = [
+        {"yolo": make_output(tags=[make_tag("bird", 0.4)], max_confidence=0.4)},
+        {"yolo": make_output(tags=[make_tag("bird", 0.9)], max_confidence=0.9)},
+        {"yolo": make_output(tags=[make_tag("bird", 0.7)], max_confidence=0.7)},
+    ]
+    record = aggregate_video_outputs(asset, "acct", frame_outputs, frames_scanned=3)
+    assert record["asset_type"] == "video"
+    assert record["frames_scanned"] == 3
+    assert record["labels"] == ["bird"]
+    assert record["model_tags"] == {"yolo": {"bird": pytest.approx(0.9)}}
+    assert record["max_confidence"] == pytest.approx(0.9)
+    assert len(record["detections"]) == 1
+    assert record["detections"][0]["confidence"] == pytest.approx(0.9)
 
 
 # --------------------------------------------------------------------------- record_from_error

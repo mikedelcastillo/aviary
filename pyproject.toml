@@ -56,6 +56,10 @@ packages = [
 [dependency-groups]
 # Pure-Python; safe to install without disturbing the per-machine GPU torch build.
 dev = ["pytest>=8.0.0"]
+# Opt-in CLIP zero-shot scene model (the Tennis "court" signal). Not installed by default — enable
+# with `uv sync --group clip`, then set IMMICH_CLIP=1. open_clip rides the per-machine torch build
+# already in the venv (its torch dep is satisfied by install-gpu.{sh,ps1}); it does not pin torch.
+clip = ["open_clip_torch>=2.24.0"]
 
 [tool.pytest.ini_options]
 # pythonpath puts the source tree (not the installed site-packages copy) at the FRONT of

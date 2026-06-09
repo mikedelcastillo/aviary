@@ -44,9 +44,9 @@ def test_grand_total_sums_counts(monkeypatch, capsys):
         {
             "slug": "acct-a",
             "scanned": 10,
-            "birds": 3,
-            "dogs": 1,
-            "cats": 2,
+            "Birds": 3,
+            "Dogs": 1,
+            "Cats": 2,
             "other": 4,
             "errors": 1,
             "added": 3,
@@ -55,9 +55,9 @@ def test_grand_total_sums_counts(monkeypatch, capsys):
         {
             "slug": "acct-b",
             "scanned": 5,
-            "birds": 2,
-            "dogs": 0,
-            "cats": 1,
+            "Birds": 2,
+            "Dogs": 0,
+            "Cats": 1,
             "other": 1,
             "errors": 2,
             "added": 2,
@@ -68,9 +68,9 @@ def test_grand_total_sums_counts(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Grand total" in out
     assert "scanned=15" in out
-    assert "birds=5" in out
-    assert "dogs=1" in out
-    assert "cats=3" in out
+    assert "Birds=5" in out
+    assert "Dogs=1" in out
+    assert "Cats=3" in out
     assert "other=5" in out
     assert "errors=3" in out
     assert "added=5" in out
@@ -94,7 +94,7 @@ def test_grand_total_missing_keys_default_to_zero(monkeypatch, capsys):
     console.grand_total_table([{"slug": "x"}, {"slug": "y"}])
     out = capsys.readouterr().out
     assert "scanned=0" in out
-    assert "birds=0" in out
+    assert "Birds=0" in out
     assert "added=0" in out
     assert "elapsed=0.0" in out
 
@@ -102,10 +102,10 @@ def test_grand_total_missing_keys_default_to_zero(monkeypatch, capsys):
 def test_grand_total_coerces_string_counts(monkeypatch, capsys):
     _force_plain(monkeypatch)
     # int(...) coercion of string-valued counts.
-    console.grand_total_table([{"scanned": "4", "birds": "2"}])
+    console.grand_total_table([{"scanned": "4", "Birds": "2"}])
     out = capsys.readouterr().out
     assert "scanned=4" in out
-    assert "birds=2" in out
+    assert "Birds=2" in out
 
 
 # --------------------------------------------------------------------------- account_summary_table
@@ -116,9 +116,9 @@ def test_account_summary_plain_contains_slug_and_labels(monkeypatch, capsys):
     stats = {
         "scanned": 7,
         "already": 1,
-        "birds": 2,
-        "dogs": 0,
-        "cats": 1,
+        "Birds": 2,
+        "Dogs": 0,
+        "Cats": 1,
         "other": 3,
         "errors": 0,
         "added": 2,
@@ -129,7 +129,7 @@ def test_account_summary_plain_contains_slug_and_labels(monkeypatch, capsys):
     assert "my-acct" in out
     assert "scanned" in out
     assert "scanned=7" in out
-    assert "birds=2" in out
+    assert "Birds=2" in out
     assert "added to album=2" in out
 
 

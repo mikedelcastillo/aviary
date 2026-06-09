@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from aviary_immich.models.base import ModelOutput, Tag
+
 
 class OutOfMemoryError(Exception):
     """Stand-in for ``torch.cuda.OutOfMemoryError``.
@@ -214,3 +216,58 @@ class FakeDetector:
 
     def predict(self, path: Any):
         return self.predict_batch([path], batch_size=1)[0]
+
+
+# --------------------------------------------------------------------------- model doubles
+
+
+def make_tag(name: str, confidence: float = 0.9, box: tuple[int, int, int, int] | None = (0, 0, 10, 10)) -> Tag:
+    """Build a ``Tag``. Pass ``box=None`` for a scene tag (no bounding box)."""
+    return Tag(name=name, confidence=confidence, box=box)
+
+
+def make_output(
+    labels: Iterable[str] = (),
+    confidence: float = 0.9,
+    tags: Iterable[Tag] | None = None,
+    max_confidence: float | None = None,
+) -> ModelOutput:
+    """Build a ``ModelOutput``. Give ``labels`` for a quick one-tag-per-label result."""
+    resolved = tuple(tags) if tags is not None else tuple(make_tag(label, confidence) for label in labels)
+    mc = max_confidence if max_confidence is not None else max((tag.confidence for tag in resolved), default=0.0)
+    return ModelOutput(tags=resolved, max_confidence=mc)
+
+
+class FakeModel:
+    """In-memory stand-in implementing the ``Model`` protocol for inference/worker/video tests.
+
+    ``responder(items) -> list[ModelOutput]`` controls the result and may raise (e.g. an
+    :class:`OutOfMemoryError`) to drive per-model OOM-halving. Each call is appended to
+    ``self.calls`` as ``(mode, n_items, batch_size)`` where mode is ``"paths"`` or ``"arrays"``.
+    ``name`` is the provenance key written into a record's ``model_tags``.
+    """
+
+    def __init__(
+        self,
+        name: str = "yolo",
+        responder: Callable[[list[Any]], list[Any]] | None = None,
+        half: bool = False,
+    ) -> None:
+        self.name = name
+        self.responder = responder
+        self.half = half
+        self.calls: list[tuple[str, int, int]] = []
+        self._infer_cap: int | None = None
+
+    def _run(self, items: Iterable[Any], batch_size: int, mode: str) -> list[Any]:
+        items = list(items)
+        self.calls.append((mode, len(items), batch_size))
+        if self.responder is not None:
+            return self.responder(items)
+        return [make_output() for _ in items]
+
+    def predict_arrays(self, items: Iterable[Any], batch_size: int = 64) -> list[Any]:
+        return self._run(items, batch_size, "arrays")
+
+    def predict_paths(self, items: Iterable[Any], batch_size: int = 64) -> list[Any]:
+        return self._run(items, batch_size, "paths")

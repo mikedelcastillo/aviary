@@ -142,14 +142,14 @@ def make_scan_progress() -> Any:
 
 
 def account_summary_table(slug: str, stats: dict[str, Any]) -> None:
+    from aviary_immich.config import album_names
+
     console = get_console()
     rows = [
         ("scanned", stats.get("scanned", 0)),
         ("already scanned", stats.get("already", 0)),
+        *((name, stats.get(name, 0)) for name in album_names()),
         ("videos", stats.get("videos", 0)),
-        ("birds", stats.get("birds", 0)),
-        ("dogs", stats.get("dogs", 0)),
-        ("cats", stats.get("cats", 0)),
         ("other", stats.get("other", 0)),
         ("errors", stats.get("errors", 0)),
         ("added to album", stats.get("added", 0)),
@@ -170,8 +170,10 @@ def account_summary_table(slug: str, stats: dict[str, Any]) -> None:
 def grand_total_table(per_account: list[dict[str, Any]]) -> None:
     if not per_account:
         return
+    from aviary_immich.config import album_names
+
     console = get_console()
-    keys = ("scanned", "videos", "birds", "dogs", "cats", "other", "errors", "added")
+    keys = ("scanned", *album_names(), "videos", "other", "errors", "added")
     totals = {key: sum(int(entry.get(key, 0)) for entry in per_account) for key in keys}
     totals["elapsed"] = sum(float(entry.get("elapsed", 0.0)) for entry in per_account)
 

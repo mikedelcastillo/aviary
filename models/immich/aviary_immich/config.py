@@ -3,18 +3,104 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from aviary_immich.rules import AlbumRule, Signal
 
 
 BIRD_ALBUM_NAME = "Birds"
 
-# Animal categories the detector classifies, mapped to their Immich album names. The keys are
-# the YOLO/COCO label names (lowercase); the detector filters on exactly these labels and each
-# matching photo is filed into the corresponding album.
-ANIMAL_ALBUMS = {"bird": "Birds", "dog": "Dogs", "cat": "Cats"}
-ANIMAL_LABELS = tuple(ANIMAL_ALBUMS)  # ("bird", "dog", "cat")
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Declares one model the pipeline runs and the tags it can emit.
+
+    ``kind`` selects the backend (``"yolo"`` object detector / ``"clip"`` scene classifier).
+    ``labels`` are the COCO class names a YOLO model keeps. ``prompts`` map a canonical tag to the
+    CLIP text prompts that detect it. ``threshold=None`` means "use the CLI ``--threshold``" (the
+    YOLO default); CLIP sets its own cosine threshold because the scales differ. ``options`` carries
+    kind-specific extras (e.g. CLIP ``model_name``/``pretrained``).
+    """
+
+    name: str
+    kind: str
+    labels: tuple[str, ...] = ()
+    prompts: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    threshold: float | None = None
+    enabled: bool = True
+    options: dict[str, Any] = field(default_factory=dict)
+
+
+def _clip_enabled() -> bool:
+    """CLIP is opt-in: it needs ``open_clip`` installed and a calibrated threshold.
+
+    Off by default so a stock run needs no extra dependency and stays behavior-identical; the Tennis
+    album still works via the YOLO ``tennis racket`` signal alone. Turn it on with ``IMMICH_CLIP=1``
+    after ``uv sync --group clip`` and calibrating the cosine threshold.
+    """
+    return os.getenv("IMMICH_CLIP", "0").strip().lower() in {"1", "true", "on", "yes"}
+
+
+# The models that produce signals, and the rules that turn those signals into albums. YOLO detects
+# objects (bird/dog/cat/tennis racket); CLIP (opt-in) detects scenes (tennis court). Tennis unions
+# the two so either a racket OR a court files a photo. Agreement (second-opinion) mode lands in
+# phase 3 by flipping a rule's mode/min_votes.
+MODELS: tuple[ModelSpec, ...] = (
+    ModelSpec(name="yolo", kind="yolo", labels=("bird", "dog", "cat", "tennis racket")),
+    ModelSpec(
+        name="clip",
+        kind="clip",
+        prompts={
+            "tennis court": ("a tennis court", "people playing tennis", "a tennis match"),
+        },
+        # Cosine similarity, NOT YOLO's 0.30 scale. Calibrated on sample images (ViT-B-32 laion2b):
+        # a real tennis court scored ~0.24, while "tennis court" on non-court photos stayed ~0.07,
+        # so 0.22 captures courts with a wide margin. Re-tune on your own library if you see noise.
+        threshold=0.22,
+        enabled=_clip_enabled(),
+        options={"model_name": "ViT-B-32", "pretrained": "laion2b_s34b_b79k"},
+    ),
+)
+
+ALBUM_RULES: tuple[AlbumRule, ...] = (
+    AlbumRule("Birds", (Signal("yolo", "bird"),), mode="union"),
+    AlbumRule("Dogs", (Signal("yolo", "dog"),), mode="union"),
+    AlbumRule("Cats", (Signal("yolo", "cat"),), mode="union"),
+    AlbumRule("Tennis", (Signal("yolo", "tennis racket"), Signal("clip", "tennis court")), mode="union"),
+)
+
+
+def yolo_labels(models: tuple[ModelSpec, ...] = MODELS) -> tuple[str, ...]:
+    """COCO labels every enabled YOLO model needs (union across specs)."""
+    labels: list[str] = []
+    for spec in models:
+        if spec.enabled and spec.kind == "yolo":
+            for label in spec.labels:
+                if label not in labels:
+                    labels.append(label)
+    return tuple(labels)
+
+
+def album_names(rules: tuple[AlbumRule, ...] = ALBUM_RULES) -> tuple[str, ...]:
+    """Album names in declaration order, de-duplicated."""
+    names: list[str] = []
+    for rule in rules:
+        if rule.album_name not in names:
+            names.append(rule.album_name)
+    return tuple(names)
+
+
+# Back-compat shim: kept so any external caller/import still resolves. No longer the routing source
+# (albums are driven by ALBUM_RULES). Derived from the YOLO model + rules to stay consistent.
+ANIMAL_ALBUMS = {
+    signal.tag: rule.album_name
+    for rule in ALBUM_RULES
+    for signal in rule.signals
+    if signal.model == "yolo"
+}
+ANIMAL_LABELS = yolo_labels()
 
 
 @dataclass(frozen=True)

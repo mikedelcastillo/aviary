@@ -19,7 +19,7 @@ from aviary_immich.album_filing import AlbumTarget, album_asset_ids, flush_album
 from aviary_immich.pipelines import run_gpu_pipeline, run_hybrid_pipeline
 from aviary_immich.records import bump_decision
 from aviary_immich.ui import emit, progress
-from aviary_immich.workers import init_scan_worker, scan_asset_worker, scan_asset_worker_with_detector
+from aviary_immich.workers import init_scan_worker, scan_asset_worker, scan_asset_worker_with_models
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,14 +95,15 @@ def main() -> None:
     args = parse_args()
 
     from aviary_immich.client import ImmichClient
-    from aviary_immich.config import ANIMAL_ALBUMS, ANIMAL_LABELS, load_accounts_config
+    from aviary_immich.config import ALBUM_RULES, MODELS, album_names, load_accounts_config
     from aviary_immich.console import (
         account_header,
         account_summary_table,
         config_panel,
         grand_total_table,
     )
-    from aviary_immich.detector import PretrainedBirdDetector, select_device
+    from aviary_immich.detector import select_device
+    from aviary_immich.models import build_models
     from aviary_immich.state import (
         CsvAppender,
         JsonlAppender,
@@ -157,12 +158,13 @@ def main() -> None:
             f"[yellow]Hybrid mode: {cpu_workers} CPU workers each load a full copy of "
             f"{args.model} into RAM — lower --cpu-workers if memory is tight.[/]"
         )
-    detector = None
+    models = None
     if worker_count == 1:
-        detector = PretrainedBirdDetector(args.model, args.threshold, selected_device, ANIMAL_LABELS)
+        models = build_models(MODELS, selected_device, args.model, args.threshold)
         if selected_device != "cpu":
-            emit(f"[dim]device {selected_device} — fp16 {'on' if detector.half else 'off'}[/]")
-    emit(f"[dim]classifying: {', '.join(ANIMAL_ALBUMS.values())}[/]")
+            half = any(getattr(m, "half", False) for m in models)
+            emit(f"[dim]device {selected_device} — fp16 {'on' if half else 'off'}[/]")
+    emit(f"[dim]classifying: {', '.join(album_names())}[/]")
 
     manifest_fields = [
         "account",
@@ -185,18 +187,9 @@ def main() -> None:
         state_path = args.state_dir / f"{account.slug}_scan.jsonl"
         state = load_jsonl_state(state_path)
 
-        stats: dict[str, Any] = {
-            "scanned": 0,
-            "already": 0,
-            "videos": 0,
-            "birds": 0,
-            "dogs": 0,
-            "cats": 0,
-            "other": 0,
-            "errors": 0,
-            "added": 0,
-            "elapsed": 0.0,
-        }
+        stats: dict[str, Any] = {"scanned": 0, "already": 0, "videos": 0, "other": 0, "errors": 0, "added": 0, "elapsed": 0.0}
+        for name in album_names():
+            stats[name] = 0
 
         with ExitStack() as stack:
             # One JSONL state file per account (a single scan, multi-label records); one CSV
@@ -204,7 +197,8 @@ def main() -> None:
             state_appender = stack.enter_context(JsonlAppender(state_path))
 
             targets: list[AlbumTarget] = []
-            for label, album_name in ANIMAL_ALBUMS.items():
+            for rule in ALBUM_RULES:
+                album_name = rule.album_name
                 album = {"id": "dry-run", "albumName": album_name}
                 if not args.dry_run:
                     album = client.ensure_owned_album(album_name)
@@ -213,7 +207,7 @@ def main() -> None:
                 appender = stack.enter_context(CsvAppender(manifest_path, manifest_fields))
                 targets.append(
                     AlbumTarget(
-                        label=label,
+                        rule=rule,
                         album_name=str(album.get("albumName") or album_name),
                         album_id=str(album["id"]),
                         album_ids=set() if args.dry_run else album_asset_ids(client, str(album["id"]), args.page_size),
@@ -253,7 +247,7 @@ def main() -> None:
                     if cpu_workers > 0:
                         run_hybrid_pipeline(
                             scan_assets,
-                            detector,
+                            models,
                             client,
                             config.base_url,
                             account.api_key,
@@ -269,7 +263,7 @@ def main() -> None:
                     else:
                         run_gpu_pipeline(
                             scan_assets,
-                            detector,
+                            models,
                             client,
                             config.base_url,
                             account.api_key,
@@ -283,10 +277,10 @@ def main() -> None:
                         )
                 elif worker_count == 1:
                     for asset in progress(scan_assets, desc=f"{account.slug} detect", unit="asset"):
-                        record = scan_asset_worker_with_detector(
+                        record = scan_asset_worker_with_models(
                             asset,
                             client,
-                            detector,
+                            models,
                             args.cache_dir,
                             account.slug,
                             args.thumbnail_size,
@@ -303,10 +297,10 @@ def main() -> None:
                         initargs=(
                             config.base_url,
                             account.api_key,
+                            MODELS,
                             args.model,
                             args.threshold,
                             selected_device,
-                            ANIMAL_LABELS,
                             str(args.cache_dir),
                             account.slug,
                             args.thumbnail_size,
@@ -353,13 +347,13 @@ def main() -> None:
                 stats["already"] += len(video_assets) - len(scan_videos)
 
                 if scan_videos:
-                    if detector is None:
-                        # CPU multiprocess path leaves detector unset; videos run on one main-process
-                        # detector (they are few, and frame fan-in is single-threaded regardless).
-                        detector = PretrainedBirdDetector(args.model, args.threshold, selected_device, ANIMAL_LABELS)
+                    if models is None:
+                        # CPU multiprocess path leaves models unset; videos run on one main-process
+                        # model set (they are few, and frame fan-in is single-threaded regardless).
+                        models = build_models(MODELS, selected_device, args.model, args.threshold)
                     run_video_pipeline(
                         scan_videos,
-                        detector,
+                        models,
                         client,
                         config.base_url,
                         account.api_key,

@@ -2,7 +2,7 @@
 
 The cv2 I/O in ``sample_video_frames`` is thin glue (mirroring ``extract_frames.py``); the
 selection/spacing decisions are factored into pure helpers tested here without cv2. The scan loop
-is exercised with the dependency-free ``FakeImmichClient``/``FakeDetector`` and a monkeypatched
+is exercised with the dependency-free ``FakeImmichClient``/``FakeModel`` and a monkeypatched
 ``sample_video_frames`` so no real video decode happens.
 """
 
@@ -15,6 +15,7 @@ import pytest
 import aviary_immich.video as video
 from aviary_immich.album_filing import AlbumTarget
 from aviary_immich.records import aggregate_video_predictions
+from aviary_immich.rules import AlbumRule, Signal
 from aviary_immich.video import (
     predict_frames_adaptive,
     run_video_pipeline,
@@ -23,11 +24,12 @@ from aviary_immich.video import (
     target_size,
 )
 from fakes import (
-    FakeDetector,
     FakeImmichClient,
+    FakeModel,
     OutOfMemoryError,
     make_asset,
     make_detection,
+    make_output,
     make_prediction,
 )
 
@@ -177,35 +179,40 @@ def test_aggregate_video_empty_predictions_is_not_match(monkeypatch):
 
 
 def test_predict_frames_adaptive_empty_returns_empty():
-    assert predict_frames_adaptive(FakeDetector(), [], 64) == []
+    assert predict_frames_adaptive([FakeModel()], [], 64) == []
 
 
 def test_predict_frames_adaptive_single_pass_when_no_oom():
-    detector = FakeDetector(responder=lambda items: [make_prediction(labels=["bird"]) for _ in items])
-    predictions = predict_frames_adaptive(detector, ["a", "b", "c"], batch_size=64)
-    assert len(predictions) == 3
-    # One call, all three frames at once.
-    assert detector.calls == [("arrays", 3, 3)]
+    model = FakeModel(responder=lambda items: [make_output(labels=["bird"]) for _ in items])
+    frame_outputs = predict_frames_adaptive([model], ["a", "b", "c"], batch_size=64)
+    assert len(frame_outputs) == 3
+    # One dict per frame, each keyed by the model name with the model's ModelOutput.
+    assert all([tag.name for tag in out["yolo"].tags] == ["bird"] for out in frame_outputs)
+    assert all(out["yolo"].max_confidence == pytest.approx(0.9) for out in frame_outputs)
+    # One call, all three frames at once (no per-model cap learned).
+    assert model.calls == [("arrays", 3, 3)]
 
 
 def test_predict_frames_adaptive_chunks_by_batch_size():
-    detector = FakeDetector(responder=lambda items: [make_prediction() for _ in items])
-    predict_frames_adaptive(detector, ["a", "b", "c", "d", "e"], batch_size=2)
-    # 5 frames, batch_size 2 -> chunks of 2, 2, 1.
-    assert [n for _, n, _ in detector.calls] == [2, 2, 1]
+    # The shared per-model adaptive helper does not pre-chunk by batch_size — it sends all frames in
+    # one forward pass and only splits on OOM — so a single all-frames call is expected.
+    model = FakeModel(responder=lambda items: [make_output() for _ in items])
+    predict_frames_adaptive([model], ["a", "b", "c", "d", "e"], batch_size=2)
+    assert [n for _, n, _ in model.calls] == [5]
 
 
 def test_predict_frames_adaptive_halves_on_cuda_oom():
     def responder(items):
         if len(items) > 1:
             raise OutOfMemoryError("CUDA out of memory")
-        return [make_prediction(labels=["bird"])]
+        return [make_output(labels=["bird"])]
 
-    detector = FakeDetector(responder=responder)
-    predictions = predict_frames_adaptive(detector, ["a", "b", "c", "d"], batch_size=64)
-    assert len(predictions) == 4
-    # Cap learned to 1 after halving 4 -> 2 -> 1.
-    assert detector._infer_cap == 1
+    model = FakeModel(responder=responder)
+    frame_outputs = predict_frames_adaptive([model], ["a", "b", "c", "d"], batch_size=64)
+    assert len(frame_outputs) == 4
+    assert all(out["yolo"].tags[0].name == "bird" for out in frame_outputs)
+    # Cap learned to 1 after halving 4 -> 2 -> 1 (set on the model's ``_infer_cap``).
+    assert model._infer_cap == 1
 
 
 def test_predict_frames_adaptive_non_oom_propagates():
@@ -213,7 +220,7 @@ def test_predict_frames_adaptive_non_oom_propagates():
         raise ValueError("decode error")
 
     with pytest.raises(ValueError, match="decode error"):
-        predict_frames_adaptive(FakeDetector(responder=responder), ["a", "b"], batch_size=64)
+        predict_frames_adaptive([FakeModel(responder=responder)], ["a", "b"], batch_size=64)
 
 
 # --------------------------------------------------------------------------- run_video_pipeline
@@ -244,9 +251,12 @@ def _video_args(tmp_path, **overrides):
 
 
 def _targets():
+    # Rule-based target: the Birds album fires on a ``yolo:bird`` signal (matching config.ALBUM_RULES
+    # so ``bump_decision`` tallies it under "Birds" too).
+    rule = AlbumRule("Birds", (Signal("yolo", "bird"),), mode="union")
     return [
         AlbumTarget(
-            label="bird",
+            rule=rule,
             album_name="Birds",
             album_id="alb-birds",
             album_ids=set(),
@@ -265,7 +275,8 @@ def test_run_video_pipeline_files_matches_into_albums(monkeypatch, tmp_path):
     monkeypatch.setattr(video, "sample_video_frames", lambda *a, **k: ["frame0", "frame1"])
     client = FakeImmichClient(video_assets=[make_asset(id="v1", name="clip.mp4")])
     _use_fake_download_client(monkeypatch, client)
-    detector = FakeDetector(responder=lambda items: [make_prediction(labels=["bird"]) for _ in items])
+    # The model emits a ``bird`` ModelOutput for every frame, keyed under its name "yolo".
+    models = [FakeModel(responder=lambda items: [make_output(labels=["bird"]) for _ in items])]
     appender = _Appender()
     state: dict = {}
     stats: dict = {}
@@ -274,7 +285,7 @@ def test_run_video_pipeline_files_matches_into_albums(monkeypatch, tmp_path):
 
     run_video_pipeline(
         [make_asset(id="v1", name="clip.mp4")],
-        detector,
+        models,
         client,
         "http://x/api",
         "key",
@@ -287,11 +298,12 @@ def test_run_video_pipeline_files_matches_into_albums(monkeypatch, tmp_path):
     )
 
     assert stats["videos"] == 1
-    assert stats["birds"] == 1
+    assert stats["Birds"] == 1
     assert "v1" in state
     record = state["v1"]
     assert record["asset_type"] == "video"
     assert record["frames_scanned"] == 2
+    assert record["labels"] == ["bird"]
     # The video was filed into the Birds album pending batch.
     assert targets[0].pending == ["v1"]
     assert client.downloaded_videos == ["v1"]
@@ -312,7 +324,7 @@ def test_run_video_pipeline_records_error_when_sampling_fails(monkeypatch, tmp_p
 
     run_video_pipeline(
         [make_asset(id="v1")],
-        FakeDetector(),
+        [FakeModel()],
         client,
         "http://x/api",
         "key",
@@ -339,7 +351,7 @@ def test_run_video_pipeline_deletes_temp_videos(monkeypatch, tmp_path):
 
     run_video_pipeline(
         [make_asset(id="v1", name="clip.mov")],
-        FakeDetector(responder=lambda items: [make_prediction(detections=[]) for _ in items]),
+        [FakeModel(responder=lambda items: [make_output() for _ in items])],
         client,
         "http://x/api",
         "key",

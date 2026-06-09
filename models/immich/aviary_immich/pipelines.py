@@ -15,7 +15,8 @@ import threading
 from typing import Any
 
 from aviary_immich.album_filing import AlbumTarget, handle_scan_record
-from aviary_immich.inference import scan_asset_batch_with_detector
+from aviary_immich.config import MODELS
+from aviary_immich.inference import scan_asset_batch_with_models
 from aviary_immich.records import bump_decision, chunks, scan_postfix
 from aviary_immich.thumbnails import cache_thumbnail_chunk
 from aviary_immich.workers import (
@@ -28,7 +29,7 @@ from aviary_immich.workers import (
 
 def run_gpu_pipeline(
     scan_assets: list[dict[str, Any]],
-    detector,
+    models,
     client,
     base_url: str,
     api_key: str,
@@ -107,8 +108,8 @@ def run_gpu_pipeline(
                     results_queue.put(record)
                 if error_records:
                     detect_advance(len(error_records))
-                for record in scan_asset_batch_with_detector(
-                    cached, detector, account.slug, inference_batch_size, detect_advance, use_arrays=True
+                for record in scan_asset_batch_with_models(
+                    cached, models, account.slug, inference_batch_size, detect_advance, use_arrays=True
                 ):
                     results_queue.put(record)
         except BaseException as exc:  # noqa: BLE001 - surfaced after join
@@ -172,7 +173,7 @@ def run_gpu_pipeline(
 
 def run_hybrid_pipeline(
     scan_assets: list[dict[str, Any]],
-    detector,
+    models,
     client,
     base_url: str,
     api_key: str,
@@ -187,10 +188,11 @@ def run_hybrid_pipeline(
 ) -> None:
     """Saturate the GPU and CPU at once: both steal from one shared asset queue.
 
-    A single GPU thread (the detector is not thread-safe) pulls batches and runs batched
-    inference, while a pool of CPU worker processes drains the same queue one asset at a
-    time. The faster device naturally takes more work. All finished records flow through a
-    single result thread that is the sole owner of the (non-thread-safe) state/album writes.
+    A single GPU thread (models are not thread-safe; the GPU thread runs all of them) pulls
+    batches and runs batched inference, while a pool of CPU worker processes drains the same
+    queue one asset at a time. The faster device naturally takes more work. All finished
+    records flow through a single result thread that is the sole owner of the (non-thread-safe)
+    state/album writes.
     """
     from aviary_immich.console import make_scan_progress
 
@@ -262,8 +264,8 @@ def run_hybrid_pipeline(
                     continue
                 for record in error_records:
                     results_queue.put(record)
-                records = scan_asset_batch_with_detector(
-                    cached, detector, account.slug, inference_batch_size, use_arrays=True
+                records = scan_asset_batch_with_models(
+                    cached, models, account.slug, inference_batch_size, use_arrays=True
                 )
                 for record in records:
                     results_queue.put(record)
@@ -320,10 +322,10 @@ def run_hybrid_pipeline(
             initargs=(
                 base_url,
                 api_key,
+                MODELS,
                 args.model,
                 args.threshold,
                 "cpu",
-                tuple(target.label for target in targets),
                 str(args.cache_dir),
                 account.slug,
                 args.thumbnail_size,

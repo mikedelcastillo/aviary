@@ -12,15 +12,18 @@ from aviary_immich.album_filing import (
     flush_album_batch,
     handle_scan_record,
 )
+from aviary_immich.rules import AlbumRule, Signal
 from fakes import FakeImmichClient, make_asset, make_detection, make_record
 
 
-def make_target(label, *, album_name=None, album_id=None, rows=None):
+def make_target(label, *, album_name=None, album_id=None, rows=None, model="yolo", mode="union", min_votes=1):
     """An AlbumTarget wired to capture manifest rows on the given list."""
     rows = [] if rows is None else rows
+    name = album_name or f"{label.title()}s"
+    rule = AlbumRule(name, (Signal(model, label),), mode=mode, min_votes=min_votes)
     return AlbumTarget(
-        label=label,
-        album_name=album_name or f"{label.title()}s",
+        rule=rule,
+        album_name=name,
         album_id=album_id or f"alb-{label}",
         album_ids=set(),
         manifested_ids=set(),
@@ -86,6 +89,36 @@ def test_handle_scan_record_no_match_returns_early(account, frozen_now):
     assert client.added == []
 
 
+def test_multi_signal_rule_files_once_per_album(account, frozen_now):
+    """An album with two signals from different models files a matching asset exactly once."""
+    client = FakeImmichClient()
+    rows = []
+    rule = AlbumRule(
+        "Tennis",
+        (Signal("yolo", "tennis racket"), Signal("clip", "tennis court")),
+        mode="union",
+    )
+    tennis = AlbumTarget(
+        rule=rule,
+        album_name="Tennis",
+        album_id="alb-tennis",
+        album_ids=set(),
+        manifested_ids=set(),
+        write_manifest=rows.append,
+    )
+    # Only the clip signal fired; the yolo signal did not.
+    record = make_record(asset_id="a1", labels=None, model_tags={"clip": {"tennis court": 0.9}})
+
+    handle_scan_record(record, None, account, client, [tennis], dry_run=False, batch_size=100)
+
+    assert tennis.pending == ["a1"]
+    assert tennis.pending_ids == {"a1"}
+    assert len(rows) == 1
+    assert rows[0]["decision"] == "Tennis"
+    assert rows[0]["album_name"] == "Tennis"
+    assert rows[0]["max_confidence"] == "0.9000"
+
+
 # --------------------------------------------------------------------------- manifest dedup
 
 
@@ -100,7 +133,7 @@ def test_manifest_written_once_for_new_asset(account, frozen_now):
     assert len(rows) == 1
     assert "a1" in bird.manifested_ids
     row = rows[0]
-    assert row["decision"] == bird.label
+    assert row["decision"] == bird.album_name
     assert row["max_confidence"] == "0.8765"
     assert row["account"] == "acct"
     assert row["asset_id"] == "a1"

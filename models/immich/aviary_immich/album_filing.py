@@ -5,15 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from aviary_immich.records import asset_name, category_confidence, detected_labels
+from aviary_immich.records import asset_name
+from aviary_immich.rules import AlbumRule, evaluate_rules, rule_confidence
 from aviary_immich.ui import emit
 
 
 @dataclass
 class AlbumTarget:
-    """One animal category and the per-album state needed to file photos into its album."""
+    """One album, its matching rule, and the per-album state needed to file photos into it."""
 
-    label: str
+    rule: AlbumRule
     album_name: str
     album_id: str
     album_ids: set[str]
@@ -50,17 +51,17 @@ def handle_scan_record(
     batch_size: int,
     stats: dict[str, int] | None = None,
 ) -> None:
-    """Fan a scan record out to every album whose category it matched."""
+    """Fan a scan record out to every album whose rule it matched."""
     from aviary_immich.state import utc_now
 
     asset_id = str(record["asset_id"])
     original_file_name = str(record.get("original_file_name") or (asset_name(asset) if asset else ""))
-    labels = detected_labels(record, {target.label for target in targets})
-    if not labels:
+    matched = evaluate_rules(record, tuple(target.rule for target in targets))
+    if not matched:
         return
 
     for target in targets:
-        if target.label not in labels:
+        if target.album_name not in matched:
             continue
 
         if asset_id not in target.manifested_ids:
@@ -68,8 +69,8 @@ def handle_scan_record(
                 {
                     "account": account.slug,
                     "asset_id": asset_id,
-                    "decision": target.label,
-                    "max_confidence": f"{category_confidence(record, target.label):.4f}",
+                    "decision": target.album_name,
+                    "max_confidence": f"{rule_confidence(record, target.rule):.4f}",
                     "original_file_name": original_file_name,
                     "album_name": target.album_name,
                     "created_at": utc_now(),

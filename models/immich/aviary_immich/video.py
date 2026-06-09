@@ -4,7 +4,7 @@ Videos break the image pipeline's ``1 asset == 1 frame == 1 prediction == 1 reco
 each video fans out to N sampled frames and fans back in to a single record. They are also a
 minority of assets whose cost is dominated by media download + decode (not GPU forward passes),
 so they get this dedicated, simpler path rather than threading fan-in through ``run_gpu_pipeline``.
-Frames within a single video are still GPU-batched (and OOM-halved) via the detector, so fp16 and
+Frames within a single video are still GPU-batched (and OOM-halved) per model, so fp16 and
 small-VRAM safety carry over from the image path.
 
 ``cv2`` is imported lazily inside the sampling glue so importing this module — and the CLI that
@@ -20,8 +20,7 @@ from typing import Any, Callable
 
 from aviary_immich.album_filing import AlbumTarget, handle_scan_record
 from aviary_immich.records import (
-    _is_cuda_oom,
-    aggregate_video_predictions,
+    aggregate_video_outputs,
     bump_decision,
     record_from_error,
     scan_postfix,
@@ -140,40 +139,24 @@ def sample_video_frames(
 # --------------------------------------------------------------------------- inference fan-in
 
 
-def predict_frames_adaptive(detector, frames: list[Any], batch_size: int) -> list[Any]:
-    """Run the detector over one video's frames, halving on CUDA OOM.
+def predict_frames_adaptive(models, frames: list[Any], batch_size: int) -> list[dict[str, Any]]:
+    """Run each model over one video's frames, then transpose into one dict per frame.
 
-    Like ``inference.predict_batch_adaptive`` but returns the per-frame ``BirdPrediction``s instead
-    of one record per item, because a video's frames fan back into a *single* record. A learned
-    ``detector._infer_cap`` (shared with the image path) and ``batch_size`` both bound how many
-    frames hit the GPU at once; a non-OOM failure propagates so the caller records one asset error.
+    Each model runs over *all* frames through ``inference._run_model_adaptive`` (the shared helper
+    that halves on CUDA OOM via the model's ``_infer_cap``, the same logic the image path uses), so
+    fp16 and small-VRAM safety carry over. The per-model ``list[ModelOutput]`` results — each aligned
+    to ``frames`` — are transposed so ``frame_outputs[i]`` maps ``model.name -> ModelOutput`` for
+    frame ``i``, ready to fan into a single record. A non-OOM failure propagates so the caller
+    records one asset error.
     """
-    from aviary_immich.inference import _free_cuda
+    from aviary_immich.inference import _run_model_adaptive
 
     frames = list(frames)
     if not frames:
         return []
 
-    cap = getattr(detector, "_infer_cap", None)
-    limit = batch_size if cap is None else min(batch_size, cap)
-    if limit >= 1 and len(frames) > limit:
-        predictions: list[Any] = []
-        for index in range(0, len(frames), limit):
-            predictions.extend(predict_frames_adaptive(detector, frames[index : index + limit], batch_size))
-        return predictions
-
-    try:
-        return detector.predict_batch_arrays(frames, batch_size=len(frames))
-    except Exception as exc:  # noqa: BLE001 - OOM is retried; anything else propagates to one error record
-        if not (_is_cuda_oom(exc) and len(frames) > 1):
-            raise
-
-    _free_cuda()
-    detector._infer_cap = max(1, len(frames) // 2)
-    mid = len(frames) // 2
-    return predict_frames_adaptive(detector, frames[:mid], batch_size) + predict_frames_adaptive(
-        detector, frames[mid:], batch_size
-    )
+    per_model = {model.name: _run_model_adaptive(model, list(frames), True) for model in models}
+    return [{name: per_model[name][i] for name in per_model} for i in range(len(frames))]
 
 
 # --------------------------------------------------------------------------- scan loop
@@ -187,7 +170,7 @@ def _video_suffix(asset: dict[str, Any]) -> str:
 
 def run_video_pipeline(
     video_assets: list[dict[str, Any]],
-    detector,
+    models,
     client,
     base_url: str,
     api_key: str,
@@ -201,7 +184,7 @@ def run_video_pipeline(
     """Download → sample → infer → aggregate → file each video, deleting the media after.
 
     Downloads and frame decode run on a bounded pool of ``download_workers`` threads (requests and
-    cv2 both release the GIL) a few videos ahead of the single-threaded detector, so inference is
+    cv2 both release the GIL) a few videos ahead of the single-threaded models, so inference is
     not stalled on the network. Each finished record flows through the *same* state write +
     ``bump_decision`` + ``handle_scan_record`` calls the image path uses, so videos file into the
     same albums and the caller's final ``flush_album_batch`` handles both. Temp videos are never
@@ -242,8 +225,8 @@ def run_video_pipeline(
             record = record_from_error(asset, account.slug, error)
         else:
             try:
-                predictions = predict_frames_adaptive(detector, frames or [], inference_batch_size)
-                record = aggregate_video_predictions(asset, account.slug, predictions, len(frames or []))
+                frame_outputs = predict_frames_adaptive(models, frames or [], inference_batch_size)
+                record = aggregate_video_outputs(asset, account.slug, frame_outputs, len(frames or []))
             except Exception as exc:  # noqa: BLE001 - one error record per video
                 record = record_from_error(asset, account.slug, exc)
         state_appender.write(record)

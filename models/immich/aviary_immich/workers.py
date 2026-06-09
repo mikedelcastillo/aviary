@@ -1,6 +1,6 @@
 """Multiprocessing worker glue, per-thread clients, and queue draining.
 
-The ``_WORKER_*`` module globals hold each spawned worker process's own client/detector. Under
+The ``_WORKER_*`` module globals hold each spawned worker process's own client/models. Under
 the "spawn" start method every child re-imports this module fresh, then the pool initializer
 (:func:`init_scan_worker`) populates the globals in that child; :func:`scan_asset_worker` then
 reads them in the same process. Keeping the initializer and worker in one module is what lets
@@ -15,11 +15,11 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from aviary_immich.records import record_from_error, record_from_prediction
+from aviary_immich.records import record_from_error, record_from_outputs
 from aviary_immich.thumbnails import thumbnail_for_asset
 
 _WORKER_CLIENT: Any = None
-_WORKER_DETECTOR: Any = None
+_WORKER_MODELS: Any = None
 _WORKER_CACHE_DIR: Path | None = None
 _WORKER_ACCOUNT_SLUG = ""
 _WORKER_THUMBNAIL_SIZE = "preview"
@@ -28,10 +28,10 @@ _WORKER_THUMBNAIL_SIZE = "preview"
 def init_scan_worker(
     base_url: str,
     api_key: str,
-    model: str,
-    threshold: float,
+    model_specs: tuple[Any, ...],
+    default_model: str,
+    default_threshold: float,
     device: str,
-    labels: tuple[str, ...],
     cache_dir: str,
     account_slug: str,
     thumbnail_size: str,
@@ -41,11 +41,11 @@ def init_scan_worker(
     os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
     from aviary_immich.client import ImmichClient
-    from aviary_immich.detector import PretrainedBirdDetector
+    from aviary_immich.models import build_models
 
-    global _WORKER_CLIENT, _WORKER_DETECTOR, _WORKER_CACHE_DIR, _WORKER_ACCOUNT_SLUG, _WORKER_THUMBNAIL_SIZE
+    global _WORKER_CLIENT, _WORKER_MODELS, _WORKER_CACHE_DIR, _WORKER_ACCOUNT_SLUG, _WORKER_THUMBNAIL_SIZE
     _WORKER_CLIENT = ImmichClient(base_url, api_key)
-    _WORKER_DETECTOR = PretrainedBirdDetector(model, threshold, device, labels)
+    _WORKER_MODELS = build_models(model_specs, device, default_model, default_threshold)
     try:
         import torch
 
@@ -58,7 +58,7 @@ def init_scan_worker(
 
 
 def scan_asset_worker(asset: dict[str, Any]) -> dict[str, Any]:
-    if _WORKER_CLIENT is None or _WORKER_DETECTOR is None or _WORKER_CACHE_DIR is None:
+    if _WORKER_CLIENT is None or _WORKER_MODELS is None or _WORKER_CACHE_DIR is None:
         raise RuntimeError("Scan worker was not initialized")
 
     try:
@@ -69,24 +69,24 @@ def scan_asset_worker(asset: dict[str, Any]) -> dict[str, Any]:
             str(asset["id"]),
             _WORKER_THUMBNAIL_SIZE,
         )
-        prediction = _WORKER_DETECTOR.predict(thumbnail_path)
-        return record_from_prediction(asset, _WORKER_ACCOUNT_SLUG, prediction)
+        outputs = {model.name: model.predict_paths([thumbnail_path], batch_size=1)[0] for model in _WORKER_MODELS}
+        return record_from_outputs(asset, _WORKER_ACCOUNT_SLUG, outputs)
     except Exception as exc:
         return record_from_error(asset, _WORKER_ACCOUNT_SLUG, exc)
 
 
-def scan_asset_worker_with_detector(
+def scan_asset_worker_with_models(
     asset: dict[str, Any],
     client,
-    detector,
+    models,
     cache_dir: Path,
     account_slug: str,
     thumbnail_size: str,
 ) -> dict[str, Any]:
     try:
         thumbnail_path = thumbnail_for_asset(client, cache_dir, account_slug, str(asset["id"]), thumbnail_size)
-        prediction = detector.predict(thumbnail_path)
-        return record_from_prediction(asset, account_slug, prediction)
+        outputs = {model.name: model.predict_paths([thumbnail_path], batch_size=1)[0] for model in models}
+        return record_from_outputs(asset, account_slug, outputs)
     except Exception as exc:
         return record_from_error(asset, account_slug, exc)
 

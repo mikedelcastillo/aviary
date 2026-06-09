@@ -72,12 +72,39 @@ uv run --no-sync generate-albums
 
 Defaults:
 
-- model: `yolo11x.pt`
-- class filter: COCO `bird`
+- YOLO model: `yolo11x.pt`
+- class filter: COCO `bird`, `dog`, `cat`, `tennis racket`
 - threshold: `0.30`
 - device: `auto` (`cuda:0`, then `mps`, then `cpu`)
 - inference batch: `64`, auto-halved on CUDA OOM (the 6 GB GTX 1060 self-tunes to 32)
-- album name: `Birds`
+- albums: `Birds`, `Dogs`, `Cats`, `Tennis`
+
+## Models and albums
+
+Albums are produced by a small multi-model system. **Models** emit *signals* (a tag + confidence);
+**album rules** combine those signals (`union` = any signal fires the album; `agreement` = N models
+must concur, for higher precision). Both live in `aviary_immich/config.py` (`MODELS`,
+`ALBUM_RULES`) — add an album by adding a rule; add a detector by adding a `ModelSpec`.
+
+Two model kinds ship:
+
+- **`yolo`** — the COCO object detector (bird/dog/cat/tennis racket).
+- **`clip`** — an optional [open_clip](https://github.com/mlfoundations/open_clip) zero-shot *scene*
+  classifier. Objects can't capture a *tennis court* (it's a scene, not an object), so `Tennis`
+  unions the YOLO `tennis racket` signal with the CLIP `tennis court` signal. CLIP is **off by
+  default**, so a stock run needs no extra dependency and `Tennis` still works from rackets alone.
+
+Enable CLIP (for court/scene detection):
+
+```bash
+uv sync --group clip          # installs open_clip_torch; rides your per-machine torch
+IMMICH_CLIP=1 uv run --no-sync generate-albums --dry-run --limit 500
+```
+
+CLIP cosine similarities are **not** on YOLO's `0.30` scale — calibrate the `clip` spec's
+`threshold` in `config.py` against a dry-run sample before trusting it. Once CLIP is enabled and
+calibrated, an album rule can require a *second opinion* by setting `mode="agreement",
+min_votes=2` (e.g. file a photo into `Birds` only when YOLO **and** CLIP both see a bird).
 
 ## Download Bird Album Images
 
