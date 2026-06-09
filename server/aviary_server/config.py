@@ -18,7 +18,16 @@ class CameraConfig:
     enabled: bool
     rtsp_url: str
     sample_fps: float = 1.0
+    # Base reconnect delay; grows exponentially up to ``max_reconnect_seconds``
+    # while a camera stays unreachable, then resets once frames flow again.
     reconnect_seconds: float = 5.0
+    max_reconnect_seconds: float = 60.0
+    # Hard caps so a missing camera can't block a worker thread forever. Tapo
+    # streams are flaky, so opening and reading must be able to give up.
+    open_timeout_seconds: float = 10.0
+    read_timeout_seconds: float = 15.0
+    # RTSP over TCP is far more reliable than the UDP default on lossy WiFi.
+    rtsp_transport: str = "tcp"
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,10 @@ class AppConfig:
 # ``TAPO_RSTP`` env var, each using these settings.
 SAMPLE_FPS = 3
 RECONNECT_SECONDS = 5
+MAX_RECONNECT_SECONDS = 60
+OPEN_TIMEOUT_SECONDS = 10
+READ_TIMEOUT_SECONDS = 15
+RTSP_TRANSPORT = "tcp"
 
 
 def _require_env(name: str) -> str:
@@ -77,6 +90,10 @@ def _build_cameras() -> list[CameraConfig]:
             rtsp_url=url,
             sample_fps=SAMPLE_FPS,
             reconnect_seconds=RECONNECT_SECONDS,
+            max_reconnect_seconds=MAX_RECONNECT_SECONDS,
+            open_timeout_seconds=OPEN_TIMEOUT_SECONDS,
+            read_timeout_seconds=READ_TIMEOUT_SECONDS,
+            rtsp_transport=RTSP_TRANSPORT,
         )
         for index, url in enumerate(_rtsp_urls())
     ]
