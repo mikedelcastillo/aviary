@@ -89,22 +89,37 @@ must concur, for higher precision). Both live in `aviary_immich/config.py` (`MOD
 Two model kinds ship:
 
 - **`yolo`** — the COCO object detector (bird/dog/cat/tennis racket).
-- **`clip`** — an optional [open_clip](https://github.com/mlfoundations/open_clip) zero-shot *scene*
+- **`clip`** — a [open_clip](https://github.com/mlfoundations/open_clip) zero-shot *scene*
   classifier. Objects can't capture a *tennis court* (it's a scene, not an object), so `Tennis`
-  unions the YOLO `tennis racket` signal with the CLIP `tennis court` signal. CLIP is **off by
-  default**, so a stock run needs no extra dependency and `Tennis` still works from rackets alone.
+  unions the YOLO `tennis racket` signal with the CLIP `tennis court` signal.
 
-Enable CLIP (for court/scene detection):
+CLIP is **on by default wherever `open_clip` is installed** (`IMMICH_CLIP=auto`). A machine without
+it falls back to YOLO-only automatically — no crash. Force it either way with `IMMICH_CLIP=1` / `0`.
 
 ```bash
-uv sync --group clip          # installs open_clip_torch; rides your per-machine torch
-IMMICH_CLIP=1 uv run --no-sync generate-albums --dry-run --limit 500
+bash scripts/install-clip.sh   # (or scripts/install-clip.ps1) installs open_clip without touching torch
+uv run --no-sync generate-albums --dry-run --limit 500   # CLIP auto-on once installed
 ```
 
-CLIP cosine similarities are **not** on YOLO's `0.30` scale — calibrate the `clip` spec's
-`threshold` in `config.py` against a dry-run sample before trusting it. Once CLIP is enabled and
-calibrated, an album rule can require a *second opinion* by setting `mode="agreement",
-min_votes=2` (e.g. file a photo into `Birds` only when YOLO **and** CLIP both see a bird).
+`install-clip` mirrors `install-gpu`: open_clip depends on torch, so it is installed out-of-band
+(`uv pip install --no-deps`) rather than via `uv sync`, which would revert your per-machine GPU
+torch build.
+
+With CLIP active, three things change, all defined in `config.py` `album_rules()`:
+
+- **Tennis** gains the court signal (racket OR court), and a **Selfies** album appears (a photo
+  needs both a YOLO `person` and a CLIP `selfie` scene — keeping group shots and scenery out).
+- **Birds / Dogs / Cats switch to a second opinion**: an asset is filed only when YOLO **and** CLIP
+  both see the animal (`mode="agreement", min_votes=2`). This raises precision at some recall cost.
+  With CLIP off they stay single-model `union`, so a stock run fills them normally.
+
+CLIP cosine similarities are **not** on YOLO's `0.30` scale — the `clip` threshold (`0.22`) was
+calibrated on sample images (correct classes ~0.24–0.30, wrong classes <0.21). Re-tune it, or set a
+per-signal `min_confidence`, against your own library if you see noise.
+
+Note: on a 6 GB card (GTX 1060) YOLO + CLIP are resident together — tight on VRAM. The per-model
+OOM-halving keeps it running by shrinking the YOLO batch; cards with more VRAM (5060/7900XT) are
+unaffected.
 
 ## Download Bird Album Images
 

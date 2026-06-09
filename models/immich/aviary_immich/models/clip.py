@@ -10,8 +10,8 @@ Heavy imports (``open_clip``, ``torch``, ``PIL``, ``numpy``) are lazy — this m
 light :mod:`aviary_immich.models.base`, so it can be imported without the CLIP stack present. The
 backend is only pulled when a :class:`ClipSceneModel` is actually constructed, which happens only
 when a CLIP :class:`~aviary_immich.config.ModelSpec` is enabled (off by default; ``IMMICH_CLIP=1``).
-Install it with ``uv sync --group clip`` (or ``uv pip install open_clip_torch``) — it rides whatever
-per-machine torch build is already in the venv.
+Install it with ``scripts/install-clip.{sh,ps1}`` (``uv pip install --no-deps``, so it rides the
+per-machine torch build already in the venv rather than reverting it like ``uv sync`` would).
 
 CLIP cosine similarities are NOT on YOLO's confidence scale (they cluster much lower and vary per
 prompt), so ``threshold`` must be calibrated separately — see the phase-2 verification in the plan.

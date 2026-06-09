@@ -34,42 +34,85 @@ class ModelSpec:
 
 
 def _clip_enabled() -> bool:
-    """CLIP is opt-in: it needs ``open_clip`` installed and a calibrated threshold.
+    """Whether the CLIP scene model runs (court/selfie signals + the animal second opinion).
 
-    Off by default so a stock run needs no extra dependency and stays behavior-identical; the Tennis
-    album still works via the YOLO ``tennis racket`` signal alone. Turn it on with ``IMMICH_CLIP=1``
-    after ``uv sync --group clip`` and calibrating the cosine threshold.
+    ``IMMICH_CLIP`` forces it: ``1``/``on`` enables, ``0``/``off`` disables. The default is ``auto``:
+    enabled wherever ``open_clip`` is importable, otherwise it gracefully falls back to YOLO-only so
+    a machine without the CLIP stack still runs (rather than crashing on the missing import). Install
+    it with ``scripts/install-clip.{sh,ps1}`` (out-of-band, like torch) to turn it on by default.
     """
-    return os.getenv("IMMICH_CLIP", "0").strip().lower() in {"1", "true", "on", "yes"}
+    override = os.getenv("IMMICH_CLIP", "auto").strip().lower()
+    if override in {"0", "false", "off", "no"}:
+        return False
+    if override in {"1", "true", "on", "yes"}:
+        return True
+    import importlib.util
+
+    return importlib.util.find_spec("open_clip") is not None
 
 
-# The models that produce signals, and the rules that turn those signals into albums. YOLO detects
-# objects (bird/dog/cat/tennis racket); CLIP (opt-in) detects scenes (tennis court). Tennis unions
-# the two so either a racket OR a court files a photo. Agreement (second-opinion) mode lands in
-# phase 3 by flipping a rule's mode/min_votes.
-MODELS: tuple[ModelSpec, ...] = (
-    ModelSpec(name="yolo", kind="yolo", labels=("bird", "dog", "cat", "tennis racket")),
-    ModelSpec(
-        name="clip",
-        kind="clip",
-        prompts={
-            "tennis court": ("a tennis court", "people playing tennis", "a tennis match"),
-        },
-        # Cosine similarity, NOT YOLO's 0.30 scale. Calibrated on sample images (ViT-B-32 laion2b):
-        # a real tennis court scored ~0.24, while "tennis court" on non-court photos stayed ~0.07,
-        # so 0.22 captures courts with a wide margin. Re-tune on your own library if you see noise.
-        threshold=0.22,
-        enabled=_clip_enabled(),
-        options={"model_name": "ViT-B-32", "pretrained": "laion2b_s34b_b79k"},
-    ),
-)
+def model_specs(clip_enabled: bool) -> tuple[ModelSpec, ...]:
+    """The models to run. YOLO detects objects; CLIP (opt-in) detects scenes.
 
-ALBUM_RULES: tuple[AlbumRule, ...] = (
-    AlbumRule("Birds", (Signal("yolo", "bird"),), mode="union"),
-    AlbumRule("Dogs", (Signal("yolo", "dog"),), mode="union"),
-    AlbumRule("Cats", (Signal("yolo", "cat"),), mode="union"),
-    AlbumRule("Tennis", (Signal("yolo", "tennis racket"), Signal("clip", "tennis court")), mode="union"),
-)
+    ``person`` is only consumed by the Selfies second-opinion, so YOLO only bothers detecting it
+    when CLIP is on. The CLIP spec is always present but ``enabled`` tracks the flag.
+    """
+    yolo_labels = ("bird", "dog", "cat", "tennis racket") + (("person",) if clip_enabled else ())
+    return (
+        ModelSpec(name="yolo", kind="yolo", labels=yolo_labels),
+        ModelSpec(
+            name="clip",
+            kind="clip",
+            prompts={
+                "bird": ("a photo of a bird", "a bird"),
+                "dog": ("a photo of a dog", "a dog"),
+                "cat": ("a photo of a cat", "a cat"),
+                "tennis court": ("a tennis court", "people playing tennis", "a tennis match"),
+                "selfie": ("a selfie", "a person taking a selfie", "a close-up self-portrait photo"),
+            },
+            # Cosine similarity, NOT YOLO's 0.30 scale. Calibrated on sample images (ViT-B-32
+            # laion2b): correct-class scores landed ~0.24-0.30 (bird 0.295, dog 0.274, court 0.236,
+            # selfie 0.244) while wrong-class scores stayed <0.21, so 0.22 separates them. Re-tune
+            # on your own library if you see noise.
+            threshold=0.22,
+            enabled=clip_enabled,
+            options={"model_name": "ViT-B-32", "pretrained": "laion2b_s34b_b79k"},
+        ),
+    )
+
+
+def _animal_rule(album: str, tag: str, clip_enabled: bool) -> AlbumRule:
+    """YOLO alone (union) by default; a YOLO+CLIP second opinion (agreement) when CLIP is on.
+
+    Agreement = both models must independently see the animal, raising precision at some recall
+    cost. It needs the second model, so it only engages under ``IMMICH_CLIP=1``; otherwise the album
+    falls back to YOLO-only union so a stock run still fills normally.
+    """
+    if clip_enabled:
+        return AlbumRule(album, (Signal("yolo", tag), Signal("clip", tag)), mode="agreement", min_votes=2)
+    return AlbumRule(album, (Signal("yolo", tag),), mode="union")
+
+
+def album_rules(clip_enabled: bool) -> tuple[AlbumRule, ...]:
+    """The album rules, adapted to whether the CLIP second model is available."""
+    rules: list[AlbumRule] = [
+        _animal_rule("Birds", "bird", clip_enabled),
+        _animal_rule("Dogs", "dog", clip_enabled),
+        _animal_rule("Cats", "cat", clip_enabled),
+        AlbumRule("Tennis", (Signal("yolo", "tennis racket"), Signal("clip", "tennis court")), mode="union"),
+    ]
+    if clip_enabled:
+        # A selfie has no distinct object, so require BOTH a person (YOLO) and a selfie composition
+        # (CLIP) — that keeps group shots and scenery that merely score high on "selfie" out. A
+        # CLIP-only concept, so the album exists only when CLIP is enabled.
+        rules.append(
+            AlbumRule("Selfies", (Signal("yolo", "person"), Signal("clip", "selfie")), mode="agreement", min_votes=2)
+        )
+    return tuple(rules)
+
+
+MODELS: tuple[ModelSpec, ...] = model_specs(_clip_enabled())
+ALBUM_RULES: tuple[AlbumRule, ...] = album_rules(_clip_enabled())
 
 
 def yolo_labels(models: tuple[ModelSpec, ...] = MODELS) -> tuple[str, ...]:

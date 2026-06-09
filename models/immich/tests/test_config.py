@@ -16,8 +16,10 @@ from aviary_immich.config import (
     ImmichConfig,
     _load_account,
     album_names,
+    album_rules,
     load_accounts_config,
     load_env_file,
+    model_specs,
     normalize_base_url,
     yolo_labels,
 )
@@ -59,6 +61,58 @@ def test_clip_spec_present_but_disabled_by_default(monkeypatch):
         ("clip", "tennis court"),
     }
     assert tennis.mode == "union"
+
+
+def test_album_rules_clip_off_is_yolo_union():
+    # CLIP off: single-model union so a stock run fills the animal albums normally; no Selfies.
+    rules = {rule.album_name: rule for rule in album_rules(clip_enabled=False)}
+    assert rules["Birds"].mode == "union"
+    assert {(s.model, s.tag) for s in rules["Birds"].signals} == {("yolo", "bird")}
+    assert rules["Tennis"].mode == "union"
+    assert "Selfies" not in rules  # CLIP-only concept
+
+
+def test_album_rules_clip_on_is_agreement_plus_selfies():
+    # CLIP on: animals require a YOLO+CLIP second opinion; the person∧selfie Selfies album appears.
+    rules = {rule.album_name: rule for rule in album_rules(clip_enabled=True)}
+    for animal, tag in (("Birds", "bird"), ("Dogs", "dog"), ("Cats", "cat")):
+        assert rules[animal].mode == "agreement" and rules[animal].min_votes == 2
+        assert {(s.model, s.tag) for s in rules[animal].signals} == {("yolo", tag), ("clip", tag)}
+    assert rules["Tennis"].mode == "union"  # Tennis stays a union (racket OR court)
+    assert rules["Selfies"].mode == "agreement" and rules["Selfies"].min_votes == 2
+    assert {(s.model, s.tag) for s in rules["Selfies"].signals} == {("yolo", "person"), ("clip", "selfie")}
+
+
+def test_clip_enabled_explicit_override(monkeypatch):
+    from aviary_immich.config import _clip_enabled
+
+    monkeypatch.setenv("IMMICH_CLIP", "1")
+    assert _clip_enabled() is True
+    monkeypatch.setenv("IMMICH_CLIP", "off")
+    assert _clip_enabled() is False
+
+
+def test_clip_enabled_auto_follows_open_clip_availability(monkeypatch):
+    # Default "auto": enabled iff open_clip is importable, so a box without the CLIP stack runs
+    # YOLO-only instead of crashing on the missing import.
+    import importlib.util
+
+    from aviary_immich.config import _clip_enabled
+
+    monkeypatch.setenv("IMMICH_CLIP", "auto")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object() if name == "open_clip" else None)
+    assert _clip_enabled() is True
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    assert _clip_enabled() is False
+
+
+def test_model_specs_track_clip_flag():
+    off = {spec.name: spec for spec in model_specs(clip_enabled=False)}
+    on = {spec.name: spec for spec in model_specs(clip_enabled=True)}
+    assert off["clip"].enabled is False and on["clip"].enabled is True
+    # `person` is only detected when CLIP (and thus the Selfies second-opinion) is active.
+    assert "person" not in off["yolo"].labels
+    assert "person" in on["yolo"].labels
 
 
 # --------------------------------------------------------------------------- normalize_base_url
