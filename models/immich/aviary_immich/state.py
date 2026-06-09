@@ -45,6 +45,60 @@ def append_csv(path: Path, fieldnames: list[str], row: dict[str, Any]) -> None:
         writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
+class JsonlAppender:
+    """Keep a JSONL file open across many writes instead of reopening per record."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle = None
+
+    def __enter__(self) -> "JsonlAppender":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = self.path.open("a", encoding="utf-8")
+        return self
+
+    def write(self, record: dict[str, Any]) -> None:
+        assert self._handle is not None, "JsonlAppender used outside of its context"
+        self._handle.write(json.dumps(record, sort_keys=True))
+        self._handle.write("\n")
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+            self._handle.close()
+            self._handle = None
+
+
+class CsvAppender:
+    """Keep a CSV manifest open across many writes, writing the header once if new."""
+
+    def __init__(self, path: Path, fieldnames: list[str]) -> None:
+        self.path = path
+        self.fieldnames = fieldnames
+        self._handle = None
+        self._writer = None
+
+    def __enter__(self) -> "CsvAppender":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        exists = self.path.exists() and self.path.stat().st_size > 0
+        self._handle = self.path.open("a", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(self._handle, fieldnames=self.fieldnames)
+        if not exists:
+            self._writer.writeheader()
+        return self
+
+    def write(self, row: dict[str, Any]) -> None:
+        assert self._writer is not None, "CsvAppender used outside of its context"
+        self._writer.writerow({field: row.get(field, "") for field in self.fieldnames})
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+            self._handle.close()
+            self._handle = None
+            self._writer = None
+
+
 def load_manifest_ids(path: Path, id_field: str = "asset_id") -> set[str]:
     if not path.exists():
         return set()

@@ -46,11 +46,31 @@ class PretrainedBirdDetector:
         self.model_name = model_name
         self.threshold = threshold
         self.device = select_device(device)
+        # Half precision (fp16) only applies on CUDA GPUs; cpu/mps run in fp32.
+        self.half = self.device.startswith("cuda")
         self.model = YOLO(model_name)
         self.bird_labels = {label.lower() for label in bird_labels}
         self.bird_class_ids = self._resolve_bird_class_ids()
         if not self.bird_class_ids:
             raise ValueError(f"Model {model_name} does not expose any of these labels: {sorted(self.bird_labels)}")
+        self._warmup()
+
+    def _warmup(self) -> None:
+        """Run a throwaway inference so the first real batch doesn't eat compile cost."""
+        try:
+            import numpy as np
+
+            blank = np.zeros((640, 640, 3), dtype=np.uint8)
+            self.model.predict(
+                source=blank,
+                conf=self.threshold,
+                device=self.device,
+                classes=sorted(self.bird_class_ids),
+                half=self.half,
+                verbose=False,
+            )
+        except Exception:
+            pass
 
     def predict(self, image_path: Path) -> BirdPrediction:
         return self.predict_batch([image_path], batch_size=1)[0]
@@ -66,6 +86,7 @@ class PretrainedBirdDetector:
             conf=self.threshold,
             device=self.device,
             classes=sorted(self.bird_class_ids),
+            half=self.half,
             verbose=False,
         )
 

@@ -6,8 +6,12 @@ from __future__ import annotations
 import argparse
 import multiprocessing as mp
 import os
+import queue
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 _WORKER_CLIENT: Any = None
 _WORKER_DETECTOR: Any = None
@@ -38,6 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--chunk-size", type=int, default=1000)
     parser.add_argument("--inference-batch-size", type=int, default=64)
+    parser.add_argument("--download-workers", type=int, default=min(16, (os.cpu_count() or 4) * 2))
+    parser.add_argument("--prefetch", type=int, default=2)
     parser.add_argument("--workers", type=int, default=int(os.getenv("IMMICH_BIRD_WORKERS", str(os.cpu_count() or 1))))
     parser.add_argument("--limit", type=int)
     parser.add_argument("--force-rescan", action="store_true")
@@ -93,15 +99,53 @@ def album_asset_ids(client, album_id: str, page_size: int) -> set[str]:
     return {str(asset["id"]) for asset in client.iter_album_assets(album_id, page_size=page_size)}
 
 
-def flush_album_batch(client, album_id: str, pending: list[str], dry_run: bool) -> None:
+def emit(message: str) -> None:
+    """Print a line that renders cleanly above an active rich progress display."""
+    from aviary_immich.console import get_console
+
+    console = get_console()
+    if console is None:
+        print(message)
+    else:
+        console.log(message)
+
+
+def bump_decision(stats: dict[str, int], decision: str) -> None:
+    if decision == "bird":
+        stats["birds"] += 1
+    elif decision == "error":
+        stats["errors"] += 1
+    else:
+        stats["other"] += 1
+
+
+def thread_local_client_factory(base_url: str, api_key: str) -> Callable[[], Any]:
+    """Return a factory that hands each thread its own (non-thread-safe) ImmichClient."""
+    local = threading.local()
+
+    def factory() -> Any:
+        client = getattr(local, "client", None)
+        if client is None:
+            from aviary_immich.client import ImmichClient
+
+            client = ImmichClient(base_url, api_key)
+            local.client = client
+        return client
+
+    return factory
+
+
+def flush_album_batch(client, album_id: str, pending: list[str], dry_run: bool) -> int:
     if not pending:
-        return
+        return 0
+    count = len(pending)
     if dry_run:
-        print(f"DRY RUN: would add {len(pending)} assets to album {album_id}")
+        emit(f"DRY RUN: would add {count} assets to album {album_id}")
     else:
         client.add_assets_to_album(album_id, pending)
-        print(f"Added {len(pending)} assets to album {album_id}")
+        emit(f"Added {count} assets to album {album_id}")
     pending.clear()
+    return count
 
 
 def init_scan_worker(
@@ -237,24 +281,40 @@ def record_from_error(asset: dict[str, Any], account_slug: str, exc: Exception) 
 
 def cache_thumbnail_chunk(
     assets: list[dict[str, Any]],
-    client,
+    client_factory: Callable[[], Any],
     cache_dir: Path,
     account_slug: str,
     thumbnail_size: str,
-    progress_handle=None,
+    download_workers: int = 1,
+    progress_advance: Callable[[int], None] | None = None,
 ) -> tuple[list[tuple[dict[str, Any], Path]], list[dict[str, Any]]]:
     cached: list[tuple[dict[str, Any], Path]] = []
     errors: list[dict[str, Any]] = []
 
-    for asset in assets:
+    def fetch(asset: dict[str, Any]):
+        client = client_factory()
         try:
             thumbnail_path = thumbnail_for_asset(client, cache_dir, account_slug, str(asset["id"]), thumbnail_size)
-            cached.append((asset, thumbnail_path))
-        except Exception as exc:
+            return asset, thumbnail_path, None
+        except Exception as exc:  # noqa: BLE001 - recorded per asset, not fatal
+            return asset, None, exc
+
+    def record(asset: dict[str, Any], path: Path | None, exc: Exception | None) -> None:
+        if exc is None:
+            cached.append((asset, path))
+        else:
             errors.append(record_from_error(asset, account_slug, exc))
-        finally:
-            if progress_handle is not None:
-                progress_handle.update(1)
+        if progress_advance is not None:
+            progress_advance(1)
+
+    if download_workers <= 1:
+        for asset in assets:
+            record(*fetch(asset))
+    else:
+        with ThreadPoolExecutor(max_workers=download_workers) as executor:
+            futures = [executor.submit(fetch, asset) for asset in assets]
+            for future in as_completed(futures):
+                record(*future.result())
 
     return cached, errors
 
@@ -264,7 +324,7 @@ def scan_asset_batch_with_detector(
     detector,
     account_slug: str,
     inference_batch_size: int,
-    progress_handle=None,
+    progress_advance: Callable[[int], None] | None = None,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
 
@@ -275,23 +335,23 @@ def scan_asset_batch_with_detector(
             predictions = detector.predict_batch(paths, batch_size=inference_batch_size)
         except Exception as exc:
             records.extend(record_from_error(asset, account_slug, exc) for asset in assets)
-            if progress_handle is not None:
-                progress_handle.update(len(assets))
+            if progress_advance is not None:
+                progress_advance(len(assets))
             continue
 
         if len(predictions) != len(assets):
             exc = RuntimeError(f"Detector returned {len(predictions)} results for {len(assets)} images")
             records.extend(record_from_error(asset, account_slug, exc) for asset in assets)
-            if progress_handle is not None:
-                progress_handle.update(len(assets))
+            if progress_advance is not None:
+                progress_advance(len(assets))
             continue
 
         records.extend(
             record_from_prediction(asset, account_slug, prediction)
             for asset, prediction in zip(assets, predictions)
         )
-        if progress_handle is not None:
-            progress_handle.update(len(assets))
+        if progress_advance is not None:
+            progress_advance(len(assets))
 
     return records
 
@@ -304,14 +364,14 @@ def handle_scan_record(
     album_id: str,
     dry_run: bool,
     batch_size: int,
-    manifest_path: Path,
-    manifest_fields: list[str],
+    write_manifest: Callable[[dict[str, Any]], None],
     manifested_ids: set[str],
     album_ids: set[str],
     pending: list[str],
     pending_ids: set[str],
+    stats: dict[str, int] | None = None,
 ) -> None:
-    from aviary_immich.state import append_csv, utc_now
+    from aviary_immich.state import utc_now
 
     asset_id = str(record["asset_id"])
     decision = str(record.get("decision", ""))
@@ -322,9 +382,7 @@ def handle_scan_record(
         return
 
     if asset_id not in manifested_ids:
-        append_csv(
-            manifest_path,
-            manifest_fields,
+        write_manifest(
             {
                 "account": account.slug,
                 "asset_id": asset_id,
@@ -333,7 +391,7 @@ def handle_scan_record(
                 "original_file_name": original_file_name,
                 "album_name": account.album_name,
                 "created_at": utc_now(),
-            },
+            }
         )
         manifested_ids.add(asset_id)
 
@@ -342,10 +400,130 @@ def handle_scan_record(
 
     pending.append(asset_id)
     pending_ids.add(asset_id)
+    if stats is not None:
+        stats["added"] = stats.get("added", 0) + 1
     if len(pending) >= batch_size:
         flush_album_batch(client, album_id, pending, dry_run)
         album_ids.update(pending_ids)
         pending_ids.clear()
+
+
+def run_gpu_pipeline(
+    scan_assets: list[dict[str, Any]],
+    detector,
+    client,
+    base_url: str,
+    api_key: str,
+    account,
+    album_id: str,
+    args: argparse.Namespace,
+    chunk_size: int,
+    inference_batch_size: int,
+    state: dict[str, dict[str, Any]],
+    state_appender,
+    write_manifest: Callable[[dict[str, Any]], None],
+    manifested_ids: set[str],
+    album_ids: set[str],
+    pending: list[str],
+    pending_ids: set[str],
+    stats: dict[str, int],
+) -> None:
+    """Overlap thumbnail downloads (producer) with GPU inference (consumer)."""
+    from aviary_immich.console import make_scan_progress
+
+    assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
+    client_factory = thread_local_client_factory(base_url, api_key)
+    work_queue: queue.Queue = queue.Queue(maxsize=max(1, args.prefetch))
+    sentinel = object()
+    producer_error: dict[str, BaseException] = {}
+
+    progress = make_scan_progress()
+    total = len(scan_assets)
+    tasks: dict[str, Any] = {"cache": None, "detect": None}
+
+    def cache_advance(n: int = 1) -> None:
+        if progress is not None:
+            progress.update(tasks["cache"], advance=n)
+
+    def detect_advance(n: int = 1) -> None:
+        if progress is not None:
+            progress.update(tasks["detect"], advance=n)
+
+    def produce() -> None:
+        try:
+            for chunk in chunks(scan_assets, chunk_size):
+                cached, error_records = cache_thumbnail_chunk(
+                    chunk,
+                    client_factory,
+                    args.cache_dir,
+                    account.slug,
+                    args.thumbnail_size,
+                    args.download_workers,
+                    cache_advance,
+                )
+                work_queue.put((cached, error_records))
+        except BaseException as exc:  # noqa: BLE001 - surfaced to the consumer below
+            producer_error["exc"] = exc
+        finally:
+            work_queue.put(sentinel)
+
+    def consume() -> None:
+        while True:
+            item = work_queue.get()
+            if item is sentinel:
+                break
+            cached, error_records = item
+            if error_records:
+                detect_advance(len(error_records))
+            records = list(error_records)
+            records += scan_asset_batch_with_detector(
+                cached, detector, account.slug, inference_batch_size, detect_advance
+            )
+            for record in records:
+                bump_decision(stats, str(record.get("decision", "")))
+                state_appender.write(record)
+                state[str(record["asset_id"])] = record
+                handle_scan_record(
+                    record,
+                    assets_by_id.get(str(record["asset_id"])),
+                    account,
+                    client,
+                    album_id,
+                    args.dry_run,
+                    args.batch_size,
+                    write_manifest,
+                    manifested_ids,
+                    album_ids,
+                    pending,
+                    pending_ids,
+                    stats,
+                )
+            if progress is not None:
+                progress.update(tasks["detect"], postfix=f"birds={stats['birds']} err={stats['errors']}")
+
+    def run() -> None:
+        producer = threading.Thread(target=produce, name=f"{account.slug}-downloader", daemon=True)
+        producer.start()
+        try:
+            consume()
+        finally:
+            # If the consumer exited early, drain the queue so the producer can finish.
+            while producer.is_alive():
+                try:
+                    work_queue.get(timeout=0.1)
+                except queue.Empty:
+                    pass
+            producer.join()
+        if "exc" in producer_error:
+            raise producer_error["exc"]
+
+    if progress is None:
+        run()
+    else:
+        with progress:
+            tasks["cache"] = progress.add_task("cache", total=total, postfix="")
+            tasks["detect"] = progress.add_task("detect", total=total, postfix="birds=0 err=0")
+            run()
 
 
 def main() -> None:
@@ -353,8 +531,21 @@ def main() -> None:
 
     from aviary_immich.client import ImmichClient
     from aviary_immich.config import load_accounts_config
+    from aviary_immich.console import (
+        account_header,
+        account_summary_table,
+        config_panel,
+        grand_total_table,
+    )
     from aviary_immich.detector import PretrainedBirdDetector, select_device
-    from aviary_immich.state import append_jsonl, load_jsonl_state, load_manifest_ids
+    from aviary_immich.state import (
+        CsvAppender,
+        JsonlAppender,
+        append_csv,
+        append_jsonl,
+        load_jsonl_state,
+        load_manifest_ids,
+    )
 
     config = load_accounts_config(args.accounts_config, args.env_file)
     selected_device = select_device(args.device)
@@ -363,14 +554,18 @@ def main() -> None:
     inference_batch_size = max(1, args.inference_batch_size)
     if selected_device != "cpu":
         worker_count = 1
-    print(
-        f"Detector config: model={args.model} device={selected_device} "
-        f"threshold={args.threshold} workers={worker_count} "
-        f"chunk_size={chunk_size} inference_batch_size={inference_batch_size}"
+    config_panel(
+        args,
+        selected_device,
+        worker_count,
+        chunk_size,
+        inference_batch_size,
+        args.download_workers,
+        args.prefetch,
     )
+    detector = None
     if worker_count == 1:
         detector = PretrainedBirdDetector(args.model, args.threshold, selected_device)
-        print(f"Detector loaded in main process: model={args.model} device={detector.device}")
 
     manifest_fields = [
         "account",
@@ -382,28 +577,48 @@ def main() -> None:
         "created_at",
     ]
 
+    per_account: list[dict[str, Any]] = []
+
     for account in config.accounts:
-        print(f"\nScanning account {account.slug} ({account.name})")
+        started = time.perf_counter()
         client = ImmichClient(config.base_url, account.api_key)
         user = client.get_my_user()
-        print(f"Connected as {user.get('email') or user.get('name') or user.get('id')}")
+        connected_as = str(user.get("email") or user.get("name") or user.get("id"))
 
         album = {"id": "dry-run", "albumName": account.album_name}
         if not args.dry_run:
             album = client.ensure_owned_album(account.album_name)
-            print(f"Using album {album.get('albumName')} ({album.get('id')})")
-        else:
-            print(f"DRY RUN: would create/find album {account.album_name}")
 
         state_path = args.state_dir / f"{account.slug}_scan.jsonl"
         manifest_path = args.manifest_dir / f"{account.slug}_birds.csv"
         state = load_jsonl_state(state_path)
         manifested_ids = load_manifest_ids(manifest_path)
         album_ids = set() if args.dry_run else album_asset_ids(client, str(album["id"]), args.page_size)
-        if not args.dry_run:
-            print(f"Album already has {len(album_ids)} assets")
+
+        account_header(
+            account.slug,
+            account.name,
+            connected_as,
+            str(album.get("albumName") or account.album_name),
+            str(album.get("id")) if not args.dry_run else None,
+            len(album_ids) if not args.dry_run else None,
+            args.dry_run,
+        )
+
         pending: list[str] = []
         pending_ids: set[str] = set()
+        stats: dict[str, Any] = {
+            "scanned": 0,
+            "already": 0,
+            "birds": 0,
+            "other": 0,
+            "errors": 0,
+            "added": 0,
+            "elapsed": 0.0,
+        }
+
+        def write_manifest_plain(row: dict[str, Any]) -> None:
+            append_csv(manifest_path, manifest_fields, row)
 
         assets = list(progress(client.iter_image_assets(page_size=args.page_size, limit=args.limit), desc=account.slug, unit="asset"))
         scan_assets: list[dict[str, Any]] = []
@@ -420,69 +635,41 @@ def main() -> None:
                     str(album["id"]),
                     args.dry_run,
                     args.batch_size,
-                    manifest_path,
-                    manifest_fields,
+                    write_manifest_plain,
                     manifested_ids,
                     album_ids,
                     pending,
                     pending_ids,
+                    stats,
                 )
             else:
                 scan_assets.append(asset)
-        print(
-            f"{account.slug}: {len(assets)} image assets, "
-            f"{len(assets) - len(scan_assets)} already scanned, "
-            f"{len(scan_assets)} need detection"
-        )
+        stats["scanned"] = len(scan_assets)
+        stats["already"] = len(assets) - len(scan_assets)
 
         if scan_assets:
             if selected_device != "cpu":
-                assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
-                cache_progress = progress_bar(total=len(scan_assets), desc=f"{account.slug} cache", unit="asset")
-                detect_progress = progress_bar(total=len(scan_assets), desc=f"{account.slug} detect", unit="asset")
-                try:
-                    for chunk in chunks(scan_assets, chunk_size):
-                        cached, error_records = cache_thumbnail_chunk(
-                            chunk,
-                            client,
-                            args.cache_dir,
-                            account.slug,
-                            args.thumbnail_size,
-                            cache_progress,
-                        )
-                        if detect_progress is not None and error_records:
-                            detect_progress.update(len(error_records))
-                        records = error_records + scan_asset_batch_with_detector(
-                            cached,
-                            detector,
-                            account.slug,
-                            inference_batch_size,
-                            detect_progress,
-                        )
-
-                        for record in records:
-                            append_jsonl(state_path, record)
-                            state[str(record["asset_id"])] = record
-                            handle_scan_record(
-                                record,
-                                assets_by_id.get(str(record["asset_id"])),
-                                account,
-                                client,
-                                str(album["id"]),
-                                args.dry_run,
-                                args.batch_size,
-                                manifest_path,
-                                manifest_fields,
-                                manifested_ids,
-                                album_ids,
-                                pending,
-                                pending_ids,
-                            )
-                finally:
-                    if cache_progress is not None:
-                        cache_progress.close()
-                    if detect_progress is not None:
-                        detect_progress.close()
+                with JsonlAppender(state_path) as state_appender, CsvAppender(manifest_path, manifest_fields) as manifest_appender:
+                    run_gpu_pipeline(
+                        scan_assets,
+                        detector,
+                        client,
+                        config.base_url,
+                        account.api_key,
+                        account,
+                        str(album["id"]),
+                        args,
+                        chunk_size,
+                        inference_batch_size,
+                        state,
+                        state_appender,
+                        manifest_appender.write,
+                        manifested_ids,
+                        album_ids,
+                        pending,
+                        pending_ids,
+                        stats,
+                    )
             elif worker_count == 1:
                 for asset in progress(scan_assets, desc=f"{account.slug} detect", unit="asset"):
                     record = scan_asset_worker_with_detector(
@@ -495,6 +682,7 @@ def main() -> None:
                     )
                     append_jsonl(state_path, record)
                     state[str(record["asset_id"])] = record
+                    bump_decision(stats, str(record.get("decision", "")))
                     handle_scan_record(
                         record,
                         asset,
@@ -503,12 +691,12 @@ def main() -> None:
                         str(album["id"]),
                         args.dry_run,
                         args.batch_size,
-                        manifest_path,
-                        manifest_fields,
+                        write_manifest_plain,
                         manifested_ids,
                         album_ids,
                         pending,
                         pending_ids,
+                        stats,
                     )
             else:
                 assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
@@ -534,6 +722,7 @@ def main() -> None:
                     ):
                         append_jsonl(state_path, record)
                         state[str(record["asset_id"])] = record
+                        bump_decision(stats, str(record.get("decision", "")))
                         handle_scan_record(
                             record,
                             assets_by_id.get(str(record["asset_id"])),
@@ -542,15 +731,20 @@ def main() -> None:
                             str(album["id"]),
                             args.dry_run,
                             args.batch_size,
-                            manifest_path,
-                            manifest_fields,
+                            write_manifest_plain,
                             manifested_ids,
                             album_ids,
                             pending,
                             pending_ids,
+                            stats,
                         )
 
         flush_album_batch(client, str(album["id"]), pending, args.dry_run)
+        stats["elapsed"] = time.perf_counter() - started
+        account_summary_table(account.slug, stats)
+        per_account.append({"slug": account.slug, **stats})
+
+    grand_total_table(per_account)
 
 
 if __name__ == "__main__":
