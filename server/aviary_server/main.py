@@ -19,8 +19,9 @@ import cv2
 from dotenv import load_dotenv
 
 from aviary_server.config import AppConfig, CameraConfig, _as_user_ids, build_config
-from aviary_server.dashboard import CameraStats, Dashboard, ObjectRegistry
+from aviary_server.dashboard import CameraStats, Dashboard
 from aviary_server.detector import BirdDetector, Detection, draw_detections
+from aviary_server.objects import ObjectRegistry
 from aviary_server.telegram import TelegramNotifier, run_userinfo_bot
 
 
