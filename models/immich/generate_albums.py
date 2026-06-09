@@ -320,6 +320,65 @@ def cache_thumbnail_chunk(
     return cached, errors
 
 
+def _is_cuda_oom(exc: BaseException) -> bool:
+    return exc.__class__.__name__ == "OutOfMemoryError" or "out of memory" in str(exc).lower()
+
+
+def _free_cuda() -> None:
+    try:
+        import gc
+
+        import torch
+
+        gc.collect()
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def predict_batch_adaptive(
+    detector,
+    assets: list[dict[str, Any]],
+    paths: list[Path],
+    account_slug: str,
+) -> list[dict[str, Any]]:
+    """Run one batch, halving and retrying on CUDA OOM so small-VRAM GPUs still run.
+
+    The first time a size OOMs we remember a smaller cap on the detector (``_infer_cap``) and
+    pre-split future batches to it, so we don't repeatedly attempt (and fail) the large size.
+    A single image that still OOMs, or any non-OOM failure, is recorded as a per-asset error.
+    """
+    cap = getattr(detector, "_infer_cap", None)
+    if cap is not None and len(paths) > cap:
+        records: list[dict[str, Any]] = []
+        for index in range(0, len(paths), cap):
+            records.extend(
+                predict_batch_adaptive(detector, assets[index : index + cap], paths[index : index + cap], account_slug)
+            )
+        return records
+
+    oom = False
+    try:
+        predictions = detector.predict_batch(paths, batch_size=len(paths))
+        if len(predictions) != len(assets):
+            raise RuntimeError(f"Detector returned {len(predictions)} results for {len(assets)} images")
+        return [record_from_prediction(asset, account_slug, prediction) for asset, prediction in zip(assets, predictions)]
+    except Exception as exc:  # noqa: BLE001 - recorded per asset, not fatal
+        if _is_cuda_oom(exc) and len(paths) > 1:
+            oom = True
+        else:
+            return [record_from_error(asset, account_slug, exc) for asset in assets]
+
+    # The except block has exited, so the exception (and the traceback that pinned the failed
+    # forward pass's GPU tensors) is gone — only now can empty_cache actually reclaim it.
+    _free_cuda()
+    detector._infer_cap = max(1, len(paths) // 2)
+    mid = len(paths) // 2
+    return predict_batch_adaptive(detector, assets[:mid], paths[:mid], account_slug) + predict_batch_adaptive(
+        detector, assets[mid:], paths[mid:], account_slug
+    )
+
+
 def scan_asset_batch_with_detector(
     assets_and_paths: list[tuple[dict[str, Any], Path]],
     detector,
@@ -332,25 +391,7 @@ def scan_asset_batch_with_detector(
     for batch in chunks(assets_and_paths, inference_batch_size):
         assets = [asset for asset, _ in batch]
         paths = [path for _, path in batch]
-        try:
-            predictions = detector.predict_batch(paths, batch_size=inference_batch_size)
-        except Exception as exc:
-            records.extend(record_from_error(asset, account_slug, exc) for asset in assets)
-            if progress_advance is not None:
-                progress_advance(len(assets))
-            continue
-
-        if len(predictions) != len(assets):
-            exc = RuntimeError(f"Detector returned {len(predictions)} results for {len(assets)} images")
-            records.extend(record_from_error(asset, account_slug, exc) for asset in assets)
-            if progress_advance is not None:
-                progress_advance(len(assets))
-            continue
-
-        records.extend(
-            record_from_prediction(asset, account_slug, prediction)
-            for asset, prediction in zip(assets, predictions)
-        )
+        records.extend(predict_batch_adaptive(detector, assets, paths, account_slug))
         if progress_advance is not None:
             progress_advance(len(assets))
 
@@ -796,6 +837,8 @@ def main() -> None:
     detector = None
     if worker_count == 1:
         detector = PretrainedBirdDetector(args.model, args.threshold, selected_device)
+        if selected_device != "cpu":
+            emit(f"[dim]device {selected_device} — fp16 {'on' if detector.half else 'off'}[/]")
 
     manifest_fields = [
         "account",

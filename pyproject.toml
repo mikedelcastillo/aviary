@@ -44,3 +44,9 @@ packages = [
 "models/training/scripts/evaluate.py" = "evaluate.py"
 "models/training/scripts/prepare_dataset.py" = "prepare_dataset.py"
 "models/annotation/scripts/extract_frames.py" = "extract_frames.py"
+
+# NOTE: `torch`/`torchvision` come in transitively via ultralytics (a default build that does
+# not match every GPU). The correct per-machine GPU build is installed into the venv by
+# scripts/install-gpu.{sh,ps1} after `uv sync` — see that script and models/immich/README.md.
+# (uv can't pick the build itself: the GTX 1060 and RTX 5060 are both "linux/x86_64" to uv yet
+# need incompatible wheels — cu118 with Pascal vs cu128 with Blackwell.)

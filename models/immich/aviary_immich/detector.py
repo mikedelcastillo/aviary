@@ -13,10 +13,42 @@ from typing import Iterable
 # Must be set before ultralytics is imported, so do it at module import time.
 os.environ.setdefault("YOLO_VERBOSE", "False")
 
+# Reduce CUDA fragmentation OOMs on small GPUs (e.g. the GTX 1060's 6 GB). Must be set before
+# the CUDA context initializes, i.e. before torch is imported in __init__.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 
 def _silence_ultralytics() -> None:
     for name in ("ultralytics", "yolo"):
         logging.getLogger(name).setLevel(logging.ERROR)
+
+
+def _should_use_fp16(device: str) -> bool:
+    """Enable fp16 only where it is actually fast.
+
+    - ``cpu`` / ``mps``: fp32.
+    - ROCm/AMD (``torch.version.hip`` set, e.g. the 7900XT): fp16 — fast on RDNA3.
+    - NVIDIA: only compute capability >= 7.0. Pascal (sm_6x, e.g. the GTX 1060) runs fp16 at
+      ~1/64 of fp32, so it must stay fp32.
+
+    Honors the ``IMMICH_BIRD_HALF`` override: ``auto`` (default) / ``1`` (force on) / ``0`` (off).
+    """
+    override = os.getenv("IMMICH_BIRD_HALF", "auto").strip().lower()
+    if override in {"0", "false", "off", "no"}:
+        return False
+    if override in {"1", "true", "on", "yes"}:
+        return True
+
+    if not device.startswith("cuda"):
+        return False
+    try:
+        import torch
+
+        if getattr(torch.version, "hip", None):
+            return True
+        return torch.cuda.get_device_capability(device)[0] >= 7
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -59,8 +91,8 @@ class PretrainedBirdDetector:
         self.model_name = model_name
         self.threshold = threshold
         self.device = select_device(device)
-        # Half precision (fp16) only applies on CUDA GPUs; cpu/mps run in fp32.
-        self.half = self.device.startswith("cuda")
+        # fp16 only where it actually helps — see _should_use_fp16 (Pascal/CPU stay fp32).
+        self.half = _should_use_fp16(self.device)
         self.model = YOLO(model_name)
         self.bird_labels = {label.lower() for label in bird_labels}
         self.bird_class_ids = self._resolve_bird_class_ids()

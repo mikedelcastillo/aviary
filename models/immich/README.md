@@ -32,29 +32,43 @@ Edit `models/immich/config/accounts.yaml` so every Immich account has a slug and
 an API key env var name. The config is safe to commit because the actual API key
 values stay in `.env`. Create API keys in Immich under User Settings -> API Keys.
 
-Install dependencies from the repo root (see the top-level README for installing
-uv):
+Install dependencies from the repo root (see the top-level README for installing uv):
 
 ```bash
-uv sync
+uv sync                  # installs everything (with a default CPU/CUDA torch)
+./scripts/install-gpu.sh # one time: installs the right GPU torch for THIS machine
 ```
 
-uv resolves a CUDA-enabled PyTorch build automatically on Linux NVIDIA hosts. On
-Apple Silicon, the script auto-selects `mps` when available.
+`uv sync` can't pick the GPU build itself — the GTX 1060 and RTX 5060 both look like
+`linux/x86_64` to uv yet need incompatible wheels (cu118/Pascal vs cu128/Blackwell), so
+`install-gpu.sh` detects the GPU and installs the matching torch into the venv. On Windows
+use `.\scripts\install-gpu.ps1` (AMD Radeon → native ROCm wheels from `repo.radeon.com`,
+which need **Python 3.12** + **AMD driver 26.2.2**).
+
+GPU notes:
+
+- **NVIDIA Pascal (GTX 1060)** runs **fp32** — fp16 is ~1/64 speed on Pascal and is
+  auto-disabled. **Blackwell (RTX 5060)** needs the `cu128` build.
+- fp16 selection is automatic; override with `IMMICH_BIRD_HALF=1` / `0` if needed.
+- On Apple Silicon, omit `install-gpu` — the default torch uses `mps`.
 
 ## Generate Birds Albums
 
-Start with a dry run:
+Run with `--no-sync` so uv keeps the GPU torch from `install-gpu` instead of reverting it to
+the default build. Start with a dry run:
 
 ```bash
-uv run generate-albums --dry-run --limit 25
+uv run --no-sync generate-albums --dry-run --limit 25
 ```
 
 Then run for real:
 
 ```bash
-uv run generate-albums
+uv run --no-sync generate-albums
 ```
+
+(Tip: `export UV_NO_SYNC=1` once in your shell profile and you can drop the flag —
+`uv run generate-albums` then works as-is.)
 
 Defaults:
 
@@ -62,6 +76,7 @@ Defaults:
 - class filter: COCO `bird`
 - threshold: `0.30`
 - device: `auto` (`cuda:0`, then `mps`, then `cpu`)
+- inference batch: `64`, auto-halved on CUDA OOM (the 6 GB GTX 1060 self-tunes to 32)
 - album name: `Birds`
 
 ## Download Bird Album Images
