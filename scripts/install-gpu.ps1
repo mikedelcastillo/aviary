@@ -1,7 +1,7 @@
 # Install the correct PyTorch GPU build for THIS machine into the uv venv.
 # Run once, after `uv sync`. Then run the app with:
 #
-#     uv run --no-sync generate-albums
+#     uv run --no-sync train
 #
 # The `--no-sync` matters: a plain `uv run`/`uv sync` reverts torch to the default build (uv
 # doesn't know about the GPU wheel installed here). To drop the flag, set UV_NO_SYNC=1 once
@@ -51,7 +51,7 @@ try {
     Write-Host ""
     uv run --no-sync python -c "import torch; print('torch', torch.__version__, '| cuda available:', torch.cuda.is_available())"
     Write-Host ""
-    Write-Host "Done. Run the app with:  uv run --no-sync generate-albums"
+    Write-Host "Done. Run the app with:  uv run --no-sync train"
 }
 finally {
     Pop-Location

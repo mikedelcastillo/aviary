@@ -1,7 +1,7 @@
 [project]
 name = "aviary"
 version = "0.1.0"
-description = "Bird detection across camera streams, Immich libraries, and model training"
+description = "Bird detection across camera streams and model training"
 requires-python = ">=3.11"
 dependencies = [
     # opencv (cv2) is pulled in transitively by ultralytics; no GUI calls are
@@ -10,40 +10,29 @@ dependencies = [
     "PyYAML>=6.0.0",
     "requests>=2.32.0",
     "ultralytics>=8.3.0",
-    "tqdm>=4.66.0",
-    "rich>=13.0.0",
 ]
 
 [project.scripts]
-generate-albums = "generate_albums:main"
-clear-cache = "clear_cache:main"
-download-birds = "download_immich_birds:main"
 train = "train:main"
 evaluate = "evaluate:main"
 prepare-dataset = "prepare_dataset:main"
 extract-frames = "extract_frames:main"
 server = "aviary_server.main:main"
-tests = "run_tests:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# The three subsystem packages (prefix stripped so they import top-level), ...
+# The subsystem packages (prefix stripped so they import top-level), ...
 [tool.hatch.build.targets.wheel]
 packages = [
     "server/aviary_server",
-    "models/immich/aviary_immich",
     "models/training/aviary_training",
 ]
 
 # ... plus each standalone script mapped explicitly to a top-level module, so
-# `generate_albums`, `train`, ... import cleanly as their entry points expect.
+# `train`, `evaluate`, ... import cleanly as their entry points expect.
 [tool.hatch.build.targets.wheel.force-include]
-"models/immich/generate_albums.py" = "generate_albums.py"
-"models/immich/clear_cache.py" = "clear_cache.py"
-"models/immich/download_immich_birds.py" = "download_immich_birds.py"
-"models/immich/run_tests.py" = "run_tests.py"
 "models/training/scripts/train.py" = "train.py"
 "models/training/scripts/evaluate.py" = "evaluate.py"
 "models/training/scripts/prepare_dataset.py" = "prepare_dataset.py"
@@ -51,26 +40,10 @@ packages = [
 
 # NOTE: `torch`/`torchvision` come in transitively via ultralytics (a default build that does
 # not match every GPU). The correct per-machine GPU build is installed into the venv by
-# scripts/install-gpu.{sh,ps1} after `uv sync` — see that script and models/immich/README.md.
+# scripts/install-gpu.{sh,ps1} after `uv sync` — see that script and the README.
 # (uv can't pick the build itself: the GTX 1060 and RTX 5060 are both "linux/x86_64" to uv yet
 # need incompatible wheels — cu118 with Pascal vs cu128 with Blackwell.)
 
 [dependency-groups]
 # Pure-Python; safe to install without disturbing the per-machine GPU torch build.
 dev = ["pytest>=8.0.0"]
-
-# NOTE: the optional CLIP scene model (open_clip) is intentionally NOT a uv dependency group.
-# open_clip_torch depends on torch/torchvision, so any `uv sync` resolving it would revert torch to
-# the default build and undo install-gpu (same reason torch isn't a uv dep here). Install it the
-# same way as torch — out-of-band, without touching the GPU build — via scripts/install-clip.{sh,ps1}
-# (uv pip install --no-deps). CLIP then defaults on; disable with IMMICH_CLIP=0.
-
-[tool.pytest.ini_options]
-# pythonpath puts the source tree (not the installed site-packages copy) at the FRONT of
-# sys.path, so `import aviary_immich` / `import generate_albums` resolve to live source — tests
-# exercise edited code without a reinstall. testpaths scopes discovery to the immich suite.
-# Source tree first so `import aviary_immich`/`generate_albums` hit live source; the tests dir is
-# on the path too so test modules can `from fakes import ...` shared doubles.
-pythonpath = ["models/immich", "models/immich/tests"]
-testpaths = ["models/immich/tests"]
-addopts = "-q"

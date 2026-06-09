@@ -5,7 +5,6 @@ Computer vision platform for monitoring a bird room with Tapo cameras.
 The project is split into three working areas:
 
 - `models/annotation/`: collect images and label birds with bounding boxes.
-- `models/immich/`: scan Immich libraries for likely bird photos and download them.
 - `models/training/`: prepare datasets and train an Ultralytics YOLO detector.
 - `server/`: consume camera streams, run inference, and send Telegram alerts.
 
@@ -26,15 +25,13 @@ Run any subsystem with a short named command (think `npm run`):
 
 | Command | Runs |
 | --- | --- |
-| `uv run generate-albums` | scan Immich accounts, add bird photos to each `Birds` album |
-| `uv run download-birds` | download each `Birds` album to `models/annotation/raw/immich_birds/` |
 | `uv run prepare-dataset` | normalize a CVAT YOLO export into a training dataset |
 | `uv run train` | train the Ultralytics YOLO detector |
 | `uv run evaluate` | evaluate a trained model |
 | `uv run extract-frames` | extract frames from an RTSP stream or video |
 | `uv run server` | run the camera inference + alert server |
 
-Pass flags after the command, e.g. `uv run generate-albums --dry-run --limit 25`.
+Pass flags after the command, e.g. `uv run extract-frames --help`.
 Run from the repo root so the scripts' default relative paths resolve.
 
 ## Quick Start
@@ -48,8 +45,9 @@ Run from the repo root so the scripts' default relative paths resolve.
 2. Collect seed images:
 
    - Put phone photos in `models/annotation/raw/phone_photos/`.
-   - Pull likely bird photos from Immich with `uv run generate-albums` and
-     `uv run download-birds`.
+   - Pull likely bird photos from Immich with the standalone
+     [immich-auto-albums](https://github.com/mikedelcastillo/immich-auto-albums) tool
+     into `models/annotation/raw/immich_birds/`.
    - Extract Tapo day frames into `models/annotation/raw/camera_frames/day/`.
    - Extract Tapo infrared frames into `models/annotation/raw/camera_frames/ir/`.
 
@@ -99,21 +97,10 @@ and set `model.device: mps` in `server/config/cameras.yaml`.
 
 ## Immich Import
 
-Create one Immich API key per account, copy
-`models/immich/config/accounts.example.yaml` to `models/immich/config/accounts.yaml`, and
-fill `.env` with `IMMICH_BASE_URL` plus the account API keys. Then generate the
-`Birds` albums:
-
-```bash
-uv run generate-albums
-```
-
-Reruns are resumable. All of the generator's data lives under
-`models/immich/data/`: previously scanned assets are read from
-`models/immich/data/state/` (this is what makes a rerun skip — and never
-re-download — an already-scanned asset), previously manifested bird IDs are read
-from `models/immich/data/manifests/`, and existing album asset IDs are checked
-before adding new assets so the script does not intentionally re-add duplicates.
+Bird-photo prefiltering from Immich now lives in its own repository:
+[immich-auto-albums](https://github.com/mikedelcastillo/immich-auto-albums). Use its
+`download-birds` command to pull each account's `Birds` album, then drop the images into
+`models/annotation/raw/immich_birds/` for labeling.
 
 ## External References
 

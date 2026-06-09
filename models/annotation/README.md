@@ -28,7 +28,8 @@ Do not draw boxes around reflections, toys, shadows, or bird-shaped objects.
 ## Folder Use
 
 - `raw/phone_photos/`: phone images from your library.
-- `raw/immich_birds/`: downloaded images from Immich `Birds` albums.
+- `raw/immich_birds/`: images from Immich `Birds` albums, pulled with the standalone
+  [immich-auto-albums](https://github.com/mikedelcastillo/immich-auto-albums) tool.
 - `raw/camera_frames/day/`: extracted visible-light camera frames.
 - `raw/camera_frames/ir/`: extracted infrared/night-mode frames.
 - `exports/`: CVAT YOLO exports, one folder per dataset version.
