@@ -1,4 +1,4 @@
-"""YOLO detector wrapper and image annotation helpers."""
+"""YOLO object detector wrapper and image annotation helpers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 
-from aviary_server.config import ModelConfig
+from lib.config import ModelConfig
 
 
 @dataclass
@@ -18,7 +18,7 @@ class Detection:
     bbox_xyxy: tuple[int, int, int, int]
 
 
-class BirdDetector:
+class ObjectDetector:
     def __init__(self, config: ModelConfig) -> None:
         if not Path(config.path).exists():
             raise FileNotFoundError(f"Model file does not exist: {config.path}")

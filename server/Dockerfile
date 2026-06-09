@@ -19,8 +19,8 @@ RUN apt-get update \
 COPY pyproject.toml uv.lock /app/
 RUN uv sync --frozen --no-install-project --no-dev
 
-COPY server/aviary_server /app/aviary_server
+COPY server/lib /app/lib
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-CMD ["python", "-m", "aviary_server.main"]
+CMD ["python", "-m", "lib.main"]

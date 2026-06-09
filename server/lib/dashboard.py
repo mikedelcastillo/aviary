@@ -1,35 +1,11 @@
-"""Live terminal dashboard for the camera monitor.
-
-Renders one in-place cell per camera (status + rolling statistics) plus a
-scrolling events panel, so an operator can see at a glance which streams are
-healthy and why one isn't. The capture threads only mutate their own
-``CameraStats``; the dashboard thread reads snapshots and repaints.
-
-Two things make the display usable in practice:
-
-* OpenCV/FFmpeg write h264 decode errors and RTSP timeout warnings straight to
-  file descriptor 2, bypassing Python logging. Left alone they shred any
-  in-place render. On a real terminal we redirect fd 2 to a logfile (kept for
-  deep debugging) and silence OpenCV's own logger, so the screen stays clean.
-* Under ``docker compose`` stdout is not an in-place-capable TTY. There we skip
-  the Live render entirely and emit a compact status line on an interval, which
-  reads fine in ``docker logs``.
-"""
+"""Live terminal dashboard for the camera monitor."""
 
 from __future__ import annotations
 
 import logging
-import os
-import sys
 import threading
-import time
 from collections import deque
 from datetime import datetime
-
-try:  # OpenCV is always present (transitive via ultralytics); guard anyway.
-    import cv2
-except Exception:  # pragma: no cover - cv2 import is exercised everywhere else
-    cv2 = None
 
 from rich.console import Console
 from rich.layout import Layout
@@ -37,10 +13,12 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from aviary_server.objects import ObjectRegistry
+from lib.objects import ObjectRegistry
+from lib.stats import CameraStats
+from lib.terminal_logging import NativeStderrRedirect, configure_dashboard_logging
 
 
-LOGGER = logging.getLogger("aviary_server")
+LOGGER = logging.getLogger("lib.dashboard")
 
 # Glyph + colour per lifecycle state. Keys are the only valid status strings.
 STATUS_STYLE = {
@@ -72,127 +50,8 @@ def _format_count(value: int) -> str:
     return str(value)
 
 
-class CameraStats:
-    """Thread-safe rolling metrics for a single camera.
-
-    The owning capture thread calls the ``record_*``/``set_status`` mutators;
-    the dashboard thread calls :meth:`snapshot`. All access is guarded so a
-    repaint never sees a half-updated set of counters.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        sample_fps: float,
-        registry: ObjectRegistry | None = None,
-        fps_window: float = 2.0,
-    ) -> None:
-        self.name = name
-        self.sample_fps = sample_fps
-        self._registry = registry
-        self._fps_window = fps_window
-        self._lock = threading.Lock()
-
-        self.status = "connecting"
-        self.backoff = 0.0
-        self.frames_total = 0
-        self.detections_total = 0
-        self.alerts_sent = 0
-        self.reconnects = 0
-        self.consecutive_failures = 0
-        self.fps = 0.0
-        self.last_label: str | None = None
-        self.last_detection_at: float | None = None
-        self.last_frame_at: float | None = None
-        self.started_at = time.monotonic()
-
-        self._fps_count = 0
-        self._fps_window_start = time.monotonic()
-
-    def set_status(self, status: str, backoff: float = 0.0) -> None:
-        with self._lock:
-            self.status = status
-            self.backoff = backoff
-
-    def record_inference(self, labels: list[str]) -> None:
-        now = time.monotonic()
-        with self._lock:
-            self.frames_total += 1
-            self.last_frame_at = now
-            self.consecutive_failures = 0
-            self._fps_count += 1
-            elapsed = now - self._fps_window_start
-            if elapsed >= self._fps_window:
-                self.fps = self._fps_count / elapsed
-                self._fps_count = 0
-                self._fps_window_start = now
-            if labels:
-                self.detections_total += len(labels)
-                self.last_label = ", ".join(sorted(set(labels)))
-                self.last_detection_at = now
-        # Update the shared registry outside this camera's lock to avoid holding
-        # two locks at once.
-        if labels and self._registry is not None:
-            self._registry.record(sorted(set(labels)), self.name)
-
-    def record_read_failure(self) -> None:
-        with self._lock:
-            self.consecutive_failures += 1
-
-    def record_reconnect(self) -> None:
-        # A torn-down session: zero the live rate so a stalled cell doesn't keep
-        # showing a stale FPS from before the drop.
-        with self._lock:
-            self.reconnects += 1
-            self.fps = 0.0
-            self._fps_count = 0
-            self._fps_window_start = time.monotonic()
-
-    def record_alert(self, count: int = 1) -> None:
-        with self._lock:
-            self.alerts_sent += count
-
-    def snapshot(self) -> dict:
-        now = time.monotonic()
-        with self._lock:
-            since_frame = None if self.last_frame_at is None else now - self.last_frame_at
-            since_detection = (
-                None if self.last_detection_at is None else now - self.last_detection_at
-            )
-            return {
-                "name": self.name,
-                "sample_fps": self.sample_fps,
-                "status": self.status,
-                "backoff": self.backoff,
-                "frames_total": self.frames_total,
-                "detections_total": self.detections_total,
-                "alerts_sent": self.alerts_sent,
-                "reconnects": self.reconnects,
-                "consecutive_failures": self.consecutive_failures,
-                "fps": self.fps,
-                "last_label": self.last_label,
-                "since_detection": since_detection,
-                "since_frame": since_frame,
-                "uptime": now - self.started_at,
-            }
-
-
-class _EventLogHandler(logging.Handler):
-    """Feeds Python log records into the dashboard's events panel."""
-
-    def __init__(self, dashboard: "Dashboard") -> None:
-        super().__init__()
-        self._dashboard = dashboard
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            self._dashboard.add_event(record.getMessage(), record.levelname)
-        except Exception:  # never let logging crash the app
-            pass
-
-
 class Dashboard:
-    """Owns the render loop, the events buffer, and log/stderr plumbing."""
+    """Owns the render loop and dashboard event buffer."""
 
     def __init__(
         self,
@@ -216,8 +75,7 @@ class Dashboard:
         self._events_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._saved_stderr_fd: int | None = None
-        self._logfile = None
+        self._stderr_redirect = NativeStderrRedirect(logfile)
 
     # -- public API ------------------------------------------------------
 
@@ -232,9 +90,14 @@ class Dashboard:
             self._events.append((timestamp, level.upper(), message))
 
     def start(self) -> None:
-        self._install_logging()
+        configure_dashboard_logging(
+            add_event=self.add_event,
+            is_tty=self.is_tty,
+            log_level=self._log_level,
+            logfile=self._logfile_path,
+        )
         if self.is_tty:
-            self._silence_native_stderr()
+            self._stderr_redirect.start()
         self._thread = threading.Thread(target=self._run, name="dashboard", daemon=True)
         self._thread.start()
 
@@ -242,61 +105,7 @@ class Dashboard:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
-        self._restore_native_stderr()
-
-    # -- logging / native-noise plumbing --------------------------------
-
-    def _install_logging(self) -> None:
-        root = logging.getLogger()
-        root.setLevel(self._log_level)
-        for handler in list(root.handlers):
-            root.removeHandler(handler)
-
-        # Always tee everything to the logfile so the h264/timeout detail and
-        # full tracebacks survive for post-mortem, regardless of render mode.
-        file_handler = logging.FileHandler(self._logfile_path)
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-        )
-        root.addHandler(file_handler)
-
-        if self.is_tty:
-            # On a terminal the events panel is the on-screen log; a stream
-            # handler would scribble over the Live render.
-            root.addHandler(_EventLogHandler(self))
-        else:
-            # Non-TTY (docker logs): plain stream logging is the right thing.
-            stream_handler = logging.StreamHandler(sys.stdout)
-            stream_handler.setFormatter(
-                logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-            )
-            root.addHandler(stream_handler)
-
-    def _silence_native_stderr(self) -> None:
-        if cv2 is not None:
-            try:
-                cv2.setLogLevel(0)  # 0 == LOG_LEVEL_SILENT
-            except Exception:
-                pass
-        try:
-            self._logfile = open(self._logfile_path, "a", buffering=1)
-            self._saved_stderr_fd = os.dup(2)
-            os.dup2(self._logfile.fileno(), 2)
-        except Exception:
-            self._saved_stderr_fd = None
-
-    def _restore_native_stderr(self) -> None:
-        if self._saved_stderr_fd is not None:
-            try:
-                sys.stderr.flush()
-            except Exception:
-                pass
-            os.dup2(self._saved_stderr_fd, 2)
-            os.close(self._saved_stderr_fd)
-            self._saved_stderr_fd = None
-        if self._logfile is not None:
-            self._logfile.close()
-            self._logfile = None
+        self._stderr_redirect.stop()
 
     # -- render loop -----------------------------------------------------
 
@@ -311,8 +120,8 @@ class Dashboard:
 
         # screen=True takes the full terminal (alternate buffer), so the layout
         # fills the entire width and height and tracks resizes. Trade-off: the
-        # screen is restored on exit, so the final frame isn't left behind —
-        # the logfile remains the post-mortem record.
+        # screen is restored on exit, so the final frame isn't left behind; the
+        # logfile remains the post-mortem record.
         with Live(
             self._render(),
             console=self.console,
@@ -343,13 +152,7 @@ class Dashboard:
     # -- rendering -------------------------------------------------------
 
     def _render(self) -> Layout:
-        """Compose a full-terminal layout: camera cells, objects, events.
-
-        Rebuilt every tick from the live console size, so it tracks terminal
-        resizes. The camera band is sized to exactly fit its grid of cells, the
-        events band is fixed, and the objects band flexes to absorb the rest of
-        the height. Camera cells expand across the full width.
-        """
+        """Compose a full-terminal layout: camera cells, objects, events."""
         width, height = self.console.size
         panels = [self._camera_panel(self.stats[name].snapshot()) for name in self.stats]
         # One row, equal-width columns that fill the terminal width.

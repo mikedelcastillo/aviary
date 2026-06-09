@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     environment:
-      AVIARY_MODEL_PATH: /app/models/current/bird_detector.pt
+      AVIARY_MODEL_PATH: /app/models/current/object_detector.pt
       AVIARY_SNAPSHOT_DIR: /app/snapshots
     volumes:
       - ./server/models:/app/models:ro

@@ -1,7 +1,7 @@
 [project]
 name = "aviary"
 version = "0.1.0"
-description = "Bird detection across camera streams and model training"
+description = "Object detection across camera streams and model training"
 requires-python = ">=3.11"
 dependencies = [
     # opencv (cv2) is pulled in transitively by ultralytics; no GUI calls are
@@ -18,7 +18,7 @@ train = "train:main"
 evaluate = "evaluate:main"
 prepare-dataset = "prepare_dataset:main"
 extract-frames = "extract_frames:main"
-server = "aviary_server.main:main"
+server = "lib.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -27,7 +27,7 @@ build-backend = "hatchling.build"
 # The subsystem packages (prefix stripped so they import top-level), ...
 [tool.hatch.build.targets.wheel]
 packages = [
-    "server/aviary_server",
+    "server/lib",
     "models/training/aviary_training",
 ]
 

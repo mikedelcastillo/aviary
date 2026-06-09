@@ -70,11 +70,11 @@ Run from the repo root so the scripts' default relative paths resolve.
    uv run train \
      --data models/training/datasets/v001/dataset.yaml \
      --epochs 100 \
-     --export-to server/models/current/bird_detector.pt
+     --export-to server/models/current/object_detector.pt
    ```
 
 7. Set `TAPO_RSTP` in `.env` (cameras are defined in
-   `server/aviary_server/config.py`), then run the server:
+   `server/lib/config.py`), then run the server:
 
    ```bash
    docker compose -f compose.dev.yml up --build
@@ -94,7 +94,7 @@ important for validation because they match the deployment view.
 The Dockerized server is the default deployment path for a Linux GPU machine.
 On Apple Silicon, Docker usually will not expose MPS acceleration to PyTorch.
 For that case, run the Python server directly in a local virtual environment
-and set the model `device` to `mps` in `server/aviary_server/config.py`.
+and set the model `device` to `mps` in `server/lib/config.py`.
 
 ## Immich Import
 

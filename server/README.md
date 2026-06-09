@@ -16,7 +16,7 @@ Update:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_USER_IDS`
 - `TAPO_RSTP` (comma-separated RTSP URLs, ordered to match the cameras in
-  `server/aviary_server/config.py`)
+  `server/lib/config.py`)
 - `AVIARY_MODEL_PATH` if running outside Docker
 
 ## Docker Run
@@ -28,7 +28,7 @@ docker compose -f compose.dev.yml up --build
 The Docker container expects the model at:
 
 ```text
-server/models/current/bird_detector.pt
+server/models/current/object_detector.pt
 ```
 
 ## Local Python Run
@@ -41,11 +41,11 @@ uv run server
 ```
 
 On Apple Silicon, set the model `device` to `mps` in the `ModelConfig` defaults
-in `server/aviary_server/config.py`.
+in `server/lib/config.py`.
 
 ## Camera Config
 
-Cameras are hardcoded in `CAMERA_SPECS` in `server/aviary_server/config.py`. Each
+Cameras are hardcoded in `CAMERA_SPECS` in `server/lib/config.py`. Each
 entry maps positionally to a URL in the comma-separated `TAPO_RSTP` env var and
 has:
 
@@ -55,4 +55,4 @@ has:
 - `reconnect_seconds`: delay after a stream failure.
 
 The RTSP URL for each camera comes from the matching entry in `TAPO_RSTP`. Any
-visible bird can alert.
+visible configured object can alert.
