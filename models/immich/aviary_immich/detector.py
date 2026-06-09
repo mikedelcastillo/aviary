@@ -6,7 +6,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 # Keep ultralytics/YOLO quiet so its banners and per-call logs don't corrupt the rich
 # progress display (workers load the model while the live display is already running).
@@ -94,6 +94,15 @@ class PretrainedBirdDetector:
         # fp16 only where it actually helps — see _should_use_fp16 (Pascal/CPU stay fp32).
         self.half = _should_use_fp16(self.device)
         self.model = YOLO(model_name)
+        # Fold Conv+BN once up front (numerically equivalent); ultralytics also auto-fuses on first
+        # predict, so this is mostly defensive.
+        try:
+            self.model.fuse()
+        except Exception:
+            pass
+        # Class-name map never changes after load — cache it instead of re-reading self.model.names
+        # for every detection in _prediction_from_result.
+        self._names = self.model.names
         self.bird_labels = {label.lower() for label in bird_labels}
         self.bird_class_ids = self._resolve_bird_class_ids()
         if not self.bird_class_ids:
@@ -124,9 +133,24 @@ class PretrainedBirdDetector:
         paths = list(image_paths)
         if not paths:
             return []
+        return self._predict([str(path) for path in paths], batch_size)
 
+    def predict_batch_arrays(self, images: Iterable[Any], batch_size: int = 64) -> list[BirdPrediction]:
+        """Like ``predict_batch`` but takes pre-decoded BGR HWC uint8 arrays.
+
+        Lets the caller decode (cv2.imread) on its own threads — which release the GIL — so the
+        single GPU thread isn't serialized on disk reads + decode between forward passes.
+        ``model.predict`` accepts a list of ndarrays as ``source`` natively; results are identical
+        to feeding the same files by path (ultralytics decodes paths with the same cv2 call).
+        """
+        images = list(images)
+        if not images:
+            return []
+        return self._predict(images, batch_size)
+
+    def _predict(self, source: list[Any], batch_size: int) -> list[BirdPrediction]:
         results = self.model.predict(
-            source=[str(path) for path in paths],
+            source=source,
             batch=max(1, batch_size),
             conf=self.threshold,
             device=self.device,
@@ -134,14 +158,13 @@ class PretrainedBirdDetector:
             half=self.half,
             verbose=False,
         )
-
         return [self._prediction_from_result(result) for result in results]
 
     def _prediction_from_result(self, result) -> BirdPrediction:
         detections: list[dict[str, float | int | str]] = []
         max_confidence = 0.0
 
-        names = self.model.names
+        names = self._names
         for box in result.boxes:
             class_id = int(box.cls[0].item())
             confidence = float(box.conf[0].item())
@@ -166,7 +189,7 @@ class PretrainedBirdDetector:
         )
 
     def _resolve_bird_class_ids(self) -> set[int]:
-        names = self.model.names
+        names = self._names
         if isinstance(names, dict):
             return {int(class_id) for class_id, label in names.items() if str(label).lower() in self.bird_labels}
         return {index for index, label in enumerate(names) if str(label).lower() in self.bird_labels}

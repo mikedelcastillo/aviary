@@ -77,17 +77,24 @@ def progress_bar(**kwargs):
     return tqdm(**kwargs)
 
 
+# Cached thumbnails are named "{asset_id}{suffix}"; probe these known suffixes (jpg first — the
+# Immich "preview" default and ~100% of the existing cache) with O(1) exists() instead of a
+# per-asset directory glob. The old glob scandir'd the whole account cache (~12-37 ms each on a
+# 15k-file dir, GIL-held) on every asset; a few stat() calls are ~1000x cheaper and, unlike the
+# glob, do not degrade to O(n^2) as a cold scan fills the directory.
+_CACHE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif")
+
+
 def thumbnail_for_asset(client, cache_dir: Path, account_slug: str, asset_id: str, size: str) -> Path:
     from aviary_immich.client import suffix_from_headers
 
     account_cache = cache_dir / account_slug
+    for suffix in _CACHE_SUFFIXES:
+        candidate = account_cache / f"{asset_id}{suffix}"
+        if candidate.exists():
+            return candidate
+
     account_cache.mkdir(parents=True, exist_ok=True)
-
-    existing = sorted(account_cache.glob(f"{asset_id}.*"))
-    existing = [path for path in existing if path.suffix != ".download"]
-    if existing:
-        return existing[0]
-
     temp_path = account_cache / f"{asset_id}.download"
     headers = client.download_thumbnail(asset_id, temp_path, size=size)
     final_path = account_cache / f"{asset_id}{suffix_from_headers(headers)}"
@@ -297,14 +304,28 @@ def cache_thumbnail_chunk(
     thumbnail_size: str,
     download_workers: int = 1,
     progress_advance: Callable[[int], None] | None = None,
-) -> tuple[list[tuple[dict[str, Any], Path]], list[dict[str, Any]]]:
-    cached: list[tuple[dict[str, Any], Path]] = []
+    decode: bool = False,
+) -> tuple[list[tuple[dict[str, Any], Any]], list[dict[str, Any]]]:
+    """Resolve (download if needed) each asset's thumbnail across ``download_workers`` threads.
+
+    With ``decode=True`` each worker also runs ``cv2.imread`` and the returned pairs carry the
+    decoded BGR array instead of the path. cv2 releases the GIL, so decoding here — on the
+    download pool — overlaps GPU inference instead of serializing on the single GPU thread.
+    """
+    cached: list[tuple[dict[str, Any], Any]] = []
     errors: list[dict[str, Any]] = []
+    if decode:
+        import cv2
 
     def fetch(asset: dict[str, Any]):
         client = client_factory()
         try:
             thumbnail_path = thumbnail_for_asset(client, cache_dir, account_slug, str(asset["id"]), thumbnail_size)
+            if decode:
+                image = cv2.imread(str(thumbnail_path), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise ValueError(f"Could not decode thumbnail {thumbnail_path}")
+                return asset, image, None
             return asset, thumbnail_path, None
         except Exception as exc:  # noqa: BLE001 - recorded per asset, not fatal
             return asset, None, exc
@@ -348,32 +369,40 @@ def _free_cuda() -> None:
 def predict_batch_adaptive(
     detector,
     assets: list[dict[str, Any]],
-    paths: list[Path],
+    items: list[Any],
     account_slug: str,
+    use_arrays: bool = False,
 ) -> list[dict[str, Any]]:
     """Run one batch, halving and retrying on CUDA OOM so small-VRAM GPUs still run.
+
+    ``items`` are either thumbnail paths (``use_arrays=False``) or pre-decoded BGR arrays
+    (``use_arrays=True``); both detector entry points share the ``(items, batch_size)`` interface,
+    so the OOM halving below is identical for either.
 
     The first time a size OOMs we remember a smaller cap on the detector (``_infer_cap``) and
     pre-split future batches to it, so we don't repeatedly attempt (and fail) the large size.
     A single image that still OOMs, or any non-OOM failure, is recorded as a per-asset error.
     """
+    predict = detector.predict_batch_arrays if use_arrays else detector.predict_batch
     cap = getattr(detector, "_infer_cap", None)
-    if cap is not None and len(paths) > cap:
+    if cap is not None and len(items) > cap:
         records: list[dict[str, Any]] = []
-        for index in range(0, len(paths), cap):
+        for index in range(0, len(items), cap):
             records.extend(
-                predict_batch_adaptive(detector, assets[index : index + cap], paths[index : index + cap], account_slug)
+                predict_batch_adaptive(
+                    detector, assets[index : index + cap], items[index : index + cap], account_slug, use_arrays
+                )
             )
         return records
 
     oom = False
     try:
-        predictions = detector.predict_batch(paths, batch_size=len(paths))
+        predictions = predict(items, batch_size=len(items))
         if len(predictions) != len(assets):
             raise RuntimeError(f"Detector returned {len(predictions)} results for {len(assets)} images")
         return [record_from_prediction(asset, account_slug, prediction) for asset, prediction in zip(assets, predictions)]
     except Exception as exc:  # noqa: BLE001 - recorded per asset, not fatal
-        if _is_cuda_oom(exc) and len(paths) > 1:
+        if _is_cuda_oom(exc) and len(items) > 1:
             oom = True
         else:
             return [record_from_error(asset, account_slug, exc) for asset in assets]
@@ -381,26 +410,27 @@ def predict_batch_adaptive(
     # The except block has exited, so the exception (and the traceback that pinned the failed
     # forward pass's GPU tensors) is gone — only now can empty_cache actually reclaim it.
     _free_cuda()
-    detector._infer_cap = max(1, len(paths) // 2)
-    mid = len(paths) // 2
-    return predict_batch_adaptive(detector, assets[:mid], paths[:mid], account_slug) + predict_batch_adaptive(
-        detector, assets[mid:], paths[mid:], account_slug
+    detector._infer_cap = max(1, len(items) // 2)
+    mid = len(items) // 2
+    return predict_batch_adaptive(detector, assets[:mid], items[:mid], account_slug, use_arrays) + predict_batch_adaptive(
+        detector, assets[mid:], items[mid:], account_slug, use_arrays
     )
 
 
 def scan_asset_batch_with_detector(
-    assets_and_paths: list[tuple[dict[str, Any], Path]],
+    assets_and_items: list[tuple[dict[str, Any], Any]],
     detector,
     account_slug: str,
     inference_batch_size: int,
     progress_advance: Callable[[int], None] | None = None,
+    use_arrays: bool = False,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
 
-    for batch in chunks(assets_and_paths, inference_batch_size):
+    for batch in chunks(assets_and_items, inference_batch_size):
         assets = [asset for asset, _ in batch]
-        paths = [path for _, path in batch]
-        records.extend(predict_batch_adaptive(detector, assets, paths, account_slug))
+        items = [item for _, item in batch]
+        records.extend(predict_batch_adaptive(detector, assets, items, account_slug, use_arrays))
         if progress_advance is not None:
             progress_advance(len(assets))
 
@@ -480,20 +510,33 @@ def run_gpu_pipeline(
     account,
     targets: list[AlbumTarget],
     args: argparse.Namespace,
-    chunk_size: int,
     inference_batch_size: int,
     state: dict[str, dict[str, Any]],
     state_appender,
     stats: dict[str, int],
 ) -> None:
-    """Overlap thumbnail downloads (producer) with GPU inference (consumer)."""
+    """Three-stage pipeline so the GPU thread does nothing but forward passes.
+
+    download+decode workers ──work_queue──▶ one GPU thread ──results_queue──▶ one result thread
+       (cv2.imread, GIL-free,   (bounded by      (batched           (unbounded;    (sole owner of
+        N threads)               prefetch)        inference only)     tiny dicts)    state + albums)
+
+    Decode moves to the download pool (cv2 releases the GIL) and all per-record bookkeeping —
+    state writes plus the blocking ``add_assets_to_album`` PUTs inside ``handle_scan_record`` —
+    moves to the result thread, so neither steals time from GPU inference. The producer emits at
+    ``inference_batch_size`` granularity (not ``chunk_size``) so decoded arrays in flight stay
+    bounded (~``prefetch * inference_batch_size`` images) and the downloader runs ahead of the GPU.
+    """
     from aviary_immich.console import make_scan_progress
 
     assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
     client_factory = thread_local_client_factory(base_url, api_key)
+    feed_batch = max(1, inference_batch_size)
     work_queue: queue.Queue = queue.Queue(maxsize=max(1, args.prefetch))
-    sentinel = object()
-    producer_error: dict[str, BaseException] = {}
+    results_queue: queue.Queue = queue.Queue()
+    work_sentinel = object()
+    results_sentinel = object()
+    errors: dict[str, BaseException] = {}
 
     progress = make_scan_progress()
     total = len(scan_assets)
@@ -508,67 +551,90 @@ def run_gpu_pipeline(
             progress.update(tasks["detect"], advance=n)
 
     def produce() -> None:
+        """Download + decode thumbnails ahead of the GPU, emitting array batches."""
         try:
-            for chunk in chunks(scan_assets, chunk_size):
+            for batch in chunks(scan_assets, feed_batch):
                 cached, error_records = cache_thumbnail_chunk(
-                    chunk,
+                    batch,
                     client_factory,
                     args.cache_dir,
                     account.slug,
                     args.thumbnail_size,
                     args.download_workers,
                     cache_advance,
+                    decode=True,
                 )
                 work_queue.put((cached, error_records))
-        except BaseException as exc:  # noqa: BLE001 - surfaced to the consumer below
-            producer_error["exc"] = exc
+        except BaseException as exc:  # noqa: BLE001 - surfaced after join
+            errors["producer"] = exc
         finally:
-            work_queue.put(sentinel)
+            work_queue.put(work_sentinel)
 
-    def consume() -> None:
+    def consume_gpu() -> None:
+        """The only GPU thread: run batched inference on decoded arrays, emit records."""
+        try:
+            while True:
+                item = work_queue.get()
+                if item is work_sentinel:
+                    break
+                cached, error_records = item
+                for record in error_records:
+                    results_queue.put(record)
+                if error_records:
+                    detect_advance(len(error_records))
+                for record in scan_asset_batch_with_detector(
+                    cached, detector, account.slug, inference_batch_size, detect_advance, use_arrays=True
+                ):
+                    results_queue.put(record)
+        except BaseException as exc:  # noqa: BLE001 - surfaced after join
+            errors["gpu"] = exc
+        finally:
+            results_queue.put(results_sentinel)
+
+    def result_loop() -> None:
+        """Sole owner of the non-thread-safe state dict, state file, and album writes."""
         while True:
-            item = work_queue.get()
-            if item is sentinel:
+            record = results_queue.get()
+            if record is results_sentinel:
                 break
-            cached, error_records = item
-            if error_records:
-                detect_advance(len(error_records))
-            records = list(error_records)
-            records += scan_asset_batch_with_detector(
-                cached, detector, account.slug, inference_batch_size, detect_advance
+            bump_decision(stats, record)
+            state_appender.write(record)
+            state[str(record["asset_id"])] = record
+            handle_scan_record(
+                record,
+                assets_by_id.get(str(record["asset_id"])),
+                account,
+                client,
+                targets,
+                args.dry_run,
+                args.batch_size,
+                stats,
             )
-            for record in records:
-                bump_decision(stats, record)
-                state_appender.write(record)
-                state[str(record["asset_id"])] = record
-                handle_scan_record(
-                    record,
-                    assets_by_id.get(str(record["asset_id"])),
-                    account,
-                    client,
-                    targets,
-                    args.dry_run,
-                    args.batch_size,
-                    stats,
-                )
             if progress is not None:
                 progress.update(tasks["detect"], postfix=scan_postfix(stats))
 
     def run() -> None:
         producer = threading.Thread(target=produce, name=f"{account.slug}-downloader", daemon=True)
+        gpu = threading.Thread(target=consume_gpu, name=f"{account.slug}-gpu", daemon=True)
         producer.start()
+        gpu.start()
         try:
-            consume()
+            result_loop()
         finally:
-            # If the consumer exited early, drain the queue so the producer can finish.
-            while producer.is_alive():
-                try:
-                    work_queue.get(timeout=0.1)
-                except queue.Empty:
-                    pass
-            producer.join()
-        if "exc" in producer_error:
-            raise producer_error["exc"]
+            # Drain both queues so a producer/GPU thread blocked on a full queue can still reach
+            # its sentinel and exit, even if the result loop aborted early.
+            while producer.is_alive() or gpu.is_alive():
+                for drained in (work_queue, results_queue):
+                    try:
+                        while True:
+                            drained.get_nowait()
+                    except queue.Empty:
+                        pass
+                producer.join(timeout=0.1)
+                gpu.join(timeout=0.1)
+        for key in ("producer", "gpu"):
+            if key in errors:
+                raise errors[key]
 
     if progress is None:
         run()
@@ -959,7 +1025,6 @@ def main() -> None:
                             account,
                             targets,
                             args,
-                            chunk_size,
                             inference_batch_size,
                             state,
                             state_appender,
