@@ -12,6 +12,7 @@ import cv2
 from lib.alerts import AlertDispatcher, AlertState
 from lib.config import CameraConfig
 from lib.detector import ObjectDetector
+from lib.objects import frame_size_from_shape
 from lib.stats import CameraStats
 
 
@@ -121,16 +122,22 @@ def monitor_camera(
                 next_inference_at = now + min_frame_interval
 
                 detections = detector.predict(frame)
+                frame_size = frame_size_from_shape(frame.shape)
                 # Record after inference returns, so the cell's FPS reflects true
                 # capture+YOLO throughput, not the raw stream rate.
-                stats.record_inference([detection.label for detection in detections])
+                stats.record_inference(
+                    [detection.label for detection in detections],
+                    detections,
+                    frame_size,
+                )
                 if detections:
-                    # Cooldown check is cheap (a lock + dict lookup); the slow
-                    # snapshot + Telegram work is handed to the dispatcher so
-                    # this loop returns to reading frames immediately.
-                    eligible = alert_state.eligible(camera.name, detections)
+                    # Eligibility check is cheap (a lock + dict lookup); the
+                    # slow snapshot + Telegram work is handed to the dispatcher
+                    # so this loop returns to reading frames immediately.
+                    eligible = alert_state.eligible(camera.name, detections, frame_size)
                     if eligible:
                         stats.record_alert(len(eligible))
+                        stats.record_object_alert(eligible)
                         dispatcher.submit(camera, frame, eligible)
         except Exception:
             LOGGER.exception("Camera loop error for %s", camera.name)

@@ -5,7 +5,8 @@ from __future__ import annotations
 import threading
 import time
 
-from lib.objects import ObjectRegistry
+from lib.detector import Detection
+from lib.objects import FrameSize, ObjectRegistry
 
 
 class CameraStats:
@@ -50,7 +51,12 @@ class CameraStats:
             self.status = status
             self.backoff = backoff
 
-    def record_inference(self, labels: list[str]) -> None:
+    def record_inference(
+        self,
+        labels: list[str],
+        detections: list[Detection] | None = None,
+        frame_size: FrameSize | None = None,
+    ) -> None:
         now = time.monotonic()
         with self._lock:
             self.frames_total += 1
@@ -68,8 +74,8 @@ class CameraStats:
                 self.last_detection_at = now
         # Update the shared registry outside this camera's lock to avoid holding
         # two locks at once.
-        if labels and self._registry is not None:
-            self._registry.record(sorted(set(labels)), self.name)
+        if detections and frame_size is not None and self._registry is not None:
+            self._registry.record(detections, self.name, frame_size)
 
     def record_read_failure(self) -> None:
         with self._lock:
@@ -87,6 +93,10 @@ class CameraStats:
     def record_alert(self, count: int = 1) -> None:
         with self._lock:
             self.alerts_sent += count
+
+    def record_object_alert(self, detections: list[Detection]) -> None:
+        if self._registry is not None:
+            self._registry.record_alert(detections, self.name)
 
     def snapshot(self) -> dict:
         now = time.monotonic()

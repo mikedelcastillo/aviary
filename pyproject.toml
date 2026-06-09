@@ -19,6 +19,7 @@ evaluate = "evaluate:main"
 prepare-dataset = "prepare_dataset:main"
 extract-frames = "extract_frames:main"
 server = "lib.main:main"
+tests = "pytest:console_main"
 
 [build-system]
 requires = ["hatchling"]

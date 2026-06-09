@@ -1,4 +1,4 @@
-"""Alert throttling, snapshot writing, and asynchronous delivery."""
+"""Alert eligibility, snapshot writing, and asynchronous delivery."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import cv2
 
 from lib.config import AppConfig, CameraConfig
 from lib.detector import Detection, draw_detections
+from lib.objects import FrameSize, detection_center, movement_ratio
 from lib.telegram.notifier import TelegramNotifier
 
 
@@ -37,29 +38,51 @@ def write_snapshot(snapshot_dir: Path, camera_name: str, frame, detections: list
 
 
 class AlertState:
-    def __init__(self, cooldown_seconds: int) -> None:
-        self.cooldown_seconds = cooldown_seconds
-        self._last_sent: dict[tuple[str, str], float] = {}
+    def __init__(self, last_seen_alert_seconds: float, bbox_movement_alert_ratio: float) -> None:
+        self.last_seen_alert_seconds = last_seen_alert_seconds
+        self.bbox_movement_alert_ratio = bbox_movement_alert_ratio
+        self._objects: dict[tuple[str, str], dict] = {}
         self._lock = threading.Lock()
 
-    def eligible(self, camera_name: str, detections: list[Detection]) -> list[Detection]:
+    def eligible(
+        self,
+        camera_name: str,
+        detections: list[Detection],
+        frame_size: FrameSize,
+    ) -> list[Detection]:
         now = time.monotonic()
         selected: list[Detection] = []
-        selected_labels: set[str] = set()
+        seen_labels: set[str] = set()
 
         with self._lock:
             for detection in detections:
-                key = (camera_name, detection.label)
-                if detection.label in selected_labels:
+                if detection.label in seen_labels:
                     continue
+                seen_labels.add(detection.label)
 
-                last_sent = self._last_sent.get(key, 0)
-                if now - last_sent >= self.cooldown_seconds:
+                key = (camera_name, detection.label)
+                center = detection_center(detection)
+                entry = self._objects.get(key)
+
+                should_alert = False
+                if entry is None:
+                    should_alert = True
+                elif now - entry["last_alert_at"] > self.last_seen_alert_seconds:
+                    should_alert = True
+                else:
+                    moved = movement_ratio(entry["center"], center, frame_size)
+                    should_alert = moved >= self.bbox_movement_alert_ratio
+
+                if should_alert:
                     selected.append(detection)
-                    selected_labels.add(detection.label)
 
-            for detection in selected:
-                self._last_sent[(camera_name, detection.label)] = now
+                updated = {
+                    "last_alert_at": now if should_alert else entry["last_alert_at"],
+                    "last_seen_at": now,
+                    "center": center,
+                    "frame_size": frame_size,
+                }
+                self._objects[key] = updated
 
         return selected
 
@@ -71,10 +94,9 @@ class AlertJob:
     detections: list[Detection]
 
 
-# Cap on undelivered alerts held in memory. The cooldown already throttles
-# enqueues to roughly one per camera per cooldown window, so this only bites
-# during a sustained Telegram outage. Dropping backlog is preferable to growing
-# memory without bound.
+# Cap on undelivered alerts held in memory. Alert eligibility already limits
+# repeated enqueues, so this only bites during a sustained Telegram outage.
+# Dropping backlog is preferable to growing memory without bound.
 ALERT_QUEUE_MAXSIZE = 32
 
 

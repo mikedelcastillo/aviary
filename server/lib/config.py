@@ -44,7 +44,8 @@ class TelegramConfig:
     enabled: bool
     bot_token: str
     user_ids: list[str]
-    cooldown_seconds: int = 600
+    last_seen_alert_seconds: float = 60.0
+    bbox_movement_alert_ratio: float = 0.10
     include_snapshot: bool = True
 
 
@@ -106,7 +107,8 @@ def build_config() -> AppConfig:
         enabled=True,
         bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         user_ids=_as_user_ids(os.environ.get("TELEGRAM_USER_IDS", "")),
-        cooldown_seconds=600,
+        last_seen_alert_seconds=15.0,
+        bbox_movement_alert_ratio=0.10,
         include_snapshot=True,
     )
 

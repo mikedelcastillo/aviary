@@ -61,6 +61,7 @@ class Dashboard:
         logfile: str = "aviary.log",
         refresh_per_second: int = 4,
         status_line_interval: float = 10.0,
+        movement_alert_ratio: float = 0.10,
     ) -> None:
         self.console = Console()
         self.is_tty = self.console.is_terminal
@@ -70,6 +71,7 @@ class Dashboard:
         self._logfile_path = logfile
         self._refresh = refresh_per_second
         self._status_line_interval = status_line_interval
+        self._movement_alert_ratio = movement_alert_ratio
 
         self._events: deque[tuple[str, str, str]] = deque(maxlen=8)
         self._events_lock = threading.Lock()
@@ -234,21 +236,37 @@ class Dashboard:
         if not rows:
             body: Text | Table = Text("(nothing seen yet)", style="grey50")
         else:
-            body = Table.grid(padding=(0, 2))
-            body.add_column(style="cyan")  # object
-            body.add_column(justify="right")  # last seen
-            body.add_column(justify="right", style="grey62")  # sightings
-            body.add_column(style="grey50")  # cameras
+            body = Table(expand=False, show_edge=False, box=None)
+            body.add_column("Camera", style="grey62")
+            body.add_column("Object", style="cyan")
+            body.add_column("Last Seen", style="grey62")
+            body.add_column("Last Alert", style="grey62")
+            body.add_column("Move")
+            body.add_column("Seen", style="grey62")
             for row in rows:
                 since = row["since"]
                 colour = "green" if since < 5 else "yellow" if since < 30 else "grey50"
+                since_alert = row["since_alert"]
+                if since_alert is None:
+                    alert = Text("—", style="grey50")
+                else:
+                    alert = Text(f"{_format_duration(since_alert)} ago", style="grey62")
+                movement_percent = row["movement_percent"]
+                if movement_percent is None:
+                    movement = Text("—", style="grey50")
+                else:
+                    threshold_percent = self._movement_alert_ratio * 100
+                    movement_colour = "yellow" if movement_percent >= threshold_percent else "grey62"
+                    movement = Text(f"{movement_percent:.1f}%", style=movement_colour)
                 body.add_row(
+                    row["camera"],
                     Text(row["label"], style="bold cyan"),
                     Text(f"{_format_duration(since)} ago", style=colour),
+                    alert,
+                    movement,
                     _format_count(row["count"]),
-                    ", ".join(row["cameras"]),
                 )
-        return Panel(body, title="objects (most recent first)", border_style="grey37")
+        return Panel(body, title="objects by camera (most recent first)", border_style="grey37")
 
     def _events_panel(self) -> Panel:
         with self._events_lock:

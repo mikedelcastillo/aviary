@@ -99,7 +99,10 @@ def main() -> None:
     # import/load chatter scrolls normally here instead of fighting the render.
     detector = ObjectDetector(app_config.model)
     notifier = build_notifier(app_config)
-    alert_state = AlertState(app_config.telegram.cooldown_seconds)
+    alert_state = AlertState(
+        app_config.telegram.last_seen_alert_seconds,
+        app_config.telegram.bbox_movement_alert_ratio,
+    )
     stop_event = threading.Event()
     install_signal_handlers(stop_event)
 
@@ -122,6 +125,7 @@ def main() -> None:
         registry,
         log_level=getattr(logging, args.log_level.upper(), logging.INFO),
         logfile=os.getenv("AVIARY_LOG_FILE", "aviary.log"),
+        movement_alert_ratio=app_config.telegram.bbox_movement_alert_ratio,
     )
     dashboard.start()
 
