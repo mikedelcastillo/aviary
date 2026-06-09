@@ -13,6 +13,30 @@ The first production goal is to identify each of the six birds. The model uses
 one detection class per bird plus `unknown_bird` for visible birds that are not
 confidently identifiable.
 
+## Tooling
+
+The whole repo is one [uv](https://docs.astral.sh/uv/) project. Install uv once
+(`curl -LsSf https://astral.sh/uv/install.sh | sh`), then from the repo root:
+
+```bash
+uv sync                  # create .venv and install every subsystem's deps
+```
+
+Run any subsystem with a short named command (think `npm run`):
+
+| Command | Runs |
+| --- | --- |
+| `uv run generate-albums` | scan Immich accounts, add bird photos to each `Birds` album |
+| `uv run download-birds` | download each `Birds` album to `models/annotation/raw/immich_birds/` |
+| `uv run prepare-dataset` | normalize a CVAT YOLO export into a training dataset |
+| `uv run train` | train the Ultralytics YOLO detector |
+| `uv run evaluate` | evaluate a trained model |
+| `uv run extract-frames` | extract frames from an RTSP stream or video |
+| `uv run server` | run the camera inference + alert server |
+
+Pass flags after the command, e.g. `uv run generate-albums --dry-run --limit 25`.
+Run from the repo root so the scripts' default relative paths resolve.
+
 ## Quick Start
 
 1. Copy the environment template and fill in secrets:
@@ -24,8 +48,8 @@ confidently identifiable.
 2. Collect seed images:
 
    - Put phone photos in `models/annotation/raw/phone_photos/`.
-   - Pull likely bird photos from Immich with `models/immich/generate_albums.py` and
-     `models/immich/download_immich_birds.py`.
+   - Pull likely bird photos from Immich with `uv run generate-albums` and
+     `uv run download-birds`.
    - Extract Tapo day frames into `models/annotation/raw/camera_frames/day/`.
    - Extract Tapo infrared frames into `models/annotation/raw/camera_frames/ir/`.
 
@@ -37,7 +61,7 @@ confidently identifiable.
 5. Prepare a YOLO dataset:
 
    ```bash
-   python models/training/scripts/prepare_dataset.py \
+   uv run prepare-dataset \
      --source models/annotation/exports/v001 \
      --output models/training/datasets/v001
    ```
@@ -45,7 +69,7 @@ confidently identifiable.
 6. Train:
 
    ```bash
-   python models/training/scripts/train.py \
+   uv run train \
      --data models/training/datasets/v001/dataset.yaml \
      --epochs 100 \
      --export-to server/models/current/bird_detector.pt
@@ -77,13 +101,11 @@ and set `model.device: mps` in `server/config/cameras.yaml`.
 
 Create one Immich API key per account, copy
 `models/immich/config/accounts.example.yaml` to `models/immich/config/accounts.yaml`, and
-fill `.env` with `IMMICH_BASE_URL` plus the account API keys.
+fill `.env` with `IMMICH_BASE_URL` plus the account API keys. Then generate the
+`Birds` albums:
 
-On Windows, install the Immich dependencies in the local virtual environment,
-then use the root PowerShell wrapper to generate the `Birds` albums:
-
-```powershell
-.\scripts\immich_generate_albums.ps1
+```bash
+uv run generate-albums
 ```
 
 Reruns are resumable. Previously scanned assets are read from

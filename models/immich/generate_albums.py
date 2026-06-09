@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--download-workers", type=int, default=min(16, (os.cpu_count() or 4) * 2))
     parser.add_argument("--prefetch", type=int, default=2)
     parser.add_argument("--workers", type=int, default=int(os.getenv("IMMICH_BIRD_WORKERS", str(os.cpu_count() or 1))))
+    parser.add_argument("--cpu-workers", type=int, default=-1)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--force-rescan", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -527,6 +528,216 @@ def run_gpu_pipeline(
             run()
 
 
+def drain_queue_iter(work_queue: queue.Queue, stop_event: threading.Event | None = None) -> Iterable[Any]:
+    """Yield items from ``work_queue`` until it is empty (or ``stop_event`` is set)."""
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return
+        try:
+            yield work_queue.get_nowait()
+        except queue.Empty:
+            return
+
+
+def run_hybrid_pipeline(
+    scan_assets: list[dict[str, Any]],
+    detector,
+    client,
+    base_url: str,
+    api_key: str,
+    account,
+    album_id: str,
+    args: argparse.Namespace,
+    inference_batch_size: int,
+    cpu_workers: int,
+    state: dict[str, dict[str, Any]],
+    state_appender,
+    write_manifest: Callable[[dict[str, Any]], None],
+    manifested_ids: set[str],
+    album_ids: set[str],
+    pending: list[str],
+    pending_ids: set[str],
+    stats: dict[str, int],
+) -> None:
+    """Saturate the GPU and CPU at once: both steal from one shared asset queue.
+
+    A single GPU thread (the detector is not thread-safe) pulls batches and runs batched
+    inference, while a pool of CPU worker processes drains the same queue one asset at a
+    time. The faster device naturally takes more work. All finished records flow through a
+    single result thread that is the sole owner of the (non-thread-safe) state/album writes.
+    """
+    from aviary_immich.console import make_scan_progress
+
+    assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
+    client_factory = thread_local_client_factory(base_url, api_key)
+
+    asset_queue: queue.Queue = queue.Queue()
+    for asset in scan_assets:
+        asset_queue.put(asset)
+    results_queue: queue.Queue = queue.Queue()
+    # Bounded so the downloader runs a few batches ahead of the GPU (overlap) without using
+    # unbounded memory. This is what keeps the GPU busy instead of idling on each download.
+    gpu_feed_queue: queue.Queue = queue.Queue(maxsize=max(2, args.prefetch))
+    gpu_producer_done = threading.Event()
+    stop_event = threading.Event()
+    error_sink: dict[str, BaseException] = {}
+    # Each device thread is the only writer of its own counter, so plain ints are safe.
+    device_counts = {"gpu": 0, "cpu": 0}
+
+    progress = make_scan_progress()
+    total = len(scan_assets)
+    tasks: dict[str, Any] = {"scan": None}
+
+    def gpu_producer() -> None:
+        """Download thumbnails ahead of the GPU so inference never waits on the network.
+
+        Steals in inference-batch units (not big chunks) so the CPU pool keeps getting a
+        fair share of the shared queue.
+        """
+        try:
+            while not stop_event.is_set() and "gpu_consumer" not in error_sink:
+                batch: list[dict[str, Any]] = []
+                for _ in range(inference_batch_size):
+                    try:
+                        batch.append(asset_queue.get_nowait())
+                    except queue.Empty:
+                        break
+                if not batch:
+                    break
+                cached, error_records = cache_thumbnail_chunk(
+                    batch,
+                    client_factory,
+                    args.cache_dir,
+                    account.slug,
+                    args.thumbnail_size,
+                    args.download_workers,
+                )
+                while not stop_event.is_set() and "gpu_consumer" not in error_sink:
+                    try:
+                        gpu_feed_queue.put((cached, error_records), timeout=0.25)
+                        break
+                    except queue.Full:
+                        continue
+        except BaseException as exc:  # noqa: BLE001 - surfaced after join
+            error_sink["gpu_producer"] = exc
+        finally:
+            gpu_producer_done.set()
+
+    def gpu_consumer() -> None:
+        """Run batched GPU inference on downloaded thumbnails (the only GPU thread)."""
+        try:
+            while True:
+                try:
+                    cached, error_records = gpu_feed_queue.get(timeout=0.25)
+                except queue.Empty:
+                    if gpu_producer_done.is_set():
+                        break
+                    continue
+                for record in error_records:
+                    results_queue.put(record)
+                records = scan_asset_batch_with_detector(
+                    cached, detector, account.slug, inference_batch_size
+                )
+                for record in records:
+                    results_queue.put(record)
+                device_counts["gpu"] += len(error_records) + len(records)
+        except BaseException as exc:  # noqa: BLE001 - surfaced after join
+            error_sink["gpu_consumer"] = exc
+
+    def cpu_loop(pool) -> None:
+        try:
+            for record in pool.imap_unordered(
+                scan_asset_worker, drain_queue_iter(asset_queue, stop_event)
+            ):
+                results_queue.put(record)
+                device_counts["cpu"] += 1
+        except BaseException as exc:  # noqa: BLE001 - surfaced after join
+            error_sink["cpu"] = exc
+
+    def result_loop(consumer_threads: list[threading.Thread]) -> None:
+        handled = 0
+        while handled < total:
+            try:
+                record = results_queue.get(timeout=0.25)
+            except queue.Empty:
+                # Watchdog: if both producers are gone and nothing is queued, a record was
+                # lost (e.g. a worker died) — stop rather than block forever.
+                if all(not thread.is_alive() for thread in consumer_threads) and results_queue.empty():
+                    break
+                continue
+            bump_decision(stats, str(record.get("decision", "")))
+            state_appender.write(record)
+            state[str(record["asset_id"])] = record
+            handle_scan_record(
+                record,
+                assets_by_id.get(str(record["asset_id"])),
+                account,
+                client,
+                album_id,
+                args.dry_run,
+                args.batch_size,
+                write_manifest,
+                manifested_ids,
+                album_ids,
+                pending,
+                pending_ids,
+                stats,
+            )
+            handled += 1
+            if progress is not None:
+                progress.update(
+                    tasks["scan"],
+                    advance=1,
+                    postfix=(
+                        f"gpu={device_counts['gpu']} cpu={device_counts['cpu']} "
+                        f"birds={stats['birds']} err={stats['errors']}"
+                    ),
+                )
+
+    def run() -> None:
+        pool = mp.get_context("spawn").Pool(
+            processes=cpu_workers,
+            initializer=init_scan_worker,
+            initargs=(
+                base_url,
+                api_key,
+                args.model,
+                args.threshold,
+                "cpu",
+                str(args.cache_dir),
+                account.slug,
+                args.thumbnail_size,
+            ),
+        )
+        threads = [
+            threading.Thread(target=gpu_producer, name=f"{account.slug}-gpu-dl", daemon=True),
+            threading.Thread(target=gpu_consumer, name=f"{account.slug}-gpu", daemon=True),
+            threading.Thread(target=cpu_loop, args=(pool,), name=f"{account.slug}-cpu", daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            result_loop(threads)
+        finally:
+            stop_event.set()
+            # Let consumers wind down naturally before terminating the pool, so a normal
+            # finish doesn't surface a spurious "pool terminated" error from imap.
+            for thread in threads:
+                thread.join(timeout=10.0)
+            pool.terminate()
+            pool.join()
+        for key in ("gpu_producer", "gpu_consumer", "cpu"):
+            if key in error_sink:
+                raise error_sink[key]
+
+    if progress is None:
+        run()
+    else:
+        with progress:
+            tasks["scan"] = progress.add_task("hybrid", total=total, postfix="gpu=0 cpu=0 birds=0 err=0")
+            run()
+
+
 def main() -> None:
     args = parse_args()
 
@@ -553,8 +764,20 @@ def main() -> None:
     worker_count = max(1, args.workers)
     chunk_size = max(1, args.chunk_size)
     inference_batch_size = max(1, args.inference_batch_size)
+    cpu_workers = 0
     if selected_device != "cpu":
         worker_count = 1
+        cpu_count = os.cpu_count() or 1
+        # Downloads now share cores with CPU inference, so don't oversubscribe them.
+        hybrid_download_workers = min(args.download_workers, max(2, cpu_count // 2))
+        # Auto: leave the GPU pipeline (download threads + host-side preprocessing) and the
+        # result/orchestration thread enough cores so the GPU never starves; CPU gets the rest.
+        if args.cpu_workers >= 0:
+            cpu_workers = args.cpu_workers
+        else:
+            cpu_workers = max(0, cpu_count - hybrid_download_workers - 2)
+        if cpu_workers > 0:
+            args.download_workers = hybrid_download_workers
     config_panel(
         args,
         selected_device,
@@ -563,7 +786,13 @@ def main() -> None:
         inference_batch_size,
         args.download_workers,
         args.prefetch,
+        cpu_workers,
     )
+    if cpu_workers >= 4:
+        emit(
+            f"[yellow]Hybrid mode: {cpu_workers} CPU workers each load a full copy of "
+            f"{args.model} into RAM — lower --cpu-workers if memory is tight.[/]"
+        )
     detector = None
     if worker_count == 1:
         detector = PretrainedBirdDetector(args.model, args.threshold, selected_device)
@@ -650,26 +879,48 @@ def main() -> None:
         if scan_assets:
             if selected_device != "cpu":
                 with JsonlAppender(state_path) as state_appender, CsvAppender(manifest_path, manifest_fields) as manifest_appender:
-                    run_gpu_pipeline(
-                        scan_assets,
-                        detector,
-                        client,
-                        config.base_url,
-                        account.api_key,
-                        account,
-                        str(album["id"]),
-                        args,
-                        chunk_size,
-                        inference_batch_size,
-                        state,
-                        state_appender,
-                        manifest_appender.write,
-                        manifested_ids,
-                        album_ids,
-                        pending,
-                        pending_ids,
-                        stats,
-                    )
+                    if cpu_workers > 0:
+                        run_hybrid_pipeline(
+                            scan_assets,
+                            detector,
+                            client,
+                            config.base_url,
+                            account.api_key,
+                            account,
+                            str(album["id"]),
+                            args,
+                            inference_batch_size,
+                            cpu_workers,
+                            state,
+                            state_appender,
+                            manifest_appender.write,
+                            manifested_ids,
+                            album_ids,
+                            pending,
+                            pending_ids,
+                            stats,
+                        )
+                    else:
+                        run_gpu_pipeline(
+                            scan_assets,
+                            detector,
+                            client,
+                            config.base_url,
+                            account.api_key,
+                            account,
+                            str(album["id"]),
+                            args,
+                            chunk_size,
+                            inference_batch_size,
+                            state,
+                            state_appender,
+                            manifest_appender.write,
+                            manifested_ids,
+                            album_ids,
+                            pending,
+                            pending_ids,
+                            stats,
+                        )
             elif worker_count == 1:
                 for asset in progress(scan_assets, desc=f"{account.slug} detect", unit="asset"):
                     record = scan_asset_worker_with_detector(

@@ -1,0 +1,46 @@
+[project]
+name = "aviary"
+version = "0.1.0"
+description = "Bird detection across camera streams, Immich libraries, and model training"
+requires-python = ">=3.11"
+dependencies = [
+    # opencv (cv2) is pulled in transitively by ultralytics; no GUI calls are
+    # made anywhere in the repo, and the server image installs libgl1.
+    "python-dotenv>=1.0.1",
+    "PyYAML>=6.0.0",
+    "requests>=2.32.0",
+    "ultralytics>=8.3.0",
+    "tqdm>=4.66.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+generate-albums = "generate_albums:main"
+download-birds = "download_immich_birds:main"
+train = "train:main"
+evaluate = "evaluate:main"
+prepare-dataset = "prepare_dataset:main"
+extract-frames = "extract_frames:main"
+server = "aviary_server.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The three subsystem packages (prefix stripped so they import top-level), ...
+[tool.hatch.build.targets.wheel]
+packages = [
+    "server/aviary_server",
+    "models/immich/aviary_immich",
+    "models/training/aviary_training",
+]
+
+# ... plus each standalone script mapped explicitly to a top-level module, so
+# `generate_albums`, `train`, ... import cleanly as their entry points expect.
+[tool.hatch.build.targets.wheel.force-include]
+"models/immich/generate_albums.py" = "generate_albums.py"
+"models/immich/download_immich_birds.py" = "download_immich_birds.py"
+"models/training/scripts/train.py" = "train.py"
+"models/training/scripts/evaluate.py" = "evaluate.py"
+"models/training/scripts/prepare_dataset.py" = "prepare_dataset.py"
+"models/annotation/scripts/extract_frames.py" = "extract_frames.py"

@@ -2,9 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+
+# Keep ultralytics/YOLO quiet so its banners and per-call logs don't corrupt the rich
+# progress display (workers load the model while the live display is already running).
+# Must be set before ultralytics is imported, so do it at module import time.
+os.environ.setdefault("YOLO_VERBOSE", "False")
+
+
+def _silence_ultralytics() -> None:
+    for name in ("ultralytics", "yolo"):
+        logging.getLogger(name).setLevel(logging.ERROR)
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,7 @@ class PretrainedBirdDetector:
     ) -> None:
         from ultralytics import YOLO
 
+        _silence_ultralytics()
         self.model_name = model_name
         self.threshold = threshold
         self.device = select_device(device)

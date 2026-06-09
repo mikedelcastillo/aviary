@@ -32,11 +32,11 @@ server/models/current/bird_detector.pt
 
 ## Local Python Run
 
+From the repo root (see the top-level README for installing uv):
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r server/requirements.txt
-python -m aviary_server.main --config server/config/cameras.yaml
+uv sync
+uv run server --config server/config/cameras.yaml
 ```
 
 On Apple Silicon, set `model.device: mps` in `server/config/cameras.yaml`.

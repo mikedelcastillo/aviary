@@ -62,12 +62,14 @@ def config_panel(
     inference_batch_size: int,
     download_workers: int,
     prefetch: int,
+    cpu_workers: int = 0,
 ) -> None:
     rows = {
         "model": str(args.model),
         "device": device,
         "threshold": str(args.threshold),
         "workers": str(worker_count),
+        "cpu workers": str(cpu_workers),
         "download workers": str(download_workers),
         "chunk size": str(chunk_size),
         "inference batch": str(inference_batch_size),
