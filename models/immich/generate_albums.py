@@ -51,6 +51,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--force-rescan", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--cpu-only", action="store_true", help="Force CPU; ignore any GPU.")
+    mode.add_argument(
+        "--gpu-only",
+        action="store_true",
+        help="Force GPU with no hybrid CPU workers; error if no GPU is found.",
+    )
     return parser.parse_args()
 
 
@@ -790,24 +797,35 @@ def main() -> None:
     )
 
     config = load_accounts_config(args.accounts_config, args.env_file)
-    selected_device = select_device(args.device)
+    if args.cpu_only:
+        selected_device = "cpu"
+    elif args.gpu_only:
+        selected_device = select_device(args.device)
+        if selected_device == "cpu":
+            emit("[red]--gpu-only set but no GPU was detected.[/]")
+            raise SystemExit(1)
+    else:
+        selected_device = select_device(args.device)
     worker_count = max(1, args.workers)
     chunk_size = max(1, args.chunk_size)
     inference_batch_size = max(1, args.inference_batch_size)
     cpu_workers = 0
     if selected_device != "cpu":
         worker_count = 1
-        cpu_count = os.cpu_count() or 1
-        # Downloads now share cores with CPU inference, so don't oversubscribe them.
-        hybrid_download_workers = min(args.download_workers, max(2, cpu_count // 2))
-        # Auto: leave the GPU pipeline (download threads + host-side preprocessing) and the
-        # result/orchestration thread enough cores so the GPU never starves; CPU gets the rest.
-        if args.cpu_workers >= 0:
-            cpu_workers = args.cpu_workers
+        if args.gpu_only:
+            cpu_workers = 0  # pure GPU: run_gpu_pipeline only, no hybrid CPU workers
         else:
-            cpu_workers = max(0, cpu_count - hybrid_download_workers - 2)
-        if cpu_workers > 0:
-            args.download_workers = hybrid_download_workers
+            cpu_count = os.cpu_count() or 1
+            # Downloads now share cores with CPU inference, so don't oversubscribe them.
+            hybrid_download_workers = min(args.download_workers, max(2, cpu_count // 2))
+            # Auto: leave the GPU pipeline (download threads + host-side preprocessing) and the
+            # result/orchestration thread enough cores so the GPU never starves; CPU gets the rest.
+            if args.cpu_workers >= 0:
+                cpu_workers = args.cpu_workers
+            else:
+                cpu_workers = max(0, cpu_count - hybrid_download_workers - 2)
+            if cpu_workers > 0:
+                args.download_workers = hybrid_download_workers
     config_panel(
         args,
         selected_device,
