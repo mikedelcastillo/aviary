@@ -1,6 +1,9 @@
 .env
 .DS_Store
 
+# Runtime snapshots (cleared on every app start).
+/snapshots/
+
 __pycache__/
 *.py[cod]
 .pytest_cache/

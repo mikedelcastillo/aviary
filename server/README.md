@@ -53,8 +53,6 @@ has:
 - `enabled`: whether to start the stream.
 - `sample_fps`: inference sampling rate.
 - `reconnect_seconds`: delay after a stream failure.
-- `alert_zones`: optional `ZoneConfig` polygons. If any are configured, only
-  detections inside those zones send alerts.
 
-The RTSP URL for each camera comes from the matching entry in `TAPO_RSTP`. If no
-zones are configured, any visible bird can alert.
+The RTSP URL for each camera comes from the matching entry in `TAPO_RSTP`. Any
+visible bird can alert.

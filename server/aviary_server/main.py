@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import signal
 import threading
 import time
@@ -15,7 +16,7 @@ from pathlib import Path
 import cv2
 from dotenv import load_dotenv
 
-from aviary_server.config import AppConfig, CameraConfig, ZoneConfig, _as_user_ids, build_config
+from aviary_server.config import AppConfig, CameraConfig, _as_user_ids, build_config
 from aviary_server.detector import BirdDetector, Detection, draw_detections
 from aviary_server.telegram import TelegramNotifier, run_userinfo_bot
 
@@ -27,35 +28,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--log-level", default=os.getenv("AVIARY_LOG_LEVEL", "INFO"))
     return parser.parse_args()
-
-
-def point_in_polygon(point: tuple[int, int], polygon: list[tuple[int, int]]) -> bool:
-    x, y = point
-    inside = False
-    j = len(polygon) - 1
-    for i, current in enumerate(polygon):
-        xi, yi = current
-        xj, yj = polygon[j]
-        intersects = (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / ((yj - yi) or 1) + xi
-        if intersects:
-            inside = not inside
-        j = i
-    return inside
-
-
-def apply_alert_zones(detections: list[Detection], zones: list[ZoneConfig]) -> list[Detection]:
-    if not zones:
-        return detections
-
-    filtered: list[Detection] = []
-    for detection in detections:
-        for zone in zones:
-            if point_in_polygon(detection.center, zone.polygon):
-                detection.zone = zone.name
-                if zone.alert:
-                    filtered.append(detection)
-                break
-    return filtered
 
 
 def snapshot_name(camera_name: str) -> str:
@@ -110,8 +82,7 @@ def handle_detections(
     frame,
     detections: list[Detection],
 ) -> None:
-    alertable = apply_alert_zones(detections, camera.alert_zones)
-    eligible = alert_state.eligible(camera.name, alertable)
+    eligible = alert_state.eligible(camera.name, detections)
     if not eligible:
         return
 
@@ -122,8 +93,12 @@ def handle_detections(
     labels = ", ".join(sorted({detection.label for detection in eligible}))
     LOGGER.info("Alerting camera=%s labels=%s snapshot=%s", camera.name, labels, snapshot_path)
 
-    if notifier:
-        notifier.send_detections(camera.name, eligible, snapshot_path)
+    try:
+        if notifier:
+            notifier.send_detections(camera.name, eligible, snapshot_path)
+    finally:
+        if snapshot_path is not None:
+            snapshot_path.unlink(missing_ok=True)
 
 
 def monitor_camera(
@@ -230,6 +205,11 @@ def main() -> None:
     enabled_cameras = [camera for camera in app_config.cameras if camera.enabled]
     if not enabled_cameras:
         raise SystemExit("No cameras are enabled in config")
+
+    # Start each run with an empty snapshots folder.
+    if app_config.snapshot_dir.exists():
+        shutil.rmtree(app_config.snapshot_dir)
+    app_config.snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     detector = BirdDetector(app_config.model)
     notifier = build_notifier(app_config)

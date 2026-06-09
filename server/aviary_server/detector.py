@@ -16,12 +16,6 @@ class Detection:
     label: str
     confidence: float
     bbox_xyxy: tuple[int, int, int, int]
-    zone: str | None = None
-
-    @property
-    def center(self) -> tuple[int, int]:
-        x1, y1, x2, y2 = self.bbox_xyxy
-        return ((x1 + x2) // 2, (y1 + y2) // 2)
 
 
 class BirdDetector:
@@ -81,9 +75,6 @@ def draw_detections(frame, detections: list[Detection]):
     for detection in detections:
         x1, y1, x2, y2 = detection.bbox_xyxy
         text = f"{detection.label} {detection.confidence:.2f}"
-        if detection.zone:
-            text = f"{text} [{detection.zone}]"
-
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 220, 0), 2)
         cv2.putText(
             annotated,

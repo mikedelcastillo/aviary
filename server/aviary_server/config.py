@@ -8,16 +8,8 @@ to match ``CAMERA_SPECS``).
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-
-@dataclass(frozen=True)
-class ZoneConfig:
-    name: str
-    polygon: list[tuple[int, int]]
-    alert: bool = True
 
 
 @dataclass(frozen=True)
@@ -27,7 +19,6 @@ class CameraConfig:
     rtsp_url: str
     sample_fps: float = 1.0
     reconnect_seconds: float = 5.0
-    alert_zones: list[ZoneConfig] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -56,14 +47,10 @@ class AppConfig:
     cameras: list[CameraConfig]
 
 
-# Hardcoded camera definitions. Each entry maps positionally to a URL in the
-# comma-separated ``TAPO_RSTP`` env var. Edit this list to add, rename, enable,
-# or zone cameras.
-CAMERA_SPECS: list[dict[str, Any]] = [
-    {"name": "room-main", "enabled": True, "sample_fps": 1.0, "reconnect_seconds": 5.0, "alert_zones": []},
-    {"name": "room-side", "enabled": False, "sample_fps": 1.0, "reconnect_seconds": 5.0, "alert_zones": []},
-    {"name": "room-perch", "enabled": False, "sample_fps": 1.0, "reconnect_seconds": 5.0, "alert_zones": []},
-]
+# Shared camera defaults. One camera is built per URL in the comma-separated
+# ``TAPO_RSTP`` env var, each using these settings.
+SAMPLE_FPS = 3
+RECONNECT_SECONDS = 5
 
 
 def _require_env(name: str) -> str:
@@ -83,28 +70,16 @@ def _rtsp_urls() -> list[str]:
 
 
 def _build_cameras() -> list[CameraConfig]:
-    urls = _rtsp_urls()
-    cameras: list[CameraConfig] = []
-    for index, spec in enumerate(CAMERA_SPECS):
-        name = spec["name"]
-        enabled = bool(spec.get("enabled", True))
-        if index >= len(urls):
-            if enabled:
-                raise ValueError(
-                    f"Camera {name!r} is enabled but TAPO_RSTP has no URL at index {index}"
-                )
-            continue
-        cameras.append(
-            CameraConfig(
-                name=name,
-                enabled=enabled,
-                rtsp_url=urls[index],
-                sample_fps=float(spec.get("sample_fps", 1.0)),
-                reconnect_seconds=float(spec.get("reconnect_seconds", 5.0)),
-                alert_zones=list(spec.get("alert_zones", [])),
-            )
+    return [
+        CameraConfig(
+            name=f"camera-{index + 1}",
+            enabled=True,
+            rtsp_url=url,
+            sample_fps=SAMPLE_FPS,
+            reconnect_seconds=RECONNECT_SECONDS,
         )
-    return cameras
+        for index, url in enumerate(_rtsp_urls())
+    ]
 
 
 def build_config() -> AppConfig:
@@ -123,7 +98,7 @@ def build_config() -> AppConfig:
     )
 
     return AppConfig(
-        snapshot_dir=Path(os.environ.get("AVIARY_SNAPSHOT_DIR", "server/snapshots")),
+        snapshot_dir=Path("./snapshots"),
         model=model,
         telegram=telegram,
         cameras=cameras,
