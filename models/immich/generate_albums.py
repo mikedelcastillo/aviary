@@ -371,6 +371,7 @@ def handle_scan_record(
     pending_ids: set[str],
     stats: dict[str, int] | None = None,
 ) -> None:
+    from aviary_immich.config import BIRD_ALBUM_NAME
     from aviary_immich.state import utc_now
 
     asset_id = str(record["asset_id"])
@@ -389,7 +390,7 @@ def handle_scan_record(
                 "decision": decision,
                 "max_confidence": f"{max_confidence:.4f}",
                 "original_file_name": original_file_name,
-                "album_name": account.album_name,
+                "album_name": BIRD_ALBUM_NAME,
                 "created_at": utc_now(),
             }
         )
@@ -530,7 +531,7 @@ def main() -> None:
     args = parse_args()
 
     from aviary_immich.client import ImmichClient
-    from aviary_immich.config import load_accounts_config
+    from aviary_immich.config import BIRD_ALBUM_NAME, load_accounts_config
     from aviary_immich.console import (
         account_header,
         account_summary_table,
@@ -585,9 +586,9 @@ def main() -> None:
         user = client.get_my_user()
         connected_as = str(user.get("email") or user.get("name") or user.get("id"))
 
-        album = {"id": "dry-run", "albumName": account.album_name}
+        album = {"id": "dry-run", "albumName": BIRD_ALBUM_NAME}
         if not args.dry_run:
-            album = client.ensure_owned_album(account.album_name)
+            album = client.ensure_owned_album(BIRD_ALBUM_NAME)
 
         state_path = args.state_dir / f"{account.slug}_scan.jsonl"
         manifest_path = args.manifest_dir / f"{account.slug}_birds.csv"
@@ -597,9 +598,8 @@ def main() -> None:
 
         account_header(
             account.slug,
-            account.name,
             connected_as,
-            str(album.get("albumName") or account.album_name),
+            str(album.get("albumName") or BIRD_ALBUM_NAME),
             str(album.get("id")) if not args.dry_run else None,
             len(album_ids) if not args.dry_run else None,
             args.dry_run,

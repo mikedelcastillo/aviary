@@ -12,10 +12,9 @@ It has two entrypoints:
 
 ## Setup
 
-Copy the account config and environment template:
+Copy the environment template:
 
 ```bash
-cp models/immich/config/accounts.example.yaml models/immich/config/accounts.yaml
 cp .env.example .env
 ```
 
@@ -23,12 +22,13 @@ Edit `.env`:
 
 ```text
 IMMICH_BASE_URL=http://192.168.1.168:2283/api
-IMMICH_MIKE_API_KEY=replace-me
-IMMICH_OTHER_API_KEY=replace-me
+IMMICH_ACCOUNT_1_API_KEY=replace-me
+IMMICH_ACCOUNT_2_API_KEY=replace-me
 ```
 
-Edit `models/immich/config/accounts.yaml` so every Immich account has a slug and an
-API key env var name. Create API keys in Immich under User Settings -> API Keys.
+Edit `models/immich/config/accounts.yaml` so every Immich account has a slug and
+an API key env var name. The config is safe to commit because the actual API key
+values stay in `.env`. Create API keys in Immich under User Settings -> API Keys.
 
 Install dependencies:
 

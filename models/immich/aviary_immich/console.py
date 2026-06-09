@@ -88,7 +88,6 @@ def config_panel(
 
 def account_header(
     slug: str,
-    name: str,
     connected_as: str,
     album_name: str,
     album_id: str | None,
@@ -103,7 +102,7 @@ def account_header(
         album_line += f" — {already_in_album} assets already present"
 
     if console is None:
-        print(f"\nScanning account {slug} ({name})")
+        print(f"\nScanning account {slug}")
         print(f"Connected as {connected_as}")
         print(album_line.replace("[bold]", "").replace("[/]", "").replace("[dim]", ""))
         return
@@ -112,7 +111,7 @@ def account_header(
     body.add_column()
     body.add_row(f"connected as [bold]{connected_as}[/]")
     body.add_row(album_line)
-    title = f"[bold cyan]{slug}[/] · {name}"
+    title = f"[bold cyan]{slug}[/]"
     if dry_run:
         title += "  [yellow](dry run)[/]"
     console.print(Panel(body, title=title, border_style="cyan", expand=False))

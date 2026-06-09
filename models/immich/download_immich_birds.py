@@ -33,7 +33,7 @@ def main() -> None:
     args = parse_args()
 
     from aviary_immich.client import ImmichClient, filename_from_headers, safe_filename
-    from aviary_immich.config import load_accounts_config
+    from aviary_immich.config import BIRD_ALBUM_NAME, load_accounts_config
     from aviary_immich.state import append_csv, load_manifest_ids, utc_now
 
     config = load_accounts_config(args.accounts_config, args.env_file)
@@ -47,13 +47,13 @@ def main() -> None:
     ]
 
     for account in config.accounts:
-        print(f"\nDownloading account {account.slug} ({account.name})")
+        print(f"\nDownloading account {account.slug}")
         client = ImmichClient(config.base_url, account.api_key)
         user = client.get_my_user()
         owner_id = str(user.get("id", ""))
-        album = client.find_album(account.album_name, owner_id=owner_id, owned_only=not args.allow_shared_album)
+        album = client.find_album(BIRD_ALBUM_NAME, owner_id=owner_id, owned_only=not args.allow_shared_album)
         if not album:
-            print(f"No owned album named {account.album_name!r} found for {account.slug}; skipping")
+            print(f"No owned album named {BIRD_ALBUM_NAME!r} found for {account.slug}; skipping")
             continue
 
         album_id = str(album["id"])
