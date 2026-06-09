@@ -10,6 +10,12 @@ from typing import Any
 
 BIRD_ALBUM_NAME = "Birds"
 
+# Animal categories the detector classifies, mapped to their Immich album names. The keys are
+# the YOLO/COCO label names (lowercase); the detector filters on exactly these labels and each
+# matching photo is filed into the corresponding album.
+ANIMAL_ALBUMS = {"bird": "Birds", "dog": "Dogs", "cat": "Cats"}
+ANIMAL_LABELS = tuple(ANIMAL_ALBUMS)  # ("bird", "dog", "cat")
+
 
 @dataclass(frozen=True)
 class AccountConfig:

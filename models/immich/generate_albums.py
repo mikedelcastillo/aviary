@@ -10,6 +10,8 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -111,13 +113,49 @@ def emit(message: str) -> None:
         console.log(message)
 
 
-def bump_decision(stats: dict[str, int], decision: str) -> None:
-    if decision == "bird":
-        stats["birds"] += 1
-    elif decision == "error":
-        stats["errors"] += 1
-    else:
-        stats["other"] += 1
+def detected_labels(record: dict[str, Any], known: set[str]) -> set[str]:
+    """Return the animal categories matched by a record, intersected with ``known``.
+
+    Reads the ``labels`` field written by new scans; falls back to the per-detection labels so
+    state files written before multi-category support (which only carry ``detections``) still
+    route correctly.
+    """
+    labels = record.get("labels")
+    if labels is None:
+        labels = [detection.get("label") for detection in record.get("detections", [])]
+    return {str(label).lower() for label in labels if label} & known
+
+
+def category_confidence(record: dict[str, Any], label: str) -> float:
+    """Highest confidence among detections of ``label`` (falls back to the record's overall max)."""
+    confidences = [
+        float(detection.get("confidence") or 0)
+        for detection in record.get("detections", [])
+        if str(detection.get("label", "")).lower() == label
+    ]
+    return max(confidences) if confidences else float(record.get("max_confidence") or 0)
+
+
+def bump_decision(stats: dict[str, int], record: dict[str, Any]) -> None:
+    from aviary_immich.config import ANIMAL_LABELS
+
+    if str(record.get("decision")) == "error":
+        stats["errors"] = stats.get("errors", 0) + 1
+        return
+    labels = detected_labels(record, set(ANIMAL_LABELS))
+    if not labels:
+        stats["other"] = stats.get("other", 0) + 1
+        return
+    for label in labels:
+        key = f"{label}s"
+        stats[key] = stats.get(key, 0) + 1
+
+
+def scan_postfix(stats: dict[str, int], prefix: str = "") -> str:
+    return (
+        f"{prefix}birds={stats.get('birds', 0)} dogs={stats.get('dogs', 0)} "
+        f"cats={stats.get('cats', 0)} err={stats.get('errors', 0)}"
+    )
 
 
 def thread_local_client_factory(base_url: str, api_key: str) -> Callable[[], Any]:
@@ -155,6 +193,7 @@ def init_scan_worker(
     model: str,
     threshold: float,
     device: str,
+    labels: tuple[str, ...],
     cache_dir: str,
     account_slug: str,
     thumbnail_size: str,
@@ -168,7 +207,7 @@ def init_scan_worker(
 
     global _WORKER_CLIENT, _WORKER_DETECTOR, _WORKER_CACHE_DIR, _WORKER_ACCOUNT_SLUG, _WORKER_THUMBNAIL_SIZE
     _WORKER_CLIENT = ImmichClient(base_url, api_key)
-    _WORKER_DETECTOR = PretrainedBirdDetector(model, threshold, device)
+    _WORKER_DETECTOR = PretrainedBirdDetector(model, threshold, device, labels)
     try:
         import torch
 
@@ -181,40 +220,21 @@ def init_scan_worker(
 
 
 def scan_asset_worker(asset: dict[str, Any]) -> dict[str, Any]:
-    from aviary_immich.state import utc_now
-
     if _WORKER_CLIENT is None or _WORKER_DETECTOR is None or _WORKER_CACHE_DIR is None:
         raise RuntimeError("Scan worker was not initialized")
 
-    asset_id = str(asset["id"])
     try:
         thumbnail_path = thumbnail_for_asset(
             _WORKER_CLIENT,
             _WORKER_CACHE_DIR,
             _WORKER_ACCOUNT_SLUG,
-            asset_id,
+            str(asset["id"]),
             _WORKER_THUMBNAIL_SIZE,
         )
         prediction = _WORKER_DETECTOR.predict(thumbnail_path)
-        decision = "bird" if prediction.has_bird else "not_bird"
-        return {
-            "account": _WORKER_ACCOUNT_SLUG,
-            "asset_id": asset_id,
-            "decision": decision,
-            "max_confidence": prediction.max_confidence,
-            "detections": prediction.detections,
-            "original_file_name": asset_name(asset),
-            "scanned_at": utc_now(),
-        }
+        return record_from_prediction(asset, _WORKER_ACCOUNT_SLUG, prediction)
     except Exception as exc:
-        return {
-            "account": _WORKER_ACCOUNT_SLUG,
-            "asset_id": asset_id,
-            "decision": "error",
-            "error": str(exc),
-            "original_file_name": asset_name(asset),
-            "scanned_at": utc_now(),
-        }
+        return record_from_error(asset, _WORKER_ACCOUNT_SLUG, exc)
 
 
 def scan_asset_worker_with_detector(
@@ -225,41 +245,23 @@ def scan_asset_worker_with_detector(
     account_slug: str,
     thumbnail_size: str,
 ) -> dict[str, Any]:
-    from aviary_immich.state import utc_now
-
-    asset_id = str(asset["id"])
     try:
-        thumbnail_path = thumbnail_for_asset(client, cache_dir, account_slug, asset_id, thumbnail_size)
+        thumbnail_path = thumbnail_for_asset(client, cache_dir, account_slug, str(asset["id"]), thumbnail_size)
         prediction = detector.predict(thumbnail_path)
-        decision = "bird" if prediction.has_bird else "not_bird"
-        return {
-            "account": account_slug,
-            "asset_id": asset_id,
-            "decision": decision,
-            "max_confidence": prediction.max_confidence,
-            "detections": prediction.detections,
-            "original_file_name": asset_name(asset),
-            "scanned_at": utc_now(),
-        }
+        return record_from_prediction(asset, account_slug, prediction)
     except Exception as exc:
-        return {
-            "account": account_slug,
-            "asset_id": asset_id,
-            "decision": "error",
-            "error": str(exc),
-            "original_file_name": asset_name(asset),
-            "scanned_at": utc_now(),
-        }
+        return record_from_error(asset, account_slug, exc)
 
 
 def record_from_prediction(asset: dict[str, Any], account_slug: str, prediction) -> dict[str, Any]:
     from aviary_immich.state import utc_now
 
-    decision = "bird" if prediction.has_bird else "not_bird"
+    labels = sorted({str(detection.get("label", "")).lower() for detection in prediction.detections})
     return {
         "account": account_slug,
         "asset_id": str(asset["id"]),
-        "decision": decision,
+        "decision": "match" if labels else "not_match",
+        "labels": labels,
         "max_confidence": prediction.max_confidence,
         "detections": prediction.detections,
         "original_file_name": asset_name(asset),
@@ -398,57 +400,68 @@ def scan_asset_batch_with_detector(
     return records
 
 
+@dataclass
+class AlbumTarget:
+    """One animal category and the per-album state needed to file photos into its album."""
+
+    label: str
+    album_name: str
+    album_id: str
+    album_ids: set[str]
+    manifested_ids: set[str]
+    write_manifest: Callable[[dict[str, Any]], None]
+    pending: list[str] = field(default_factory=list)
+    pending_ids: set[str] = field(default_factory=set)
+
+
 def handle_scan_record(
     record: dict[str, Any],
     asset: dict[str, Any] | None,
     account,
     client,
-    album_id: str,
+    targets: list[AlbumTarget],
     dry_run: bool,
     batch_size: int,
-    write_manifest: Callable[[dict[str, Any]], None],
-    manifested_ids: set[str],
-    album_ids: set[str],
-    pending: list[str],
-    pending_ids: set[str],
     stats: dict[str, int] | None = None,
 ) -> None:
-    from aviary_immich.config import BIRD_ALBUM_NAME
+    """Fan a scan record out to every album whose category it matched."""
     from aviary_immich.state import utc_now
 
     asset_id = str(record["asset_id"])
-    decision = str(record.get("decision", ""))
-    max_confidence = float(record.get("max_confidence") or 0)
     original_file_name = str(record.get("original_file_name") or (asset_name(asset) if asset else ""))
-
-    if decision != "bird":
+    labels = detected_labels(record, {target.label for target in targets})
+    if not labels:
         return
 
-    if asset_id not in manifested_ids:
-        write_manifest(
-            {
-                "account": account.slug,
-                "asset_id": asset_id,
-                "decision": decision,
-                "max_confidence": f"{max_confidence:.4f}",
-                "original_file_name": original_file_name,
-                "album_name": BIRD_ALBUM_NAME,
-                "created_at": utc_now(),
-            }
-        )
-        manifested_ids.add(asset_id)
+    for target in targets:
+        if target.label not in labels:
+            continue
 
-    if asset_id in album_ids or asset_id in pending_ids:
-        return
+        if asset_id not in target.manifested_ids:
+            target.write_manifest(
+                {
+                    "account": account.slug,
+                    "asset_id": asset_id,
+                    "decision": target.label,
+                    "max_confidence": f"{category_confidence(record, target.label):.4f}",
+                    "original_file_name": original_file_name,
+                    "album_name": target.album_name,
+                    "created_at": utc_now(),
+                }
+            )
+            target.manifested_ids.add(asset_id)
 
-    pending.append(asset_id)
-    pending_ids.add(asset_id)
-    if stats is not None:
-        stats["added"] = stats.get("added", 0) + 1
-    if len(pending) >= batch_size:
-        flush_album_batch(client, album_id, pending, dry_run)
-        album_ids.update(pending_ids)
-        pending_ids.clear()
+        if asset_id in target.album_ids or asset_id in target.pending_ids:
+            continue
+
+        target.pending.append(asset_id)
+        target.pending_ids.add(asset_id)
+        if stats is not None:
+            stats["added"] = stats.get("added", 0) + 1
+        if len(target.pending) >= batch_size:
+            flush_album_batch(client, target.album_id, target.pending, dry_run)
+            target.album_ids.update(target.pending_ids)
+            target.pending_ids.clear()
 
 
 def run_gpu_pipeline(
@@ -458,17 +471,12 @@ def run_gpu_pipeline(
     base_url: str,
     api_key: str,
     account,
-    album_id: str,
+    targets: list[AlbumTarget],
     args: argparse.Namespace,
     chunk_size: int,
     inference_batch_size: int,
     state: dict[str, dict[str, Any]],
     state_appender,
-    write_manifest: Callable[[dict[str, Any]], None],
-    manifested_ids: set[str],
-    album_ids: set[str],
-    pending: list[str],
-    pending_ids: set[str],
     stats: dict[str, int],
 ) -> None:
     """Overlap thumbnail downloads (producer) with GPU inference (consumer)."""
@@ -523,7 +531,7 @@ def run_gpu_pipeline(
                 cached, detector, account.slug, inference_batch_size, detect_advance
             )
             for record in records:
-                bump_decision(stats, str(record.get("decision", "")))
+                bump_decision(stats, record)
                 state_appender.write(record)
                 state[str(record["asset_id"])] = record
                 handle_scan_record(
@@ -531,18 +539,13 @@ def run_gpu_pipeline(
                     assets_by_id.get(str(record["asset_id"])),
                     account,
                     client,
-                    album_id,
+                    targets,
                     args.dry_run,
                     args.batch_size,
-                    write_manifest,
-                    manifested_ids,
-                    album_ids,
-                    pending,
-                    pending_ids,
                     stats,
                 )
             if progress is not None:
-                progress.update(tasks["detect"], postfix=f"birds={stats['birds']} err={stats['errors']}")
+                progress.update(tasks["detect"], postfix=scan_postfix(stats))
 
     def run() -> None:
         producer = threading.Thread(target=produce, name=f"{account.slug}-downloader", daemon=True)
@@ -565,7 +568,7 @@ def run_gpu_pipeline(
     else:
         with progress:
             tasks["cache"] = progress.add_task("cache", total=total, postfix="")
-            tasks["detect"] = progress.add_task("detect", total=total, postfix="birds=0 err=0")
+            tasks["detect"] = progress.add_task("detect", total=total, postfix=scan_postfix(stats))
             run()
 
 
@@ -587,17 +590,12 @@ def run_hybrid_pipeline(
     base_url: str,
     api_key: str,
     account,
-    album_id: str,
+    targets: list[AlbumTarget],
     args: argparse.Namespace,
     inference_batch_size: int,
     cpu_workers: int,
     state: dict[str, dict[str, Any]],
     state_appender,
-    write_manifest: Callable[[dict[str, Any]], None],
-    manifested_ids: set[str],
-    album_ids: set[str],
-    pending: list[str],
-    pending_ids: set[str],
     stats: dict[str, int],
 ) -> None:
     """Saturate the GPU and CPU at once: both steal from one shared asset queue.
@@ -706,7 +704,7 @@ def run_hybrid_pipeline(
                 if all(not thread.is_alive() for thread in consumer_threads) and results_queue.empty():
                     break
                 continue
-            bump_decision(stats, str(record.get("decision", "")))
+            bump_decision(stats, record)
             state_appender.write(record)
             state[str(record["asset_id"])] = record
             handle_scan_record(
@@ -714,14 +712,9 @@ def run_hybrid_pipeline(
                 assets_by_id.get(str(record["asset_id"])),
                 account,
                 client,
-                album_id,
+                targets,
                 args.dry_run,
                 args.batch_size,
-                write_manifest,
-                manifested_ids,
-                album_ids,
-                pending,
-                pending_ids,
                 stats,
             )
             handled += 1
@@ -729,10 +722,7 @@ def run_hybrid_pipeline(
                 progress.update(
                     tasks["scan"],
                     advance=1,
-                    postfix=(
-                        f"gpu={device_counts['gpu']} cpu={device_counts['cpu']} "
-                        f"birds={stats['birds']} err={stats['errors']}"
-                    ),
+                    postfix=scan_postfix(stats, f"gpu={device_counts['gpu']} cpu={device_counts['cpu']} "),
                 )
 
     def run() -> None:
@@ -745,6 +735,7 @@ def run_hybrid_pipeline(
                 args.model,
                 args.threshold,
                 "cpu",
+                tuple(target.label for target in targets),
                 str(args.cache_dir),
                 account.slug,
                 args.thumbnail_size,
@@ -775,7 +766,7 @@ def run_hybrid_pipeline(
         run()
     else:
         with progress:
-            tasks["scan"] = progress.add_task("hybrid", total=total, postfix="gpu=0 cpu=0 birds=0 err=0")
+            tasks["scan"] = progress.add_task("hybrid", total=total, postfix=scan_postfix(stats, "gpu=0 cpu=0 "))
             run()
 
 
@@ -783,7 +774,7 @@ def main() -> None:
     args = parse_args()
 
     from aviary_immich.client import ImmichClient
-    from aviary_immich.config import BIRD_ALBUM_NAME, load_accounts_config
+    from aviary_immich.config import ANIMAL_ALBUMS, ANIMAL_LABELS, load_accounts_config
     from aviary_immich.console import (
         account_header,
         account_summary_table,
@@ -794,8 +785,6 @@ def main() -> None:
     from aviary_immich.state import (
         CsvAppender,
         JsonlAppender,
-        append_csv,
-        append_jsonl,
         load_jsonl_state,
         load_manifest_ids,
     )
@@ -836,9 +825,10 @@ def main() -> None:
         )
     detector = None
     if worker_count == 1:
-        detector = PretrainedBirdDetector(args.model, args.threshold, selected_device)
+        detector = PretrainedBirdDetector(args.model, args.threshold, selected_device, ANIMAL_LABELS)
         if selected_device != "cpu":
             emit(f"[dim]device {selected_device} — fp16 {'on' if detector.half else 'off'}[/]")
+    emit(f"[dim]classifying: {', '.join(ANIMAL_ALBUMS.values())}[/]")
 
     manifest_fields = [
         "account",
@@ -858,70 +848,73 @@ def main() -> None:
         user = client.get_my_user()
         connected_as = str(user.get("email") or user.get("name") or user.get("id"))
 
-        album = {"id": "dry-run", "albumName": BIRD_ALBUM_NAME}
-        if not args.dry_run:
-            album = client.ensure_owned_album(BIRD_ALBUM_NAME)
-
         state_path = args.state_dir / f"{account.slug}_scan.jsonl"
-        manifest_path = args.manifest_dir / f"{account.slug}_birds.csv"
         state = load_jsonl_state(state_path)
-        manifested_ids = load_manifest_ids(manifest_path)
-        album_ids = set() if args.dry_run else album_asset_ids(client, str(album["id"]), args.page_size)
 
-        account_header(
-            account.slug,
-            connected_as,
-            str(album.get("albumName") or BIRD_ALBUM_NAME),
-            str(album.get("id")) if not args.dry_run else None,
-            len(album_ids) if not args.dry_run else None,
-            args.dry_run,
-        )
-
-        pending: list[str] = []
-        pending_ids: set[str] = set()
         stats: dict[str, Any] = {
             "scanned": 0,
             "already": 0,
             "birds": 0,
+            "dogs": 0,
+            "cats": 0,
             "other": 0,
             "errors": 0,
             "added": 0,
             "elapsed": 0.0,
         }
 
-        def write_manifest_plain(row: dict[str, Any]) -> None:
-            append_csv(manifest_path, manifest_fields, row)
+        with ExitStack() as stack:
+            # One JSONL state file per account (a single scan, multi-label records); one CSV
+            # manifest per album. All scan paths share these open appenders.
+            state_appender = stack.enter_context(JsonlAppender(state_path))
 
-        assets = list(progress(client.iter_image_assets(page_size=args.page_size, limit=args.limit), desc=account.slug, unit="asset"))
-        scan_assets: list[dict[str, Any]] = []
-        for asset in assets:
-            asset_id = str(asset["id"])
-            record = state.get(asset_id)
-
-            if record and not args.force_rescan:
-                handle_scan_record(
-                    record,
-                    asset,
-                    account,
-                    client,
-                    str(album["id"]),
-                    args.dry_run,
-                    args.batch_size,
-                    write_manifest_plain,
-                    manifested_ids,
-                    album_ids,
-                    pending,
-                    pending_ids,
-                    stats,
+            targets: list[AlbumTarget] = []
+            for label, album_name in ANIMAL_ALBUMS.items():
+                album = {"id": "dry-run", "albumName": album_name}
+                if not args.dry_run:
+                    album = client.ensure_owned_album(album_name)
+                manifest_path = args.manifest_dir / f"{account.slug}_{album_name.lower()}.csv"
+                manifested_ids = load_manifest_ids(manifest_path)
+                appender = stack.enter_context(CsvAppender(manifest_path, manifest_fields))
+                targets.append(
+                    AlbumTarget(
+                        label=label,
+                        album_name=str(album.get("albumName") or album_name),
+                        album_id=str(album["id"]),
+                        album_ids=set() if args.dry_run else album_asset_ids(client, str(album["id"]), args.page_size),
+                        manifested_ids=manifested_ids,
+                        write_manifest=appender.write,
+                    )
                 )
-            else:
-                scan_assets.append(asset)
-        stats["scanned"] = len(scan_assets)
-        stats["already"] = len(assets) - len(scan_assets)
 
-        if scan_assets:
-            if selected_device != "cpu":
-                with JsonlAppender(state_path) as state_appender, CsvAppender(manifest_path, manifest_fields) as manifest_appender:
+            account_header(
+                account.slug,
+                connected_as,
+                ", ".join(target.album_name for target in targets),
+                None,
+                None,
+                args.dry_run,
+            )
+            if not args.dry_run:
+                for target in targets:
+                    emit(
+                        f"  [bold]{target.album_name}[/] ([dim]{target.album_id}[/]) — "
+                        f"{len(target.album_ids)} assets already present"
+                    )
+
+            assets = list(progress(client.iter_image_assets(page_size=args.page_size, limit=args.limit), desc=account.slug, unit="asset"))
+            scan_assets: list[dict[str, Any]] = []
+            for asset in assets:
+                record = state.get(str(asset["id"]))
+                if record and not args.force_rescan:
+                    handle_scan_record(record, asset, account, client, targets, args.dry_run, args.batch_size, stats)
+                else:
+                    scan_assets.append(asset)
+            stats["scanned"] = len(scan_assets)
+            stats["already"] = len(assets) - len(scan_assets)
+
+            if scan_assets:
+                if selected_device != "cpu":
                     if cpu_workers > 0:
                         run_hybrid_pipeline(
                             scan_assets,
@@ -930,17 +923,12 @@ def main() -> None:
                             config.base_url,
                             account.api_key,
                             account,
-                            str(album["id"]),
+                            targets,
                             args,
                             inference_batch_size,
                             cpu_workers,
                             state,
                             state_appender,
-                            manifest_appender.write,
-                            manifested_ids,
-                            album_ids,
-                            pending,
-                            pending_ids,
                             stats,
                         )
                     else:
@@ -951,89 +939,70 @@ def main() -> None:
                             config.base_url,
                             account.api_key,
                             account,
-                            str(album["id"]),
+                            targets,
                             args,
                             chunk_size,
                             inference_batch_size,
                             state,
                             state_appender,
-                            manifest_appender.write,
-                            manifested_ids,
-                            album_ids,
-                            pending,
-                            pending_ids,
                             stats,
                         )
-            elif worker_count == 1:
-                for asset in progress(scan_assets, desc=f"{account.slug} detect", unit="asset"):
-                    record = scan_asset_worker_with_detector(
-                        asset,
-                        client,
-                        detector,
-                        args.cache_dir,
-                        account.slug,
-                        args.thumbnail_size,
-                    )
-                    append_jsonl(state_path, record)
-                    state[str(record["asset_id"])] = record
-                    bump_decision(stats, str(record.get("decision", "")))
-                    handle_scan_record(
-                        record,
-                        asset,
-                        account,
-                        client,
-                        str(album["id"]),
-                        args.dry_run,
-                        args.batch_size,
-                        write_manifest_plain,
-                        manifested_ids,
-                        album_ids,
-                        pending,
-                        pending_ids,
-                        stats,
-                    )
-            else:
-                assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
-                with mp.get_context("spawn").Pool(
-                    processes=worker_count,
-                    initializer=init_scan_worker,
-                    initargs=(
-                        config.base_url,
-                        account.api_key,
-                        args.model,
-                        args.threshold,
-                        selected_device,
-                        str(args.cache_dir),
-                        account.slug,
-                        args.thumbnail_size,
-                    ),
-                ) as pool:
-                    for record in progress(
-                        pool.imap_unordered(scan_asset_worker, scan_assets),
-                        total=len(scan_assets),
-                        desc=f"{account.slug} detect",
-                        unit="asset",
-                    ):
-                        append_jsonl(state_path, record)
-                        state[str(record["asset_id"])] = record
-                        bump_decision(stats, str(record.get("decision", "")))
-                        handle_scan_record(
-                            record,
-                            assets_by_id.get(str(record["asset_id"])),
-                            account,
+                elif worker_count == 1:
+                    for asset in progress(scan_assets, desc=f"{account.slug} detect", unit="asset"):
+                        record = scan_asset_worker_with_detector(
+                            asset,
                             client,
-                            str(album["id"]),
-                            args.dry_run,
-                            args.batch_size,
-                            write_manifest_plain,
-                            manifested_ids,
-                            album_ids,
-                            pending,
-                            pending_ids,
-                            stats,
+                            detector,
+                            args.cache_dir,
+                            account.slug,
+                            args.thumbnail_size,
                         )
+                        state_appender.write(record)
+                        state[str(record["asset_id"])] = record
+                        bump_decision(stats, record)
+                        handle_scan_record(record, asset, account, client, targets, args.dry_run, args.batch_size, stats)
+                else:
+                    assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
+                    with mp.get_context("spawn").Pool(
+                        processes=worker_count,
+                        initializer=init_scan_worker,
+                        initargs=(
+                            config.base_url,
+                            account.api_key,
+                            args.model,
+                            args.threshold,
+                            selected_device,
+                            ANIMAL_LABELS,
+                            str(args.cache_dir),
+                            account.slug,
+                            args.thumbnail_size,
+                        ),
+                    ) as pool:
+                        for record in progress(
+                            pool.imap_unordered(scan_asset_worker, scan_assets),
+                            total=len(scan_assets),
+                            desc=f"{account.slug} detect",
+                            unit="asset",
+                        ):
+                            state_appender.write(record)
+                            state[str(record["asset_id"])] = record
+                            bump_decision(stats, record)
+                            handle_scan_record(
+                                record,
+                                assets_by_id.get(str(record["asset_id"])),
+                                account,
+                                client,
+                                targets,
+                                args.dry_run,
+                                args.batch_size,
+                                stats,
+                            )
 
-        flush_album_batch(client, str(album["id"]), pending, args.dry_run)
+            for target in targets:
+                flush_album_batch(client, target.album_id, target.pending, args.dry_run)
+                target.album_ids.update(target.pending_ids)
+                target.pending_ids.clear()
+
         stats["elapsed"] = time.perf_counter() - started
         account_summary_table(account.slug, stats)
         per_account.append({"slug": account.slug, **stats})
