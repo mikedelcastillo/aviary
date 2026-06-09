@@ -15,9 +15,9 @@ from pathlib import Path
 import cv2
 from dotenv import load_dotenv
 
-from aviary_server.config import AppConfig, CameraConfig, ZoneConfig, build_config
+from aviary_server.config import AppConfig, CameraConfig, ZoneConfig, _as_user_ids, build_config
 from aviary_server.detector import BirdDetector, Detection, draw_detections
-from aviary_server.telegram import TelegramNotifier
+from aviary_server.telegram import TelegramNotifier, run_userinfo_bot
 
 
 LOGGER = logging.getLogger("aviary_server")
@@ -176,6 +176,32 @@ def build_notifier(app_config: AppConfig) -> TelegramNotifier | None:
     return TelegramNotifier(app_config.telegram.bot_token, app_config.telegram.user_ids)
 
 
+def install_signal_handlers(stop_event: threading.Event) -> None:
+    def request_stop(signum, _frame) -> None:
+        LOGGER.info("Received signal %s; stopping", signum)
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+
+
+def start_userinfo_thread(bot_token: str, stop_event: threading.Event) -> threading.Thread:
+    """Run the /userinfo responder in a background daemon thread.
+
+    Active in every mode so operators can always collect the Telegram user ID
+    of someone they want to add to TELEGRAM_USER_IDS, even while the detector
+    is running.
+    """
+    thread = threading.Thread(
+        target=run_userinfo_bot,
+        args=(bot_token, stop_event),
+        name="userinfo-bot",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def main() -> None:
     args = parse_args()
     load_dotenv()
@@ -184,6 +210,21 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not bot_token:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is required")
+
+    # user_id mode: with only the bot token (no TELEGRAM_USER_IDS), run a
+    # minimal bot that answers /userinfo and nothing else. No cameras or model
+    # are loaded, and other missing env vars are ignored.
+    if not _as_user_ids(os.environ.get("TELEGRAM_USER_IDS", "")):
+        stop_event = threading.Event()
+        install_signal_handlers(stop_event)
+        start_userinfo_thread(bot_token, stop_event)
+        while not stop_event.is_set():
+            stop_event.wait(1.0)
+        return
 
     app_config = build_config()
     enabled_cameras = [camera for camera in app_config.cameras if camera.enabled]
@@ -194,13 +235,11 @@ def main() -> None:
     notifier = build_notifier(app_config)
     alert_state = AlertState(app_config.telegram.cooldown_seconds)
     stop_event = threading.Event()
+    install_signal_handlers(stop_event)
 
-    def request_stop(signum, _frame) -> None:
-        LOGGER.info("Received signal %s; stopping", signum)
-        stop_event.set()
-
-    signal.signal(signal.SIGINT, request_stop)
-    signal.signal(signal.SIGTERM, request_stop)
+    # /userinfo stays available while the detector runs, so new viewers can be
+    # added to the feed without restarting in user_id mode.
+    start_userinfo_thread(app_config.telegram.bot_token, stop_event)
 
     with ThreadPoolExecutor(max_workers=len(enabled_cameras)) as executor:
         futures = [
