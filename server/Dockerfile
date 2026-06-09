@@ -20,8 +20,7 @@ COPY pyproject.toml uv.lock /app/
 RUN uv sync --frozen --no-install-project --no-dev
 
 COPY server/aviary_server /app/aviary_server
-COPY server/config /app/config
 
 ENV PATH="/app/.venv/bin:$PATH"
 
-CMD ["python", "-m", "aviary_server.main", "--config", "/app/config/cameras.yaml"]
+CMD ["python", "-m", "aviary_server.main"]

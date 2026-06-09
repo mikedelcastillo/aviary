@@ -9,7 +9,6 @@ services:
       AVIARY_MODEL_PATH: /app/models/current/bird_detector.pt
       AVIARY_SNAPSHOT_DIR: /app/snapshots
     volumes:
-      - ./server/config:/app/config:ro
       - ./server/models:/app/models:ro
       - ./server/snapshots:/app/snapshots
     restart: unless-stopped

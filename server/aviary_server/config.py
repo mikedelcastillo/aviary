@@ -1,17 +1,16 @@
-"""Configuration loading and validation."""
+"""Application configuration.
+
+Camera definitions are hardcoded below. Secrets and host-specific paths come
+from the environment; RTSP URLs come from ``TAPO_RSTP`` (comma-separated, ordered
+to match ``CAMERA_SPECS``).
+"""
 
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-import yaml
-
-
-UNRESOLVED_ENV_PATTERN = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 @dataclass(frozen=True)
@@ -57,87 +56,74 @@ class AppConfig:
     cameras: list[CameraConfig]
 
 
-def _expand_env(raw_text: str) -> str:
-    expanded = os.path.expandvars(raw_text)
-    unresolved = sorted(set(UNRESOLVED_ENV_PATTERN.findall(expanded)))
-    if unresolved:
-        joined = ", ".join(unresolved)
-        raise ValueError(f"Missing required environment variables in config: {joined}")
-    return expanded
+# Hardcoded camera definitions. Each entry maps positionally to a URL in the
+# comma-separated ``TAPO_RSTP`` env var. Edit this list to add, rename, enable,
+# or zone cameras.
+CAMERA_SPECS: list[dict[str, Any]] = [
+    {"name": "room-main", "enabled": True, "sample_fps": 1.0, "reconnect_seconds": 5.0, "alert_zones": []},
+    {"name": "room-side", "enabled": False, "sample_fps": 1.0, "reconnect_seconds": 5.0, "alert_zones": []},
+    {"name": "room-perch", "enabled": False, "sample_fps": 1.0, "reconnect_seconds": 5.0, "alert_zones": []},
+]
 
 
-def _as_user_ids(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return [item.strip() for item in str(value).split(",") if item.strip()]
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
 
 
-def _as_polygon(value: Any) -> list[tuple[int, int]]:
-    polygon: list[tuple[int, int]] = []
-    for point in value or []:
-        if len(point) != 2:
-            raise ValueError(f"Invalid polygon point: {point}")
-        polygon.append((int(point[0]), int(point[1])))
-    if len(polygon) < 3:
-        raise ValueError("Alert zone polygons need at least 3 points")
-    return polygon
+def _as_user_ids(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _load_zone(raw: dict[str, Any]) -> ZoneConfig:
-    return ZoneConfig(
-        name=str(raw["name"]),
-        polygon=_as_polygon(raw.get("polygon")),
-        alert=bool(raw.get("alert", True)),
-    )
+def _rtsp_urls() -> list[str]:
+    raw = os.environ.get("TAPO_RSTP", "")
+    return [url.strip() for url in raw.split(",") if url.strip()]
 
 
-def _load_camera(raw: dict[str, Any]) -> CameraConfig:
-    zones = [_load_zone(zone) for zone in raw.get("alert_zones", []) or []]
-    sample_fps = float(raw.get("sample_fps", 1.0))
-    if sample_fps <= 0:
-        raise ValueError(f"Camera {raw.get('name')} sample_fps must be greater than 0")
+def _build_cameras() -> list[CameraConfig]:
+    urls = _rtsp_urls()
+    cameras: list[CameraConfig] = []
+    for index, spec in enumerate(CAMERA_SPECS):
+        name = spec["name"]
+        enabled = bool(spec.get("enabled", True))
+        if index >= len(urls):
+            if enabled:
+                raise ValueError(
+                    f"Camera {name!r} is enabled but TAPO_RSTP has no URL at index {index}"
+                )
+            continue
+        cameras.append(
+            CameraConfig(
+                name=name,
+                enabled=enabled,
+                rtsp_url=urls[index],
+                sample_fps=float(spec.get("sample_fps", 1.0)),
+                reconnect_seconds=float(spec.get("reconnect_seconds", 5.0)),
+                alert_zones=list(spec.get("alert_zones", [])),
+            )
+        )
+    return cameras
 
-    return CameraConfig(
-        name=str(raw["name"]),
-        enabled=bool(raw.get("enabled", True)),
-        rtsp_url=str(raw["rtsp_url"]),
-        sample_fps=sample_fps,
-        reconnect_seconds=float(raw.get("reconnect_seconds", 5.0)),
-        alert_zones=zones,
-    )
 
+def build_config() -> AppConfig:
+    cameras = _build_cameras()
+    if not cameras:
+        raise ValueError("No cameras configured; set TAPO_RSTP")
 
-def load_config(path: Path) -> AppConfig:
-    raw_text = path.read_text(encoding="utf-8")
-    raw = yaml.safe_load(_expand_env(raw_text)) or {}
-
-    model_raw = raw.get("model", {})
-    telegram_raw = raw.get("telegram", {})
-    cameras_raw = raw.get("cameras", [])
-
-    if not cameras_raw:
-        raise ValueError("At least one camera must be configured")
-
-    model = ModelConfig(
-        path=Path(model_raw["path"]),
-        confidence=float(model_raw.get("confidence", 0.45)),
-        iou=float(model_raw.get("iou", 0.5)),
-        image_size=int(model_raw.get("image_size", 960)),
-        device=str(model_raw.get("device", "auto")),
-    )
+    model = ModelConfig(path=Path(_require_env("AVIARY_MODEL_PATH")))
 
     telegram = TelegramConfig(
-        enabled=bool(telegram_raw.get("enabled", True)),
-        bot_token=str(telegram_raw.get("bot_token", "")),
-        user_ids=_as_user_ids(telegram_raw.get("user_ids", "")),
-        cooldown_seconds=int(telegram_raw.get("cooldown_seconds", 600)),
-        include_snapshot=bool(telegram_raw.get("include_snapshot", True)),
+        enabled=True,
+        bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        user_ids=_as_user_ids(os.environ.get("TELEGRAM_USER_IDS", "")),
+        cooldown_seconds=600,
+        include_snapshot=True,
     )
 
-    cameras = [_load_camera(camera) for camera in cameras_raw]
-
     return AppConfig(
-        snapshot_dir=Path(raw.get("snapshot_dir", "server/snapshots")),
+        snapshot_dir=Path(os.environ.get("AVIARY_SNAPSHOT_DIR", "server/snapshots")),
         model=model,
         telegram=telegram,
         cameras=cameras,

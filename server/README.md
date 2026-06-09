@@ -15,7 +15,8 @@ Update:
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_USER_IDS`
-- `TAPO_*_RTSP`
+- `TAPO_RSTP` (comma-separated RTSP URLs, ordered to match the cameras in
+  `server/aviary_server/config.py`)
 - `AVIARY_MODEL_PATH` if running outside Docker
 
 ## Docker Run
@@ -36,21 +37,24 @@ From the repo root (see the top-level README for installing uv):
 
 ```bash
 uv sync
-uv run server --config server/config/cameras.yaml
+uv run server
 ```
 
-On Apple Silicon, set `model.device: mps` in `server/config/cameras.yaml`.
+On Apple Silicon, set the model `device` to `mps` in the `ModelConfig` defaults
+in `server/aviary_server/config.py`.
 
 ## Camera Config
 
-Each camera has:
+Cameras are hardcoded in `CAMERA_SPECS` in `server/aviary_server/config.py`. Each
+entry maps positionally to a URL in the comma-separated `TAPO_RSTP` env var and
+has:
 
 - `name`: stable camera identifier.
 - `enabled`: whether to start the stream.
-- `rtsp_url`: RTSP URL, usually from `.env`.
 - `sample_fps`: inference sampling rate.
 - `reconnect_seconds`: delay after a stream failure.
-- `alert_zones`: optional polygons. If any are configured, only detections
-  inside those zones send alerts.
+- `alert_zones`: optional `ZoneConfig` polygons. If any are configured, only
+  detections inside those zones send alerts.
 
-If no zones are configured, any visible bird can alert.
+The RTSP URL for each camera comes from the matching entry in `TAPO_RSTP`. If no
+zones are configured, any visible bird can alert.

@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2
 from dotenv import load_dotenv
 
-from aviary_server.config import AppConfig, CameraConfig, ZoneConfig, load_config
+from aviary_server.config import AppConfig, CameraConfig, ZoneConfig, build_config
 from aviary_server.detector import BirdDetector, Detection, draw_detections
 from aviary_server.telegram import TelegramNotifier
 
@@ -25,7 +25,6 @@ LOGGER = logging.getLogger("aviary_server")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=Path("server/config/cameras.yaml"))
     parser.add_argument("--log-level", default=os.getenv("AVIARY_LOG_LEVEL", "INFO"))
     return parser.parse_args()
 
@@ -186,7 +185,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    app_config = load_config(args.config)
+    app_config = build_config()
     enabled_cameras = [camera for camera in app_config.cameras if camera.enabled]
     if not enabled_cameras:
         raise SystemExit("No cameras are enabled in config")
