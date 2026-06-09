@@ -58,7 +58,7 @@ class AppConfig:
 
 # Shared camera defaults. One camera is built per URL in the comma-separated
 # ``TAPO_RSTP`` env var, each using these settings.
-SAMPLE_FPS = 3
+SAMPLE_FPS = 1
 RECONNECT_SECONDS = 5
 MAX_RECONNECT_SECONDS = 60
 OPEN_TIMEOUT_SECONDS = 10
@@ -90,10 +90,6 @@ def _build_cameras() -> list[CameraConfig]:
             rtsp_url=url,
             sample_fps=SAMPLE_FPS,
             reconnect_seconds=RECONNECT_SECONDS,
-            max_reconnect_seconds=MAX_RECONNECT_SECONDS,
-            open_timeout_seconds=OPEN_TIMEOUT_SECONDS,
-            read_timeout_seconds=READ_TIMEOUT_SECONDS,
-            rtsp_transport=RTSP_TRANSPORT,
         )
         for index, url in enumerate(_rtsp_urls())
     ]

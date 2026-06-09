@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import queue
 import shutil
 import signal
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +19,7 @@ import cv2
 from dotenv import load_dotenv
 
 from aviary_server.config import AppConfig, CameraConfig, _as_user_ids, build_config
+from aviary_server.dashboard import CameraStats, Dashboard, ObjectRegistry
 from aviary_server.detector import BirdDetector, Detection, draw_detections
 from aviary_server.telegram import TelegramNotifier, run_userinfo_bot
 
@@ -74,31 +77,101 @@ def write_snapshot(snapshot_dir: Path, camera_name: str, frame, detections: list
     return path
 
 
-def handle_detections(
-    app_config: AppConfig,
-    camera: CameraConfig,
-    notifier: TelegramNotifier | None,
-    alert_state: AlertState,
-    frame,
-    detections: list[Detection],
-) -> None:
-    eligible = alert_state.eligible(camera.name, detections)
-    if not eligible:
-        return
+@dataclass
+class AlertJob:
+    camera: CameraConfig
+    frame: object
+    detections: list[Detection]
 
-    snapshot_path = None
-    if app_config.telegram.include_snapshot:
-        snapshot_path = write_snapshot(app_config.snapshot_dir, camera.name, frame, eligible)
 
-    labels = ", ".join(sorted({detection.label for detection in eligible}))
-    LOGGER.info("Alerting camera=%s labels=%s snapshot=%s", camera.name, labels, snapshot_path)
+# Cap on undelivered alerts held in memory. The cooldown already throttles
+# enqueues to roughly one per camera per cooldown window, so this only bites
+# during a sustained Telegram outage — at which point dropping the oldest-style
+# backlog is preferable to growing memory without bound.
+ALERT_QUEUE_MAXSIZE = 32
 
-    try:
-        if notifier:
-            notifier.send_detections(camera.name, eligible, snapshot_path)
-    finally:
-        if snapshot_path is not None:
-            snapshot_path.unlink(missing_ok=True)
+
+class AlertDispatcher:
+    """Delivers alerts (snapshot + Telegram) off the camera capture threads.
+
+    Snapshot encoding and Telegram uploads can take many seconds — a photo
+    upload is bounded at 60s. Running them inline in ``monitor_camera`` stalls
+    that camera's read/inference loop for the whole upload, starving the RTSP
+    stream and tripping the read-timeout reconnect path. The capture loop
+    instead does the cheap cooldown check, hands eligible detections here, and
+    immediately goes back to reading frames; a pool of worker threads drains
+    the queue so a slow send on one camera never blocks another.
+    """
+
+    def __init__(
+        self,
+        app_config: AppConfig,
+        notifier: TelegramNotifier | None,
+        stop_event: threading.Event,
+        workers: int,
+    ) -> None:
+        self._app_config = app_config
+        self._notifier = notifier
+        self._stop_event = stop_event
+        self._queue: "queue.Queue[AlertJob]" = queue.Queue(maxsize=ALERT_QUEUE_MAXSIZE)
+        self._workers = [
+            threading.Thread(target=self._run, name=f"alert-dispatch-{index}", daemon=True)
+            for index in range(max(1, workers))
+        ]
+        for worker in self._workers:
+            worker.start()
+
+    def submit(self, camera: CameraConfig, frame, detections: list[Detection]) -> None:
+        # Copy the frame: delivery happens later on a worker thread, decoupled
+        # from this capture loop's frame lifetime.
+        job = AlertJob(camera=camera, frame=frame.copy(), detections=detections)
+        try:
+            self._queue.put_nowait(job)
+        except queue.Full:
+            LOGGER.warning(
+                "Alert queue full (%d); dropping alert for camera=%s — delivery is backed up",
+                ALERT_QUEUE_MAXSIZE,
+                camera.name,
+            )
+
+    def _run(self) -> None:
+        while True:
+            try:
+                job = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if self._stop_event.is_set():
+                    return
+                continue
+            try:
+                self._deliver(job)
+            except Exception:
+                LOGGER.exception("Alert delivery failed for camera=%s", job.camera.name)
+            finally:
+                self._queue.task_done()
+
+    def _deliver(self, job: AlertJob) -> None:
+        snapshot_path = None
+        if self._app_config.telegram.include_snapshot:
+            snapshot_path = write_snapshot(
+                self._app_config.snapshot_dir, job.camera.name, job.frame, job.detections
+            )
+
+        labels = ", ".join(sorted({detection.label for detection in job.detections}))
+        LOGGER.info("Alerting camera=%s labels=%s snapshot=%s", job.camera.name, labels, snapshot_path)
+
+        try:
+            if self._notifier:
+                self._notifier.send_detections(job.camera.name, job.detections, snapshot_path)
+        finally:
+            if snapshot_path is not None:
+                snapshot_path.unlink(missing_ok=True)
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        # stop_event is already set by the caller; workers drain any in-flight
+        # jobs then exit on the next empty poll. Join so a final alert isn't cut
+        # off mid-upload during a clean shutdown.
+        for worker in self._workers:
+            worker.join(timeout=timeout)
 
 
 # Number of consecutive failed/empty reads tolerated before we tear the stream
@@ -160,11 +233,11 @@ def open_capture(camera: CameraConfig) -> cv2.VideoCapture | None:
 
 
 def monitor_camera(
-    app_config: AppConfig,
     camera: CameraConfig,
     detector: BirdDetector,
-    notifier: TelegramNotifier | None,
     alert_state: AlertState,
+    dispatcher: AlertDispatcher,
+    stats: CameraStats,
     stop_event: threading.Event,
 ) -> None:
     LOGGER.info("Starting camera %s", camera.name)
@@ -172,14 +245,18 @@ def monitor_camera(
     backoff = camera.reconnect_seconds
 
     while not stop_event.is_set():
+        stats.set_status("connecting")
         capture = open_capture(camera)
         if capture is None:
             LOGGER.warning("Could not open stream for %s; retrying in %.1fs", camera.name, backoff)
+            stats.set_status("reconnecting", backoff)
+            stats.record_reconnect()
             stop_event.wait(backoff)
             backoff = min(backoff * 2, camera.max_reconnect_seconds)
             continue
 
         LOGGER.info("Stream opened for %s", camera.name)
+        stats.set_status("connected")
         next_inference_at = 0.0
         consecutive_failures = 0
         try:
@@ -187,6 +264,7 @@ def monitor_camera(
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     consecutive_failures += 1
+                    stats.record_read_failure()
                     if consecutive_failures >= READ_FAILURE_LIMIT:
                         LOGGER.warning(
                             "Stream read failed for %s (%d consecutive); reconnecting",
@@ -207,8 +285,17 @@ def monitor_camera(
                 next_inference_at = now + min_frame_interval
 
                 detections = detector.predict(frame)
+                # Record after inference returns, so the cell's FPS reflects true
+                # capture+YOLO throughput, not the raw stream rate.
+                stats.record_inference([detection.label for detection in detections])
                 if detections:
-                    handle_detections(app_config, camera, notifier, alert_state, frame, detections)
+                    # Cooldown check is cheap (a lock + dict lookup); the slow
+                    # snapshot + Telegram work is handed to the dispatcher so
+                    # this loop returns to reading frames immediately.
+                    eligible = alert_state.eligible(camera.name, detections)
+                    if eligible:
+                        stats.record_alert(len(eligible))
+                        dispatcher.submit(camera, frame, eligible)
         except Exception:
             LOGGER.exception("Camera loop error for %s", camera.name)
         finally:
@@ -218,9 +305,12 @@ def monitor_camera(
         # error). Pace before reconnecting and grow the delay while the camera
         # stays down; a healthy read above already reset it to the base.
         if not stop_event.is_set():
+            stats.set_status("reconnecting", backoff)
+            stats.record_reconnect()
             stop_event.wait(backoff)
             backoff = min(backoff * 2, camera.max_reconnect_seconds)
 
+    stats.set_status("stopped")
     LOGGER.info("Stopped camera %s", camera.name)
 
 
@@ -292,6 +382,8 @@ def main() -> None:
 
     configure_ffmpeg_capture(enabled_cameras)
 
+    # Load the model before the live dashboard takes over the screen — YOLO's
+    # import/load chatter scrolls normally here instead of fighting the render.
     detector = BirdDetector(app_config.model)
     notifier = build_notifier(app_config)
     alert_state = AlertState(app_config.telegram.cooldown_seconds)
@@ -302,18 +394,48 @@ def main() -> None:
     # added to the feed without restarting in user_id mode.
     start_userinfo_thread(app_config.telegram.bot_token, stop_event)
 
-    with ThreadPoolExecutor(max_workers=len(enabled_cameras)) as executor:
-        futures = [
-            executor.submit(monitor_camera, app_config, camera, detector, notifier, alert_state, stop_event)
-            for camera in enabled_cameras
-        ]
-        while not stop_event.is_set():
-            for future in futures:
-                if future.done():
-                    future.result()
-                    stop_event.set()
-                    break
-            stop_event.wait(1.0)
+    # Delivery runs off the capture threads. One worker per camera means even a
+    # worst-case 60s photo upload on every camera at once never makes one
+    # camera's alert wait on another's.
+    dispatcher = AlertDispatcher(app_config, notifier, stop_event, workers=len(enabled_cameras))
+
+    registry = ObjectRegistry()
+    stats = {
+        camera.name: CameraStats(camera.name, camera.sample_fps, registry)
+        for camera in enabled_cameras
+    }
+    dashboard = Dashboard(
+        stats,
+        registry,
+        log_level=getattr(logging, args.log_level.upper(), logging.INFO),
+        logfile=os.getenv("AVIARY_LOG_FILE", "aviary.log"),
+    )
+    dashboard.start()
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(enabled_cameras)) as executor:
+            futures = [
+                executor.submit(
+                    monitor_camera,
+                    camera,
+                    detector,
+                    alert_state,
+                    dispatcher,
+                    stats[camera.name],
+                    stop_event,
+                )
+                for camera in enabled_cameras
+            ]
+            while not stop_event.is_set():
+                for future in futures:
+                    if future.done():
+                        future.result()
+                        stop_event.set()
+                        break
+                stop_event.wait(1.0)
+    finally:
+        dashboard.stop()
+        dispatcher.shutdown()
 
 
 if __name__ == "__main__":
