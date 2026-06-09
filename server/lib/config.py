@@ -44,7 +44,7 @@ class TelegramConfig:
     enabled: bool
     bot_token: str
     user_ids: list[str]
-    last_seen_alert_seconds: float = 60.0 * 15.0
+    last_seen_alert_seconds: float = 900.0
     bbox_movement_alert_ratio: float = 0.10
     include_snapshot: bool = True
 
@@ -55,16 +55,6 @@ class AppConfig:
     model: ModelConfig
     telegram: TelegramConfig
     cameras: list[CameraConfig]
-
-
-# Shared camera defaults. One camera is built per URL in the comma-separated
-# ``TAPO_RSTP`` env var, each using these settings.
-SAMPLE_FPS = 0.25
-RECONNECT_SECONDS = 5
-MAX_RECONNECT_SECONDS = 60
-OPEN_TIMEOUT_SECONDS = 10
-READ_TIMEOUT_SECONDS = 15
-RTSP_TRANSPORT = "tcp"
 
 
 def _require_env(name: str) -> str:
@@ -89,8 +79,6 @@ def _build_cameras() -> list[CameraConfig]:
             name=f"camera-{index + 1}",
             enabled=True,
             rtsp_url=url,
-            sample_fps=SAMPLE_FPS,
-            reconnect_seconds=RECONNECT_SECONDS,
         )
         for index, url in enumerate(_rtsp_urls())
     ]
@@ -107,8 +95,6 @@ def build_config() -> AppConfig:
         enabled=True,
         bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         user_ids=_as_user_ids(os.environ.get("TELEGRAM_USER_IDS", "")),
-        last_seen_alert_seconds=15.0,
-        bbox_movement_alert_ratio=0.10,
         include_snapshot=True,
     )
 
