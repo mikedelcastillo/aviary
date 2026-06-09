@@ -7,6 +7,8 @@ to construct. For methods that would talk to Immich we monkeypatch the instance'
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import requests
 
@@ -265,6 +267,60 @@ def test_iter_image_assets_sends_image_search_body(monkeypatch):
     assert body["page"] == 1
     assert body["size"] == 10
     assert "albumIds" not in body
+
+
+def test_iter_video_assets_sends_video_search_body(monkeypatch):
+    client = make_client()
+    captured = {}
+
+    def _request_json(method, path, **kwargs):
+        captured["body"] = kwargs["json"]
+        return make_page([])
+
+    monkeypatch.setattr(client, "_request_json", _request_json)
+    list(client.iter_video_assets(page_size=10))
+    body = captured["body"]
+    assert body["type"] == "VIDEO"
+    assert body["withExif"] is True
+    assert body["page"] == 1
+    assert body["size"] == 10
+    assert "albumIds" not in body
+
+
+def test_iter_video_assets_yields_items(monkeypatch):
+    client = make_client()
+    pages = [make_page([{"id": "v1"}, {"id": "v2"}])]
+    monkeypatch.setattr(client, "_request_json", scripted_request_json(pages))
+    result = list(client.iter_video_assets(page_size=250))
+    assert [a["id"] for a in result] == ["v1", "v2"]
+
+
+def test_download_video_transcoded_uses_playback_endpoint(monkeypatch):
+    client = make_client()
+    captured = {}
+
+    def _download(path, destination, params=None):
+        captured["path"] = path
+        captured["destination"] = destination
+        return requests.structures.CaseInsensitiveDict({"content-type": "video/mp4"})
+
+    monkeypatch.setattr(client, "_download", _download)
+    client.download_video("v1", Path("/tmp/v1.mp4"))
+    assert captured["path"] == "/assets/v1/video/playback"
+    assert captured["destination"] == Path("/tmp/v1.mp4")
+
+
+def test_download_video_original_uses_original_endpoint(monkeypatch):
+    client = make_client()
+    captured = {}
+
+    def _download(path, destination, params=None):
+        captured["path"] = path
+        return requests.structures.CaseInsensitiveDict()
+
+    monkeypatch.setattr(client, "_download", _download)
+    client.download_video("v1", Path("/tmp/v1.mp4"), transcoded=False)
+    assert captured["path"] == "/assets/v1/original"
 
 
 def test_iter_album_assets_sends_album_ids(monkeypatch):

@@ -79,6 +79,9 @@ class ImmichClient:
     def iter_image_assets(self, page_size: int = 250, limit: int | None = None) -> Iterable[dict[str, Any]]:
         yield from self._iter_search_assets({"type": "IMAGE", "withExif": True}, page_size, limit)
 
+    def iter_video_assets(self, page_size: int = 250, limit: int | None = None) -> Iterable[dict[str, Any]]:
+        yield from self._iter_search_assets({"type": "VIDEO", "withExif": True}, page_size, limit)
+
     def iter_album_assets(
         self,
         album_id: str,
@@ -96,6 +99,17 @@ class ImmichClient:
 
     def download_original(self, asset_id: str, path: Path) -> requests.structures.CaseInsensitiveDict:
         return self._download(f"/assets/{asset_id}/original", path)
+
+    def download_video(self, asset_id: str, path: Path, transcoded: bool = True) -> requests.structures.CaseInsensitiveDict:
+        """Download a video asset to ``path`` for frame sampling.
+
+        ``transcoded=True`` fetches Immich's transcoded playback stream (smaller, cheaper to
+        download and decode); ``transcoded=False`` fetches the untouched original. cv2 can't send
+        the ``x-api-key`` header, so the bytes must land on disk before ``cv2.VideoCapture``.
+        """
+        if transcoded:
+            return self._download(f"/assets/{asset_id}/video/playback", path)
+        return self.download_original(asset_id, path)
 
     def _iter_search_assets(
         self,

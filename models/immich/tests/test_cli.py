@@ -111,6 +111,41 @@ def test_boolean_flags_default_false(monkeypatch, missing_env):
     assert args.gpu_only is False
 
 
+# --------------------------------------------------------------------------- video args
+
+
+def test_video_defaults(monkeypatch, missing_env):
+    args = _parse(monkeypatch, env_file=missing_env)
+    assert args.skip_videos is False
+    assert args.video_every_seconds == 1.0
+    assert args.video_max_frames == 30
+    assert args.video_max_edge == 1280
+    assert args.video_transcoded is True
+
+
+def test_skip_videos_flag(monkeypatch, missing_env):
+    args = _parse(monkeypatch, "--skip-videos", env_file=missing_env)
+    assert args.skip_videos is True
+
+
+def test_video_original_clears_transcoded(monkeypatch, missing_env):
+    args = _parse(monkeypatch, "--video-original", env_file=missing_env)
+    assert args.video_transcoded is False
+
+
+def test_video_sampling_explicit_values(monkeypatch, missing_env):
+    args = _parse(
+        monkeypatch,
+        "--video-every-seconds", "2.5",
+        "--video-max-frames", "10",
+        "--video-max-edge", "0",
+        env_file=missing_env,
+    )
+    assert args.video_every_seconds == 2.5
+    assert args.video_max_frames == 10
+    assert args.video_max_edge == 0
+
+
 # --------------------------------------------------------------------------- env overrides
 
 
