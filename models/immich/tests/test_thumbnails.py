@@ -7,7 +7,11 @@ imported.
 
 from __future__ import annotations
 
-from aviary_immich.thumbnails import cache_thumbnail_chunk, thumbnail_for_asset
+from aviary_immich.thumbnails import (
+    cache_thumbnail_chunk,
+    delete_cached_thumbnail,
+    thumbnail_for_asset,
+)
 from fakes import FakeImmichClient, make_asset
 
 
@@ -269,3 +273,50 @@ def test_chunk_empty_assets_returns_empty(tmp_path):
 
     assert cached == []
     assert errors == []
+
+
+# --------------------------------------------------------------------------- delete_cached_thumbnail
+
+
+def test_delete_removes_cached_file_for_each_suffix(tmp_path):
+    slug = "acct"
+    account_cache = tmp_path / slug
+    account_cache.mkdir(parents=True)
+    for suffix in (".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"):
+        asset_id = f"asset{suffix}"
+        cached = account_cache / f"{asset_id}{suffix}"
+        cached.write_bytes(b"x")
+        delete_cached_thumbnail(tmp_path, slug, asset_id)
+        assert not cached.exists()
+
+
+def test_delete_removes_leftover_download_temp(tmp_path):
+    slug = "acct"
+    account_cache = tmp_path / slug
+    account_cache.mkdir(parents=True)
+    temp = account_cache / "a1.download"
+    temp.write_bytes(b"partial")
+
+    delete_cached_thumbnail(tmp_path, slug, "a1")
+
+    assert not temp.exists()
+
+
+def test_delete_missing_file_is_noop(tmp_path):
+    # No account dir at all — best-effort cleanup must never raise.
+    delete_cached_thumbnail(tmp_path, "acct", "ghost")
+
+
+def test_delete_only_targets_the_named_asset(tmp_path):
+    slug = "acct"
+    account_cache = tmp_path / slug
+    account_cache.mkdir(parents=True)
+    keep = account_cache / "keep.jpg"
+    keep.write_bytes(b"keep")
+    drop = account_cache / "drop.jpg"
+    drop.write_bytes(b"drop")
+
+    delete_cached_thumbnail(tmp_path, slug, "drop")
+
+    assert not drop.exists()
+    assert keep.exists()

@@ -34,6 +34,23 @@ def thumbnail_for_asset(client, cache_dir: Path, account_slug: str, asset_id: st
     return final_path
 
 
+def delete_cached_thumbnail(cache_dir: Path, account_slug: str, asset_id: str) -> None:
+    """Remove an asset's cached thumbnail (any known suffix) plus any leftover ``.download`` temp.
+
+    Called the moment a scan record is durably written: the image has already been downloaded,
+    decoded and inferred, so its on-disk thumbnail is dead weight — deleting it now keeps the cache
+    bounded to the in-flight working set instead of the whole library. Best-effort: a missing file
+    or unlink race is swallowed so cache cleanup never aborts a scan. The per-account scan state
+    (``state/``) remains the record of what was processed, so a deleted thumbnail is never re-fetched.
+    """
+    account_cache = cache_dir / account_slug
+    for suffix in (*_CACHE_SUFFIXES, ".download"):
+        try:
+            (account_cache / f"{asset_id}{suffix}").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def cache_thumbnail_chunk(
     assets: list[dict[str, Any]],
     client_factory: Callable[[], Any],

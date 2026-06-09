@@ -18,7 +18,7 @@ from aviary_immich.album_filing import AlbumTarget, handle_scan_record
 from aviary_immich.config import MODELS
 from aviary_immich.inference import scan_asset_batch_with_models
 from aviary_immich.records import bump_decision, chunks, scan_postfix
-from aviary_immich.thumbnails import cache_thumbnail_chunk
+from aviary_immich.thumbnails import cache_thumbnail_chunk, delete_cached_thumbnail
 from aviary_immich.workers import (
     drain_queue_iter,
     init_scan_worker,
@@ -136,6 +136,10 @@ def run_gpu_pipeline(
                 args.batch_size,
                 stats,
             )
+            # Record is durable in state now (so it won't be re-downloaded next run); the decoded
+            # image already drove inference, so its cached thumbnail is dead weight — drop it.
+            if not args.keep_cache:
+                delete_cached_thumbnail(args.cache_dir, account.slug, str(record["asset_id"]))
             if progress is not None:
                 progress.update(tasks["detect"], postfix=scan_postfix(stats))
 
@@ -308,6 +312,9 @@ def run_hybrid_pipeline(
                 stats,
             )
             handled += 1
+            # Durable in state; decoded image already used — drop the cached thumbnail.
+            if not args.keep_cache:
+                delete_cached_thumbnail(args.cache_dir, account.slug, str(record["asset_id"]))
             if progress is not None:
                 progress.update(
                     tasks["scan"],

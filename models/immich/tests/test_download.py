@@ -121,7 +121,7 @@ def test_parse_args_defaults(monkeypatch):
     assert args.output_dir == Path("models/annotation/raw/immich_birds")
     assert args.accounts_config == Path("models/immich/config/accounts.yaml")
     assert args.env_file == Path(".env")
-    assert args.manifest_dir == Path("models/immich/manifests")
+    assert args.manifest_dir == Path("models/immich/data/manifests")
     assert args.limit is None
     assert args.overwrite is False
     assert args.allow_shared_album is False

@@ -1,10 +1,11 @@
-"""Implementation behind the ``clear-cache`` console script: delete generate-albums' local cache.
+"""Implementation behind the ``clear-cache`` console script: full reset of generate-albums' data.
 
-The thumbnail cache (``models/immich/cache/thumbnails`` by default) is just downloaded preview
-images — the album generator re-fetches whatever it needs — so it is safe to delete to reclaim
-disk (it can grow to many GB). Scan state (``state/``) and album manifests (``manifests/``) are
-deliberately NOT touched: they are the resumable record of what has been classified and filed, not
-a cache, and deleting them would force a full re-scan.
+All of generate-albums' throwaway and resumable data lives under one directory
+(``models/immich/data`` by default), with three subdirs: ``cache/`` (downloaded preview
+thumbnails), ``manifests/`` (per-album CSV logs), and ``state/`` (per-account scan JSONL — the
+record of what has been processed). ``clear-cache`` wipes **all three** (a full reset): the next
+``generate-albums`` run then re-downloads and re-scans everything from scratch. Each subdir's
+``.gitkeep`` is preserved so the git-tracked structure stays in place.
 
 Kept dependency-free (stdlib only) so it imports cheaply and is unit-testable.
 """
@@ -17,14 +18,19 @@ from pathlib import Path
 
 from aviary_immich.ui import emit
 
+# The throwaway/resumable subdirs under the data dir, cleared in this order.
+DATA_SUBDIRS = ("cache", "manifests", "state")
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Delete generate-albums' local thumbnail cache.")
+    parser = argparse.ArgumentParser(
+        description="Delete generate-albums' cache, manifests, and scan state (full reset)."
+    )
     parser.add_argument(
-        "--cache-dir",
+        "--data-dir",
         type=Path,
-        default=Path("models/immich/cache/thumbnails"),
-        help="Cache directory to clear (matches generate-albums' --cache-dir default).",
+        default=Path("models/immich/data"),
+        help="generate-albums data directory holding cache/, manifests/, and state/.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Report what would be deleted without deleting.")
     return parser.parse_args()
@@ -68,14 +74,40 @@ def clear_cache(cache_dir: Path, dry_run: bool = False) -> tuple[int, int]:
     return files, total
 
 
+def clear_data(data_dir: Path, dry_run: bool = False) -> dict[str, tuple[int, int]]:
+    """Clear each throwaway/resumable subdir under ``data_dir`` (``cache``/``manifests``/``state``).
+
+    Returns ``{subdir: (files, bytes_freed)}`` for the subdirs that exist. Each is cleared with
+    :func:`clear_cache`, so its ``.gitkeep`` is preserved and the directory stays in place.
+    """
+    results: dict[str, tuple[int, int]] = {}
+    for sub in DATA_SUBDIRS:
+        target = data_dir / sub
+        if target.exists():
+            results[sub] = clear_cache(target, dry_run=dry_run)
+    return results
+
+
 def main() -> None:
     args = parse_args()
-    files, freed = clear_cache(args.cache_dir, dry_run=args.dry_run)
-    if not args.cache_dir.exists():
-        emit(f"[dim]Nothing to clear: {args.cache_dir} does not exist.[/]")
+    if not args.data_dir.exists():
+        emit(f"[dim]Nothing to clear: {args.data_dir} does not exist.[/]")
+        return
+    results = clear_data(args.data_dir, dry_run=args.dry_run)
+    if not results:
+        emit(f"[dim]Nothing to clear under {args.data_dir} (no cache/, manifests/, or state/).[/]")
         return
     verb = "Would delete" if args.dry_run else "Deleted"
-    emit(f"{verb} {files} cached file(s) ({_human(freed)}) from [bold]{args.cache_dir}[/]")
+    total_files = 0
+    total_bytes = 0
+    for sub in DATA_SUBDIRS:
+        if sub not in results:
+            continue
+        files, freed = results[sub]
+        total_files += files
+        total_bytes += freed
+        emit(f"  [dim]{sub}[/]: {files} file(s) ({_human(freed)})")
+    emit(f"{verb} {total_files} file(s) ({_human(total_bytes)}) from [bold]{args.data_dir}[/]")
 
 
 if __name__ == "__main__":

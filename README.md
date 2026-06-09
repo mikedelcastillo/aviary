@@ -108,10 +108,12 @@ fill `.env` with `IMMICH_BASE_URL` plus the account API keys. Then generate the
 uv run generate-albums
 ```
 
-Reruns are resumable. Previously scanned assets are read from
-`models/immich/state/`, previously manifested bird IDs are read from
-`models/immich/manifests/`, and existing album asset IDs are checked before
-adding new assets so the script does not intentionally re-add duplicates.
+Reruns are resumable. All of the generator's data lives under
+`models/immich/data/`: previously scanned assets are read from
+`models/immich/data/state/` (this is what makes a rerun skip — and never
+re-download — an already-scanned asset), previously manifested bird IDs are read
+from `models/immich/data/manifests/`, and existing album asset IDs are checked
+before adding new assets so the script does not intentionally re-add duplicates.
 
 ## External References
 

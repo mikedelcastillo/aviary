@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--accounts-config", type=Path, default=Path("models/immich/config/accounts.yaml"))
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--output-dir", type=Path, default=Path("models/annotation/raw/immich_birds"))
-    parser.add_argument("--manifest-dir", type=Path, default=Path("models/immich/manifests"))
+    parser.add_argument("--manifest-dir", type=Path, default=Path("models/immich/data/manifests"))
     parser.add_argument("--page-size", type=int, default=250)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--overwrite", action="store_true")

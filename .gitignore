@@ -16,9 +16,7 @@ models/training/datasets/**
 models/training/runs/**
 server/snapshots/**
 server/models/**
-models/immich/cache/**
-models/immich/manifests/**
-models/immich/state/**
+models/immich/data/**
 
 !models/annotation/raw/
 !models/annotation/raw/**/
@@ -34,13 +32,9 @@ models/immich/state/**
 !server/models/
 !server/models/current/
 !server/models/current/.gitkeep
-!models/immich/cache/
-!models/immich/cache/**/
-!models/immich/cache/**/.gitkeep
-!models/immich/manifests/
-!models/immich/manifests/.gitkeep
-!models/immich/state/
-!models/immich/state/.gitkeep
+!models/immich/data/
+!models/immich/data/**/
+!models/immich/data/**/.gitkeep
 
 # Model artifacts are large.
 *.pt

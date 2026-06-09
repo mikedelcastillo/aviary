@@ -100,9 +100,9 @@ def test_cpu_workers_default(monkeypatch, missing_env):
 def test_path_defaults_are_paths(monkeypatch, missing_env):
     args = _parse(monkeypatch, env_file=missing_env)
     assert args.accounts_config == Path("models/immich/config/accounts.yaml")
-    assert args.cache_dir == Path("models/immich/cache/thumbnails")
-    assert args.state_dir == Path("models/immich/state")
-    assert args.manifest_dir == Path("models/immich/manifests")
+    assert args.cache_dir == Path("models/immich/data/cache")
+    assert args.state_dir == Path("models/immich/data/state")
+    assert args.manifest_dir == Path("models/immich/data/manifests")
 
 
 def test_limit_default_is_none(monkeypatch, missing_env):
@@ -116,6 +116,7 @@ def test_boolean_flags_default_false(monkeypatch, missing_env):
     assert args.dry_run is False
     assert args.cpu_only is False
     assert args.gpu_only is False
+    assert args.keep_cache is False
 
 
 # --------------------------------------------------------------------------- video args
