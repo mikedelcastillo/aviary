@@ -723,6 +723,7 @@ def run_hybrid_pipeline(
                     account.slug,
                     args.thumbnail_size,
                     args.download_workers,
+                    decode=True,
                 )
                 while not stop_event.is_set() and "gpu_consumer" not in error_sink:
                     try:
@@ -748,7 +749,7 @@ def run_hybrid_pipeline(
                 for record in error_records:
                     results_queue.put(record)
                 records = scan_asset_batch_with_detector(
-                    cached, detector, account.slug, inference_batch_size
+                    cached, detector, account.slug, inference_batch_size, use_arrays=True
                 )
                 for record in records:
                     results_queue.put(record)
@@ -878,20 +879,22 @@ def main() -> None:
     cpu_workers = 0
     if selected_device != "cpu":
         worker_count = 1
-        if args.gpu_only:
-            cpu_workers = 0  # pure GPU: run_gpu_pipeline only, no hybrid CPU workers
+        if args.gpu_only or args.cpu_workers <= 0:
+            # Auto default is GPU-only (run_gpu_pipeline). Hybrid CPU workers are OFF unless the
+            # user explicitly opts in with --cpu-workers N.
+            #
+            # Why GPU-only by default: benchmarked, adding CPU workers is monotonically SLOWER for a
+            # large model. yolo11x CPU inference is ~30x slower per image than even a GTX 1060, so
+            # the CPU only ever claims ~10% of the work no matter the worker count — and those few
+            # assets become stragglers while the worker processes steal cores from the GPU pipeline's
+            # decode/download threads, dragging the GPU's own rate down. The GPU alone is the ceiling.
+            cpu_workers = 0
         else:
+            # Explicit opt-in to hybrid GPU+CPU (for smaller models / weak-GPU boxes where the CPU
+            # can actually keep up). Don't oversubscribe download threads against CPU inference.
+            cpu_workers = args.cpu_workers
             cpu_count = os.cpu_count() or 1
-            # Downloads now share cores with CPU inference, so don't oversubscribe them.
-            hybrid_download_workers = min(args.download_workers, max(2, cpu_count // 2))
-            # Auto: leave the GPU pipeline (download threads + host-side preprocessing) and the
-            # result/orchestration thread enough cores so the GPU never starves; CPU gets the rest.
-            if args.cpu_workers >= 0:
-                cpu_workers = args.cpu_workers
-            else:
-                cpu_workers = max(0, cpu_count - hybrid_download_workers - 2)
-            if cpu_workers > 0:
-                args.download_workers = hybrid_download_workers
+            args.download_workers = min(args.download_workers, max(2, cpu_count // 2))
     config_panel(
         args,
         selected_device,
