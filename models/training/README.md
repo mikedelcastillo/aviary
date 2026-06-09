@@ -4,10 +4,10 @@ This folder prepares CVAT YOLO exports and trains the bird detector.
 
 ## Setup
 
+From the repo root (see the top-level README for installing uv):
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r models/training/requirements.txt
+uv sync
 ```
 
 ## Prepare a Dataset
@@ -15,7 +15,7 @@ pip install -r models/training/requirements.txt
 Place a CVAT YOLO export under `models/annotation/exports/v001`, then normalize it:
 
 ```bash
-python models/training/scripts/prepare_dataset.py \
+uv run prepare-dataset \
   --source models/annotation/exports/v001 \
   --output models/training/datasets/v001
 ```
@@ -37,7 +37,7 @@ models/training/datasets/v001/
 ## Train
 
 ```bash
-python models/training/scripts/train.py \
+uv run train \
   --data models/training/datasets/v001/dataset.yaml \
   --epochs 100 \
   --imgsz 960 \
@@ -51,7 +51,7 @@ Silicon. Omit `--device` to let Ultralytics decide.
 ## Evaluate
 
 ```bash
-python models/training/scripts/evaluate.py \
+uv run evaluate \
   --model server/models/current/bird_detector.pt \
   --data models/training/datasets/v001/dataset.yaml
 ```

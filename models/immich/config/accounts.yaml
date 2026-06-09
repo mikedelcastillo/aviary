@@ -1,0 +1,9 @@
+# Keep the server URL/IP and API key values in .env.
+accounts:
+  - slug: account_1
+    api_key_env: IMMICH_ACCOUNT_1_API_KEY
+    enabled: true
+
+  - slug: account_2
+    api_key_env: IMMICH_ACCOUNT_2_API_KEY
+    enabled: true

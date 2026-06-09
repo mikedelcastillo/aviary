@@ -8,13 +8,20 @@ from pathlib import Path
 from typing import Any
 
 
+BIRD_ALBUM_NAME = "Birds"
+
+# Animal categories the detector classifies, mapped to their Immich album names. The keys are
+# the YOLO/COCO label names (lowercase); the detector filters on exactly these labels and each
+# matching photo is filed into the corresponding album.
+ANIMAL_ALBUMS = {"bird": "Birds", "dog": "Dogs", "cat": "Cats"}
+ANIMAL_LABELS = tuple(ANIMAL_ALBUMS)  # ("bird", "dog", "cat")
+
+
 @dataclass(frozen=True)
 class AccountConfig:
     slug: str
-    name: str
     api_key_env: str
     api_key: str
-    album_name: str = "Birds"
     enabled: bool = True
 
 
@@ -59,7 +66,7 @@ def load_accounts_config(path: Path, env_file: Path = Path(".env")) -> ImmichCon
 
     if not path.exists():
         raise FileNotFoundError(
-            f"Missing account config: {path}. Copy models/immich/config/accounts.example.yaml to this path."
+            f"Missing account config: {path}."
         )
 
     base_url = os.getenv("IMMICH_BASE_URL")
@@ -91,9 +98,7 @@ def _load_account(raw: dict[str, Any]) -> AccountConfig:
 
     return AccountConfig(
         slug=slug,
-        name=str(raw.get("name", slug)).strip() or slug,
         api_key_env=api_key_env,
         api_key=api_key,
-        album_name=str(raw.get("album_name", "Birds")).strip() or "Birds",
         enabled=bool(raw.get("enabled", True)),
     )

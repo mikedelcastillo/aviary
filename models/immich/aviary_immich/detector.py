@@ -2,9 +2,53 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
+
+# Keep ultralytics/YOLO quiet so its banners and per-call logs don't corrupt the rich
+# progress display (workers load the model while the live display is already running).
+# Must be set before ultralytics is imported, so do it at module import time.
+os.environ.setdefault("YOLO_VERBOSE", "False")
+
+# Reduce CUDA fragmentation OOMs on small GPUs (e.g. the GTX 1060's 6 GB). Must be set before
+# the CUDA context initializes, i.e. before torch is imported in __init__.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+
+def _silence_ultralytics() -> None:
+    for name in ("ultralytics", "yolo"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
+def _should_use_fp16(device: str) -> bool:
+    """Enable fp16 only where it is actually fast.
+
+    - ``cpu`` / ``mps``: fp32.
+    - ROCm/AMD (``torch.version.hip`` set, e.g. the 7900XT): fp16 — fast on RDNA3.
+    - NVIDIA: only compute capability >= 7.0. Pascal (sm_6x, e.g. the GTX 1060) runs fp16 at
+      ~1/64 of fp32, so it must stay fp32.
+
+    Honors the ``IMMICH_BIRD_HALF`` override: ``auto`` (default) / ``1`` (force on) / ``0`` (off).
+    """
+    override = os.getenv("IMMICH_BIRD_HALF", "auto").strip().lower()
+    if override in {"0", "false", "off", "no"}:
+        return False
+    if override in {"1", "true", "on", "yes"}:
+        return True
+
+    if not device.startswith("cuda"):
+        return False
+    try:
+        import torch
+
+        if getattr(torch.version, "hip", None):
+            return True
+        return torch.cuda.get_device_capability(device)[0] >= 7
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -43,31 +87,85 @@ class PretrainedBirdDetector:
     ) -> None:
         from ultralytics import YOLO
 
+        _silence_ultralytics()
         self.model_name = model_name
         self.threshold = threshold
         self.device = select_device(device)
+        # fp16 only where it actually helps — see _should_use_fp16 (Pascal/CPU stay fp32).
+        self.half = _should_use_fp16(self.device)
         self.model = YOLO(model_name)
+        # Fold Conv+BN once up front (numerically equivalent); ultralytics also auto-fuses on first
+        # predict, so this is mostly defensive.
+        try:
+            self.model.fuse()
+        except Exception:
+            pass
+        # Class-name map never changes after load — cache it instead of re-reading self.model.names
+        # for every detection in _prediction_from_result.
+        self._names = self.model.names
         self.bird_labels = {label.lower() for label in bird_labels}
         self.bird_class_ids = self._resolve_bird_class_ids()
         if not self.bird_class_ids:
             raise ValueError(f"Model {model_name} does not expose any of these labels: {sorted(self.bird_labels)}")
+        self._warmup()
+
+    def _warmup(self) -> None:
+        """Run a throwaway inference so the first real batch doesn't eat compile cost."""
+        try:
+            import numpy as np
+
+            blank = np.zeros((640, 640, 3), dtype=np.uint8)
+            self.model.predict(
+                source=blank,
+                conf=self.threshold,
+                device=self.device,
+                classes=sorted(self.bird_class_ids),
+                half=self.half,
+                verbose=False,
+            )
+        except Exception:
+            pass
 
     def predict(self, image_path: Path) -> BirdPrediction:
+        return self.predict_batch([image_path], batch_size=1)[0]
+
+    def predict_batch(self, image_paths: Iterable[Path], batch_size: int = 64) -> list[BirdPrediction]:
+        paths = list(image_paths)
+        if not paths:
+            return []
+        return self._predict([str(path) for path in paths], batch_size)
+
+    def predict_batch_arrays(self, images: Iterable[Any], batch_size: int = 64) -> list[BirdPrediction]:
+        """Like ``predict_batch`` but takes pre-decoded BGR HWC uint8 arrays.
+
+        Lets the caller decode (cv2.imread) on its own threads — which release the GIL — so the
+        single GPU thread isn't serialized on disk reads + decode between forward passes.
+        ``model.predict`` accepts a list of ndarrays as ``source`` natively; results are identical
+        to feeding the same files by path (ultralytics decodes paths with the same cv2 call).
+        """
+        images = list(images)
+        if not images:
+            return []
+        return self._predict(images, batch_size)
+
+    def _predict(self, source: list[Any], batch_size: int) -> list[BirdPrediction]:
         results = self.model.predict(
-            source=str(image_path),
+            source=source,
+            batch=max(1, batch_size),
             conf=self.threshold,
             device=self.device,
             classes=sorted(self.bird_class_ids),
+            half=self.half,
             verbose=False,
         )
+        return [self._prediction_from_result(result) for result in results]
 
+    def _prediction_from_result(self, result) -> BirdPrediction:
         detections: list[dict[str, float | int | str]] = []
         max_confidence = 0.0
-        if not results:
-            return BirdPrediction(has_bird=False, max_confidence=0.0, detections=[])
 
-        names = self.model.names
-        for box in results[0].boxes:
+        names = self._names
+        for box in result.boxes:
             class_id = int(box.cls[0].item())
             confidence = float(box.conf[0].item())
             x1, y1, x2, y2 = (int(round(value)) for value in box.xyxy[0].tolist())
@@ -91,7 +189,7 @@ class PretrainedBirdDetector:
         )
 
     def _resolve_bird_class_ids(self) -> set[int]:
-        names = self.model.names
+        names = self._names
         if isinstance(names, dict):
             return {int(class_id) for class_id, label in names.items() if str(label).lower() in self.bird_labels}
         return {index for index, label in enumerate(names) if str(label).lower() in self.bird_labels}

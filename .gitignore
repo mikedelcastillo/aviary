@@ -19,7 +19,6 @@ server/models/**
 models/immich/cache/**
 models/immich/manifests/**
 models/immich/state/**
-models/immich/config/accounts.yaml
 
 !models/annotation/raw/
 !models/annotation/raw/**/
@@ -36,7 +35,8 @@ models/immich/config/accounts.yaml
 !server/models/current/
 !server/models/current/.gitkeep
 !models/immich/cache/
-!models/immich/cache/.gitkeep
+!models/immich/cache/**/
+!models/immich/cache/**/.gitkeep
 !models/immich/manifests/
 !models/immich/manifests/.gitkeep
 !models/immich/state/
