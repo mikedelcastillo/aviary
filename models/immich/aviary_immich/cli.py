@@ -1,0 +1,313 @@
+"""Argument parsing and the ``main`` orchestrator for ``generate-albums``.
+
+Heavy dependencies (the Immich client, the detector, rich console, state appenders) stay
+lazy-imported inside ``main`` so importing this module never pulls the GPU/ML stack — the same
+discipline the rest of the package follows, and what lets the test suite import it freely.
+"""
+
+from __future__ import annotations
+
+import argparse
+import multiprocessing as mp
+import os
+import time
+from contextlib import ExitStack
+from pathlib import Path
+from typing import Any
+
+from aviary_immich.album_filing import AlbumTarget, album_asset_ids, flush_album_batch, handle_scan_record
+from aviary_immich.pipelines import run_gpu_pipeline, run_hybrid_pipeline
+from aviary_immich.records import bump_decision
+from aviary_immich.ui import emit, progress
+from aviary_immich.workers import init_scan_worker, scan_asset_worker, scan_asset_worker_with_detector
+
+
+def parse_args() -> argparse.Namespace:
+    env_parser = argparse.ArgumentParser(add_help=False)
+    env_parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    env_args, _ = env_parser.parse_known_args()
+    from aviary_immich.config import load_env_file
+
+    load_env_file(env_args.env_file)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--accounts-config", type=Path, default=Path("models/immich/config/accounts.yaml"))
+    parser.add_argument("--env-file", type=Path, default=Path(".env"))
+    parser.add_argument("--cache-dir", type=Path, default=Path("models/immich/cache/thumbnails"))
+    parser.add_argument("--state-dir", type=Path, default=Path("models/immich/state"))
+    parser.add_argument("--manifest-dir", type=Path, default=Path("models/immich/manifests"))
+    parser.add_argument("--model", default=os.getenv("IMMICH_BIRD_MODEL", "yolo11x.pt"))
+    parser.add_argument("--threshold", type=float, default=float(os.getenv("IMMICH_BIRD_THRESHOLD", "0.30")))
+    parser.add_argument("--device", default=os.getenv("IMMICH_BIRD_DEVICE", "auto"))
+    parser.add_argument("--thumbnail-size", default=os.getenv("IMMICH_THUMBNAIL_SIZE", "preview"))
+    parser.add_argument("--page-size", type=int, default=250)
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--chunk-size", type=int, default=1000)
+    parser.add_argument("--inference-batch-size", type=int, default=64)
+    parser.add_argument("--download-workers", type=int, default=min(16, (os.cpu_count() or 4) * 2))
+    parser.add_argument("--prefetch", type=int, default=2)
+    parser.add_argument("--workers", type=int, default=int(os.getenv("IMMICH_BIRD_WORKERS", str(os.cpu_count() or 1))))
+    parser.add_argument("--cpu-workers", type=int, default=-1)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--force-rescan", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--cpu-only", action="store_true", help="Force CPU; ignore any GPU.")
+    mode.add_argument(
+        "--gpu-only",
+        action="store_true",
+        help="Force GPU with no hybrid CPU workers; error if no GPU is found.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    from aviary_immich.client import ImmichClient
+    from aviary_immich.config import ANIMAL_ALBUMS, ANIMAL_LABELS, load_accounts_config
+    from aviary_immich.console import (
+        account_header,
+        account_summary_table,
+        config_panel,
+        grand_total_table,
+    )
+    from aviary_immich.detector import PretrainedBirdDetector, select_device
+    from aviary_immich.state import (
+        CsvAppender,
+        JsonlAppender,
+        load_jsonl_state,
+        load_manifest_ids,
+    )
+
+    config = load_accounts_config(args.accounts_config, args.env_file)
+    if args.cpu_only:
+        selected_device = "cpu"
+    elif args.gpu_only:
+        selected_device = select_device(args.device)
+        if selected_device == "cpu":
+            emit("[red]--gpu-only set but no GPU was detected.[/]")
+            raise SystemExit(1)
+    else:
+        selected_device = select_device(args.device)
+    worker_count = max(1, args.workers)
+    chunk_size = max(1, args.chunk_size)
+    inference_batch_size = max(1, args.inference_batch_size)
+    cpu_workers = 0
+    if selected_device != "cpu":
+        worker_count = 1
+        if args.gpu_only or args.cpu_workers <= 0:
+            # Auto default is GPU-only (run_gpu_pipeline). Hybrid CPU workers are OFF unless the
+            # user explicitly opts in with --cpu-workers N.
+            #
+            # Why GPU-only by default: benchmarked, adding CPU workers is monotonically SLOWER for a
+            # large model. yolo11x CPU inference is ~30x slower per image than even a GTX 1060, so
+            # the CPU only ever claims ~10% of the work no matter the worker count — and those few
+            # assets become stragglers while the worker processes steal cores from the GPU pipeline's
+            # decode/download threads, dragging the GPU's own rate down. The GPU alone is the ceiling.
+            cpu_workers = 0
+        else:
+            # Explicit opt-in to hybrid GPU+CPU (for smaller models / weak-GPU boxes where the CPU
+            # can actually keep up). Don't oversubscribe download threads against CPU inference.
+            cpu_workers = args.cpu_workers
+            cpu_count = os.cpu_count() or 1
+            args.download_workers = min(args.download_workers, max(2, cpu_count // 2))
+    config_panel(
+        args,
+        selected_device,
+        worker_count,
+        chunk_size,
+        inference_batch_size,
+        args.download_workers,
+        args.prefetch,
+        cpu_workers,
+    )
+    if cpu_workers >= 4:
+        emit(
+            f"[yellow]Hybrid mode: {cpu_workers} CPU workers each load a full copy of "
+            f"{args.model} into RAM — lower --cpu-workers if memory is tight.[/]"
+        )
+    detector = None
+    if worker_count == 1:
+        detector = PretrainedBirdDetector(args.model, args.threshold, selected_device, ANIMAL_LABELS)
+        if selected_device != "cpu":
+            emit(f"[dim]device {selected_device} — fp16 {'on' if detector.half else 'off'}[/]")
+    emit(f"[dim]classifying: {', '.join(ANIMAL_ALBUMS.values())}[/]")
+
+    manifest_fields = [
+        "account",
+        "asset_id",
+        "decision",
+        "max_confidence",
+        "original_file_name",
+        "album_name",
+        "created_at",
+    ]
+
+    per_account: list[dict[str, Any]] = []
+
+    for account in config.accounts:
+        started = time.perf_counter()
+        client = ImmichClient(config.base_url, account.api_key)
+        user = client.get_my_user()
+        connected_as = str(user.get("email") or user.get("name") or user.get("id"))
+
+        state_path = args.state_dir / f"{account.slug}_scan.jsonl"
+        state = load_jsonl_state(state_path)
+
+        stats: dict[str, Any] = {
+            "scanned": 0,
+            "already": 0,
+            "birds": 0,
+            "dogs": 0,
+            "cats": 0,
+            "other": 0,
+            "errors": 0,
+            "added": 0,
+            "elapsed": 0.0,
+        }
+
+        with ExitStack() as stack:
+            # One JSONL state file per account (a single scan, multi-label records); one CSV
+            # manifest per album. All scan paths share these open appenders.
+            state_appender = stack.enter_context(JsonlAppender(state_path))
+
+            targets: list[AlbumTarget] = []
+            for label, album_name in ANIMAL_ALBUMS.items():
+                album = {"id": "dry-run", "albumName": album_name}
+                if not args.dry_run:
+                    album = client.ensure_owned_album(album_name)
+                manifest_path = args.manifest_dir / f"{account.slug}_{album_name.lower()}.csv"
+                manifested_ids = load_manifest_ids(manifest_path)
+                appender = stack.enter_context(CsvAppender(manifest_path, manifest_fields))
+                targets.append(
+                    AlbumTarget(
+                        label=label,
+                        album_name=str(album.get("albumName") or album_name),
+                        album_id=str(album["id"]),
+                        album_ids=set() if args.dry_run else album_asset_ids(client, str(album["id"]), args.page_size),
+                        manifested_ids=manifested_ids,
+                        write_manifest=appender.write,
+                    )
+                )
+
+            account_header(
+                account.slug,
+                connected_as,
+                ", ".join(target.album_name for target in targets),
+                None,
+                None,
+                args.dry_run,
+            )
+            if not args.dry_run:
+                for target in targets:
+                    emit(
+                        f"  [bold]{target.album_name}[/] ([dim]{target.album_id}[/]) — "
+                        f"{len(target.album_ids)} assets already present"
+                    )
+
+            assets = list(progress(client.iter_image_assets(page_size=args.page_size, limit=args.limit), desc=account.slug, unit="asset"))
+            scan_assets: list[dict[str, Any]] = []
+            for asset in assets:
+                record = state.get(str(asset["id"]))
+                if record and not args.force_rescan:
+                    handle_scan_record(record, asset, account, client, targets, args.dry_run, args.batch_size, stats)
+                else:
+                    scan_assets.append(asset)
+            stats["scanned"] = len(scan_assets)
+            stats["already"] = len(assets) - len(scan_assets)
+
+            if scan_assets:
+                if selected_device != "cpu":
+                    if cpu_workers > 0:
+                        run_hybrid_pipeline(
+                            scan_assets,
+                            detector,
+                            client,
+                            config.base_url,
+                            account.api_key,
+                            account,
+                            targets,
+                            args,
+                            inference_batch_size,
+                            cpu_workers,
+                            state,
+                            state_appender,
+                            stats,
+                        )
+                    else:
+                        run_gpu_pipeline(
+                            scan_assets,
+                            detector,
+                            client,
+                            config.base_url,
+                            account.api_key,
+                            account,
+                            targets,
+                            args,
+                            inference_batch_size,
+                            state,
+                            state_appender,
+                            stats,
+                        )
+                elif worker_count == 1:
+                    for asset in progress(scan_assets, desc=f"{account.slug} detect", unit="asset"):
+                        record = scan_asset_worker_with_detector(
+                            asset,
+                            client,
+                            detector,
+                            args.cache_dir,
+                            account.slug,
+                            args.thumbnail_size,
+                        )
+                        state_appender.write(record)
+                        state[str(record["asset_id"])] = record
+                        bump_decision(stats, record)
+                        handle_scan_record(record, asset, account, client, targets, args.dry_run, args.batch_size, stats)
+                else:
+                    assets_by_id = {str(asset["id"]): asset for asset in scan_assets}
+                    with mp.get_context("spawn").Pool(
+                        processes=worker_count,
+                        initializer=init_scan_worker,
+                        initargs=(
+                            config.base_url,
+                            account.api_key,
+                            args.model,
+                            args.threshold,
+                            selected_device,
+                            ANIMAL_LABELS,
+                            str(args.cache_dir),
+                            account.slug,
+                            args.thumbnail_size,
+                        ),
+                    ) as pool:
+                        for record in progress(
+                            pool.imap_unordered(scan_asset_worker, scan_assets),
+                            total=len(scan_assets),
+                            desc=f"{account.slug} detect",
+                            unit="asset",
+                        ):
+                            state_appender.write(record)
+                            state[str(record["asset_id"])] = record
+                            bump_decision(stats, record)
+                            handle_scan_record(
+                                record,
+                                assets_by_id.get(str(record["asset_id"])),
+                                account,
+                                client,
+                                targets,
+                                args.dry_run,
+                                args.batch_size,
+                                stats,
+                            )
+
+            for target in targets:
+                flush_album_batch(client, target.album_id, target.pending, args.dry_run)
+                target.album_ids.update(target.pending_ids)
+                target.pending_ids.clear()
+
+        stats["elapsed"] = time.perf_counter() - started
+        account_summary_table(account.slug, stats)
+        per_account.append({"slug": account.slug, **stats})
+
+    grand_total_table(per_account)

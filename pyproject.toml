@@ -22,6 +22,7 @@ evaluate = "evaluate:main"
 prepare-dataset = "prepare_dataset:main"
 extract-frames = "extract_frames:main"
 server = "aviary_server.main:main"
+tests = "run_tests:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -40,6 +41,7 @@ packages = [
 [tool.hatch.build.targets.wheel.force-include]
 "models/immich/generate_albums.py" = "generate_albums.py"
 "models/immich/download_immich_birds.py" = "download_immich_birds.py"
+"models/immich/run_tests.py" = "run_tests.py"
 "models/training/scripts/train.py" = "train.py"
 "models/training/scripts/evaluate.py" = "evaluate.py"
 "models/training/scripts/prepare_dataset.py" = "prepare_dataset.py"
@@ -50,3 +52,17 @@ packages = [
 # scripts/install-gpu.{sh,ps1} after `uv sync` — see that script and models/immich/README.md.
 # (uv can't pick the build itself: the GTX 1060 and RTX 5060 are both "linux/x86_64" to uv yet
 # need incompatible wheels — cu118 with Pascal vs cu128 with Blackwell.)
+
+[dependency-groups]
+# Pure-Python; safe to install without disturbing the per-machine GPU torch build.
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+# pythonpath puts the source tree (not the installed site-packages copy) at the FRONT of
+# sys.path, so `import aviary_immich` / `import generate_albums` resolve to live source — tests
+# exercise edited code without a reinstall. testpaths scopes discovery to the immich suite.
+# Source tree first so `import aviary_immich`/`generate_albums` hit live source; the tests dir is
+# on the path too so test modules can `from fakes import ...` shared doubles.
+pythonpath = ["models/immich", "models/immich/tests"]
+testpaths = ["models/immich/tests"]
+addopts = "-q"

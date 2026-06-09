@@ -94,6 +94,39 @@ models/annotation/raw/immich_birds/<account>/
 The scripts write resumable state and manifests under `models/immich/state/` and
 `models/immich/manifests/`.
 
+## Tests
+
+The album generator's logic lives in small, single-responsibility modules under
+`aviary_immich/` (records, thumbnails, inference, album_filing, workers, pipelines, cli,
+download, ui); `generate_albums.py` / `download_immich_birds.py` are thin entry-point shells.
+Each module has a unit-test file under `models/immich/tests/`, with shared test doubles in
+`tests/fakes.py`. The suite is CPU-only — no GPU, network, or model download — because the
+heavy deps (torch/cv2/ultralytics) are lazy-imported.
+
+Run the whole suite:
+
+```bash
+uv run --no-sync tests          # or: uv run --no-sync pytest
+```
+
+Pass pytest args through, e.g. `uv run --no-sync tests -k records -x`.
+
+Use `--no-sync` (or `export UV_NO_SYNC=1`) for the same reason as the generator: a plain
+`uv run` re-syncs and would revert the per-machine GPU torch to the default build. pytest is
+configured (root `pyproject.toml`, `[tool.pytest.ini_options]`) to put the source tree at the
+front of `sys.path`, so tests always exercise **live source** — no reinstall is needed between
+edits to run tests.
+
+One-time setup (neither step touches the GPU torch):
+
+```bash
+uv pip install pytest                          # pure-Python test deps
+uv pip install --no-deps --force-reinstall .   # creates the `tests` console script
+```
+
+(The reinstall is the same step already needed for edits to the generator scripts to take
+effect at runtime — see the staleness note above.)
+
 ## Notes
 
 This is a high-recall prefilter. Expect false positives. The authoritative
