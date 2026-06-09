@@ -103,18 +103,23 @@ class FakeImmichClient:
         user: dict[str, Any] | None = None,
         album_assets: list[dict[str, Any]] | None = None,
         image_assets: list[dict[str, Any]] | None = None,
+        video_assets: list[dict[str, Any]] | None = None,
         thumbnail_bytes: bytes = b"\x89PNGfake",
         thumbnail_content_type: str = "image/jpeg",
+        video_bytes: bytes = b"\x00\x00\x00\x18ftypmp4fake",
     ) -> None:
         self._albums = list(albums or [])
         self._user = user if user is not None else {"id": "owner-1", "email": "me@example.com"}
         self._album_assets = list(album_assets or [])
         self._image_assets = list(image_assets or [])
+        self._video_assets = list(video_assets or [])
         self._thumbnail_bytes = thumbnail_bytes
         self._thumbnail_content_type = thumbnail_content_type
+        self._video_bytes = video_bytes
         self.added: list[tuple[str, list[str]]] = []
         self.created: list[str] = []
         self.downloaded: list[str] = []
+        self.downloaded_videos: list[str] = []
 
     def get_my_user(self) -> dict[str, Any]:
         return self._user
@@ -151,6 +156,19 @@ class FakeImmichClient:
             if limit is not None and index >= limit:
                 return
             yield asset
+
+    def iter_video_assets(self, page_size: int = 250, limit: int | None = None) -> Iterable[dict[str, Any]]:
+        for index, asset in enumerate(self._video_assets):
+            if limit is not None and index >= limit:
+                return
+            yield asset
+
+    def download_video(self, asset_id: str, path: Path, transcoded: bool = True) -> dict[str, str]:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self._video_bytes)
+        self.downloaded_videos.append(str(asset_id))
+        return {"content-type": "video/mp4"}
 
     def download_thumbnail(self, asset_id: str, path: Path, size: str = "preview") -> dict[str, str]:
         path = Path(path)

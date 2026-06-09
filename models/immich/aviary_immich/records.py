@@ -80,6 +80,47 @@ def record_from_prediction(asset: dict[str, Any], account_slug: str, prediction)
     }
 
 
+def aggregate_video_predictions(
+    asset: dict[str, Any], account_slug: str, predictions, frames_scanned: int
+) -> dict[str, Any]:
+    """Fan many per-frame ``BirdPrediction``s back into one record for a video asset.
+
+    Shaped identically to :func:`record_from_prediction` (so ``handle_scan_record``,
+    ``bump_decision``, ``detected_labels`` and ``category_confidence`` all treat videos and
+    photos the same) plus ``asset_type``/``frames_scanned`` for observability. ``detections``
+    keeps only the single highest-confidence box per label across all frames — enough for album
+    filing and ``category_confidence`` without bloating the state JSONL with every frame's boxes.
+    """
+    from aviary_immich.state import utc_now
+
+    best_by_label: dict[str, dict[str, float | int | str]] = {}
+    for prediction in predictions:
+        for detection in prediction.detections:
+            label = str(detection.get("label", "")).lower()
+            confidence = float(detection.get("confidence") or 0)
+            current = best_by_label.get(label)
+            if current is None or confidence > float(current.get("confidence") or 0):
+                best_by_label[label] = detection
+
+    labels = sorted(label for label in best_by_label if label)
+    detections = [best_by_label[label] for label in labels]
+    max_confidence = max(
+        (float(detection.get("confidence") or 0) for detection in detections), default=0.0
+    )
+    return {
+        "account": account_slug,
+        "asset_id": str(asset["id"]),
+        "decision": "match" if labels else "not_match",
+        "labels": labels,
+        "max_confidence": max_confidence,
+        "detections": detections,
+        "asset_type": "video",
+        "frames_scanned": int(frames_scanned),
+        "original_file_name": asset_name(asset),
+        "scanned_at": utc_now(),
+    }
+
+
 def record_from_error(asset: dict[str, Any], account_slug: str, exc: Exception) -> dict[str, Any]:
     from aviary_immich.state import utc_now
 

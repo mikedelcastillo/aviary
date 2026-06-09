@@ -49,6 +49,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=int(os.getenv("IMMICH_BIRD_WORKERS", str(os.cpu_count() or 1))))
     parser.add_argument("--cpu-workers", type=int, default=-1)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--skip-videos",
+        action="store_true",
+        help="Skip VIDEO assets; only classify photos. Videos are scanned by default.",
+    )
+    parser.add_argument(
+        "--video-every-seconds",
+        type=float,
+        default=float(os.getenv("IMMICH_VIDEO_EVERY_SECONDS", "1.0")),
+        help="Minimum spacing between sampled video frames (floor; spacing widens to cover long clips).",
+    )
+    parser.add_argument(
+        "--video-max-frames",
+        type=int,
+        default=int(os.getenv("IMMICH_VIDEO_MAX_FRAMES", "30")),
+        help="Max frames sampled per video, spread across its full duration.",
+    )
+    parser.add_argument(
+        "--video-max-edge",
+        type=int,
+        default=int(os.getenv("IMMICH_VIDEO_MAX_EDGE", "1280")),
+        help="Downscale sampled frames so their long edge is at most this many pixels (0 disables).",
+    )
+    parser.add_argument(
+        "--video-original",
+        dest="video_transcoded",
+        action="store_false",
+        help="Download the original media instead of Immich's smaller transcoded playback stream.",
+    )
+    parser.set_defaults(video_transcoded=True)
     parser.add_argument("--force-rescan", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     mode = parser.add_mutually_exclusive_group()
@@ -158,6 +188,7 @@ def main() -> None:
         stats: dict[str, Any] = {
             "scanned": 0,
             "already": 0,
+            "videos": 0,
             "birds": 0,
             "dogs": 0,
             "cats": 0,
@@ -300,6 +331,45 @@ def main() -> None:
                                 args.batch_size,
                                 stats,
                             )
+
+            if not args.skip_videos:
+                from aviary_immich.video import run_video_pipeline
+
+                video_assets = list(
+                    progress(
+                        client.iter_video_assets(page_size=args.page_size, limit=args.limit),
+                        desc=f"{account.slug} videos",
+                        unit="asset",
+                    )
+                )
+                scan_videos: list[dict[str, Any]] = []
+                for asset in video_assets:
+                    record = state.get(str(asset["id"]))
+                    if record and not args.force_rescan:
+                        handle_scan_record(record, asset, account, client, targets, args.dry_run, args.batch_size, stats)
+                    else:
+                        scan_videos.append(asset)
+                stats["scanned"] += len(scan_videos)
+                stats["already"] += len(video_assets) - len(scan_videos)
+
+                if scan_videos:
+                    if detector is None:
+                        # CPU multiprocess path leaves detector unset; videos run on one main-process
+                        # detector (they are few, and frame fan-in is single-threaded regardless).
+                        detector = PretrainedBirdDetector(args.model, args.threshold, selected_device, ANIMAL_LABELS)
+                    run_video_pipeline(
+                        scan_videos,
+                        detector,
+                        client,
+                        config.base_url,
+                        account.api_key,
+                        account,
+                        targets,
+                        args,
+                        state,
+                        state_appender,
+                        stats,
+                    )
 
             for target in targets:
                 flush_album_batch(client, target.album_id, target.pending, args.dry_run)

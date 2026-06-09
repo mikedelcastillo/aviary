@@ -146,6 +146,7 @@ def account_summary_table(slug: str, stats: dict[str, Any]) -> None:
     rows = [
         ("scanned", stats.get("scanned", 0)),
         ("already scanned", stats.get("already", 0)),
+        ("videos", stats.get("videos", 0)),
         ("birds", stats.get("birds", 0)),
         ("dogs", stats.get("dogs", 0)),
         ("cats", stats.get("cats", 0)),
@@ -170,7 +171,7 @@ def grand_total_table(per_account: list[dict[str, Any]]) -> None:
     if not per_account:
         return
     console = get_console()
-    keys = ("scanned", "birds", "dogs", "cats", "other", "errors", "added")
+    keys = ("scanned", "videos", "birds", "dogs", "cats", "other", "errors", "added")
     totals = {key: sum(int(entry.get(key, 0)) for entry in per_account) for key in keys}
     totals["elapsed"] = sum(float(entry.get("elapsed", 0.0)) for entry in per_account)
 
