@@ -120,6 +120,7 @@ class FakeImmichClient:
         self._video_bytes = video_bytes
         self.added: list[tuple[str, list[str]]] = []
         self.created: list[str] = []
+        self.updated: list[tuple[str, dict[str, Any]]] = []
         self.downloaded: list[str] = []
         self.downloaded_videos: list[str] = []
 
@@ -140,6 +141,10 @@ class FakeImmichClient:
             if album.get("albumName") == album_name:
                 return album
         return self.create_album(album_name)
+
+    def update_album(self, album_id: str, **fields: Any) -> dict[str, Any]:
+        self.updated.append((album_id, dict(fields)))
+        return {"id": album_id, **fields}
 
     def add_assets_to_album(self, album_id: str, asset_ids: list[str]) -> Any:
         if not asset_ids:

@@ -71,6 +71,10 @@ class ImmichClient:
 
         return matches[0]
 
+    def update_album(self, album_id: str, **fields: Any) -> Any:
+        """Patch album metadata (e.g. ``description=...``) via ``PATCH /albums/{id}``."""
+        return self._request_json("PATCH", f"/albums/{album_id}", json=fields)
+
     def add_assets_to_album(self, album_id: str, asset_ids: list[str]) -> Any:
         if not asset_ids:
             return []

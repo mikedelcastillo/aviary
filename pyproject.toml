@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 generate-albums = "generate_albums:main"
+clear-cache = "clear_cache:main"
 download-birds = "download_immich_birds:main"
 train = "train:main"
 evaluate = "evaluate:main"
@@ -40,6 +41,7 @@ packages = [
 # `generate_albums`, `train`, ... import cleanly as their entry points expect.
 [tool.hatch.build.targets.wheel.force-include]
 "models/immich/generate_albums.py" = "generate_albums.py"
+"models/immich/clear_cache.py" = "clear_cache.py"
 "models/immich/download_immich_birds.py" = "download_immich_birds.py"
 "models/immich/run_tests.py" = "run_tests.py"
 "models/training/scripts/train.py" = "train.py"
