@@ -42,6 +42,16 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _format_frame_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "never"
+    if seconds < 1.0:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 60.0:
+        return f"{seconds:.1f}s"
+    return _format_duration(seconds)
+
+
 def _format_count(value: int) -> str:
     if value >= 1_000_000:
         return f"{value / 1_000_000:.1f}M"
@@ -147,6 +157,7 @@ class Dashboard:
             parts.append(
                 f"{name}={snap['status'].upper()} "
                 f"fps={snap['fps']:.1f} frames={snap['frames_total']} "
+                f"last_frame={_format_frame_age(snap['since_frame'])} "
                 f"alerts={snap['alerts_sent']} fails={snap['consecutive_failures']}"
             )
         LOGGER.info("status | %s", " | ".join(parts))
@@ -201,6 +212,7 @@ class Dashboard:
 
         table.add_row("status", Text(status_text, style=f"bold {colour}"))
         table.add_row("fps", self._fps_text(snap, connected))
+        table.add_row("frame", self._frame_text(snap))
         table.add_row("frames", _format_count(snap["frames_total"]))
         table.add_row("detect", self._detection_text(snap))
         table.add_row("alerts", str(snap["alerts_sent"]))
@@ -220,6 +232,18 @@ class Dashboard:
         ratio = fps / target
         colour = "green" if ratio >= 0.8 else "yellow" if ratio >= 0.4 else "red"
         return Text(f"{fps:.2f}", style=colour) + Text(f" / {target:g}", style="grey50")
+
+    def _frame_text(self, snap: dict) -> Text:
+        since_frame = snap["since_frame"]
+        if since_frame is None:
+            return Text("never", style="grey50")
+        if since_frame > STALE_FRAME_SECONDS:
+            style = "red"
+        elif since_frame >= 1.0:
+            style = "yellow"
+        else:
+            style = "green"
+        return Text(f"{_format_frame_age(since_frame)} ago", style=style)
 
     def _detection_text(self, snap: dict) -> Text:
         if not snap["last_label"]:
