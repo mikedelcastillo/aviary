@@ -33,7 +33,7 @@ class CameraConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     path: Path
-    confidence: float = 0.45
+    confidence: float = 0.7
     iou: float = 0.5
     image_size: int = 960
     device: str = "auto"
@@ -44,7 +44,7 @@ class TelegramConfig:
     enabled: bool
     bot_token: str
     user_ids: list[str]
-    last_seen_alert_seconds: float = 60.0
+    last_seen_alert_seconds: float = 60.0 * 15.0
     bbox_movement_alert_ratio: float = 0.10
     include_snapshot: bool = True
 
