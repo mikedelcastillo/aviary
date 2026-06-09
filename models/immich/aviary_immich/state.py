@@ -19,17 +19,19 @@ def load_jsonl_state(path: Path) -> dict[str, dict[str, Any]]:
         return records
 
     for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+        raw_line = line.strip()
+        if not raw_line:
             continue
-        record = json.loads(line)
-        asset_id = str(record.get("asset_id", ""))
-        if asset_id:
-            records[asset_id] = record
+        for record in _decode_jsonl_records(raw_line):
+            asset_id = str(record.get("asset_id", ""))
+            if asset_id:
+                records[asset_id] = record
     return records
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_trailing_newline(path)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
@@ -54,6 +56,7 @@ class JsonlAppender:
 
     def __enter__(self) -> "JsonlAppender":
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_trailing_newline(self.path)
         self._handle = self.path.open("a", encoding="utf-8")
         return self
 
@@ -104,3 +107,25 @@ def load_manifest_ids(path: Path, id_field: str = "asset_id") -> set[str]:
         return set()
     with path.open("r", newline="", encoding="utf-8") as handle:
         return {row[id_field] for row in csv.DictReader(handle) if row.get(id_field)}
+
+
+def _decode_jsonl_records(line: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    records: list[dict[str, Any]] = []
+    index = 0
+    while index < len(line):
+        record, index = decoder.raw_decode(line, index)
+        if isinstance(record, dict):
+            records.append(record)
+        while index < len(line) and line[index].isspace():
+            index += 1
+    return records
+
+
+def _ensure_trailing_newline(path: Path) -> None:
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("rb+") as handle:
+        handle.seek(-1, 2)
+        if handle.read(1) != b"\n":
+            handle.write(b"\n")
