@@ -11,6 +11,7 @@ services:
     volumes:
       - ./server/models:/app/models:ro
       - ./server/snapshots:/app/snapshots
+      - ./collect:/app/collect
     restart: unless-stopped
 
     # For Linux NVIDIA hosts, install nvidia-container-toolkit and uncomment:

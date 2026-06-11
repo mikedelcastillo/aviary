@@ -12,6 +12,7 @@ from pathlib import Path
 
 import cv2
 
+from lib.collect import collect_alerted_detections
 from lib.config import AppConfig, CameraConfig
 from lib.detector import Detection, draw_detections
 from lib.objects import FrameSize, detection_center, movement_ratio
@@ -150,6 +151,14 @@ class AlertDispatcher:
                 self._queue.task_done()
 
     def _deliver(self, job: AlertJob) -> None:
+        collected = []
+        try:
+            collected = collect_alerted_detections(
+                self._app_config.collect, job.camera, job.frame, job.detections
+            )
+        except Exception:
+            LOGGER.exception("Collection failed for camera=%s", job.camera.name)
+
         snapshot_path = None
         if self._app_config.telegram.include_snapshot:
             snapshot_path = write_snapshot(
@@ -157,7 +166,13 @@ class AlertDispatcher:
             )
 
         labels = ", ".join(sorted({detection.label for detection in job.detections}))
-        LOGGER.info("Alerting camera=%s labels=%s snapshot=%s", job.camera.name, labels, snapshot_path)
+        LOGGER.info(
+            "Alerting camera=%s labels=%s snapshot=%s collected=%d",
+            job.camera.name,
+            labels,
+            snapshot_path,
+            len(collected),
+        )
 
         try:
             if self._notifier:

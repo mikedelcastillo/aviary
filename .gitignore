@@ -3,6 +3,7 @@
 
 # Runtime snapshots (cleared on every app start).
 /snapshots/
+/collect/
 
 # Server logfile (native FFmpeg/h264 noise + full log; AVIARY_LOG_FILE).
 aviary.log

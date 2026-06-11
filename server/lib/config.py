@@ -50,11 +50,18 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class CollectConfig:
+    objects: frozenset[str]
+    directory: Path = Path("./collect")
+
+
+@dataclass(frozen=True)
 class AppConfig:
     snapshot_dir: Path
     model: ModelConfig
     telegram: TelegramConfig
     cameras: list[CameraConfig]
+    collect: CollectConfig
 
 
 def _require_env(name: str) -> str:
@@ -66,6 +73,10 @@ def _require_env(name: str) -> str:
 
 def _as_user_ids(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _as_object_names(value: str) -> frozenset[str]:
+    return frozenset(item.strip().lower() for item in value.split(",") if item.strip())
 
 
 def _rtsp_urls() -> list[str]:
@@ -97,10 +108,12 @@ def build_config() -> AppConfig:
         user_ids=_as_user_ids(os.environ.get("TELEGRAM_USER_IDS", "")),
         include_snapshot=True,
     )
+    collect = CollectConfig(objects=_as_object_names(os.environ.get("COLLECT_OBJECTS", "")))
 
     return AppConfig(
         snapshot_dir=Path("./snapshots"),
         model=model,
         telegram=telegram,
         cameras=cameras,
+        collect=collect,
     )
