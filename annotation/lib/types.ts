@@ -79,6 +79,64 @@ export function withCats(href: string, cats: CatId[]): string {
   return param ? `${href}?cats=${param}` : href;
 }
 
+/**
+ * Parse the `?random` seed param. Returns a positive integer seed (random
+ * order in effect) or null (sequential order) when absent/invalid.
+ */
+export function parseSeed(param: string | null | undefined): number | null {
+  if (!param) return null;
+  const n = Number(param);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+/**
+ * Append `?cats=…&random=…` to a path, omitting each param when not in effect so
+ * default (all-cats, sequential) URLs stay identical to before. The single nav
+ * helper used by Box/Label so the category scope AND shuffle seed both ride
+ * along across page navigations.
+ */
+export function withNav(href: string, cats: CatId[], seed: number | null): string {
+  const params = new URLSearchParams();
+  const c = serializeCats(cats);
+  if (c) params.set("cats", c);
+  if (seed != null) params.set("random", String(seed));
+  const qs = params.toString();
+  return qs ? `${href}?${qs}` : href;
+}
+
+/**
+ * Deterministic order for a list. With a null seed the original order is
+ * returned unchanged; otherwise a Fisher–Yates shuffle driven by a mulberry32
+ * PRNG yields a stable permutation for that seed — so every page load with the
+ * same seed reproduces the same sequence, keeping prev/next coherent.
+ */
+export function orderBySeed<T>(items: T[], seed: number | null): T[] {
+  if (seed == null) return items;
+  const rng = mulberry32(seed);
+  const out = items.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/** A fresh positive seed for entering random mode. Client-side only. */
+export function newSeed(): number {
+  return Math.floor(Math.random() * 2_147_483_646) + 1;
+}
+
+/** Small, fast seeded PRNG. Deterministic for a given seed. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 /** Keep only items whose `cat` is in the selected set. */
 export function filterByCats<T extends { cat: CatId }>(items: T[], cats: CatId[]): T[] {
   const set = new Set(cats);

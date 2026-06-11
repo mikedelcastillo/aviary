@@ -8,15 +8,17 @@ import { CatToggle } from "@/components/CatToggle";
 import { Spinner } from "@/components/Spinner";
 import {
   ALL_CATS,
+  newSeed,
   parseCats,
   reviewHref,
   serializeCats,
-  withCats,
+  withNav,
   type CatId,
   type CategoryProgress,
 } from "@/lib/types";
 
 const CATS_STORAGE_KEY = "aviary.cats";
+const RANDOM_STORAGE_KEY = "aviary.random";
 
 interface LabelStat {
   label: string;
@@ -52,12 +54,14 @@ export default function Home() {
   const [labelStats, setLabelStats] = useState<LabelStat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cats, setCats] = useState<CatId[]>(ALL_CATS);
+  const [random, setRandom] = useState(false);
 
   // Restore the saved selection after mount (avoids SSR hydration mismatch).
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem(CATS_STORAGE_KEY);
       if (saved) setCats(parseCats(saved));
+      setRandom(window.localStorage.getItem(RANDOM_STORAGE_KEY) === "1");
     } catch {
       /* localStorage unavailable — keep default */
     }
@@ -71,6 +75,15 @@ export default function Home() {
       /* ignore */
     }
   }, [cats]);
+
+  // Persist the randomize preference whenever it changes.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(RANDOM_STORAGE_KEY, random ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [random]);
 
   // Per-category progress is selection-independent — fetch once.
   useEffect(() => {
@@ -180,16 +193,41 @@ export default function Home() {
 
       {!error && progress && (
         <>
-          {/* Category selector — scopes everything below. */}
-          <div className="mt-8">
+          {/* Category selector (left) + randomize toggle (right). Scopes and
+              orders everything below. */}
+          <div className="mt-8 flex flex-wrap items-center justify-between gap-2">
             <CatToggle selected={cats} totals={categoryTotals} onChange={setCats} />
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={random}
+              onClick={() => setRandom(!random)}
+              title="Shuffle image order each time you enter Box/Label"
+              className={
+                "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
+                (random
+                  ? "border-fg bg-fg text-bg"
+                  : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
+              }
+            >
+              <span
+                aria-hidden
+                className={
+                  "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border text-[9px] leading-none " +
+                  (random ? "border-bg/40 bg-bg/20 text-bg" : "border-border-strong text-transparent")
+                }
+              >
+                ✓
+              </span>
+              <span className="font-medium">Randomize</span>
+            </button>
           </div>
 
           {/* Primary entry points */}
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <button
               type="button"
-              onClick={() => router.push(withCats(`/box/${boxTarget}`, cats))}
+              onClick={() => router.push(withNav(`/box/${boxTarget}`, cats, random ? newSeed() : null))}
               className="group flex cursor-pointer flex-col rounded-2xl bg-fg p-6 text-left text-bg transition-opacity hover:opacity-90"
             >
               <span className="text-lg font-semibold">Box mode</span>
@@ -203,7 +241,10 @@ export default function Home() {
 
             <button
               type="button"
-              onClick={() => !labelEmpty && router.push(withCats(`/label/${labelTarget}`, cats))}
+              onClick={() =>
+                !labelEmpty &&
+                router.push(withNav(`/label/${labelTarget}`, cats, random ? newSeed() : null))
+              }
               aria-disabled={labelEmpty}
               title={labelEmpty ? "Nothing to label yet" : undefined}
               className={

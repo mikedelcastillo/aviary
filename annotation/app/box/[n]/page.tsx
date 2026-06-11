@@ -11,8 +11,11 @@ import { Spinner } from "@/components/Spinner";
 import {
   categoryById,
   filterByCats,
+  orderBySeed,
   parseCats,
-  withCats,
+  parseSeed,
+  serializeCats,
+  withNav,
   type CatId,
   type ManifestEntry,
   type NormRect,
@@ -45,9 +48,12 @@ export default function BoxPage() {
   const n = Number(useParams().n);
   const searchParams = useSearchParams();
   const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
+  const seed = useMemo(() => parseSeed(searchParams.get("random")), [searchParams]);
 
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [draft, setDraft] = useState<NormRect | null>(null);
+  // In random mode, restrict navigation to images that still need boxing.
+  const [boxQueue, setBoxQueue] = useState<number[] | null>(null);
 
   const stageRef = useRef<StageHandle>(null);
   const startRef = useRef<Pt | null>(null);
@@ -69,23 +75,55 @@ export default function BoxPage() {
     };
   }, []);
 
-  // The selected-category subset, in global-index order. Navigation + the
-  // counter are scoped to this list; the path index `n` stays global.
+  // In random mode, fetch the set of still-unboxed images so the shuffle skips
+  // ones already done. Sequential mode shows everything, so no fetch needed.
+  useEffect(() => {
+    if (seed == null) {
+      setBoxQueue(null);
+      return;
+    }
+    let cancelled = false;
+    const c = serializeCats(cats);
+    const qs = c ? `?cats=${c}` : "";
+    (async () => {
+      try {
+        const res = await fetch(`/api/box-queue${qs}`);
+        const data = (await res.json()) as number[];
+        if (!cancelled) setBoxQueue(data);
+      } catch {
+        if (!cancelled) setBoxQueue([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [seed, cats]);
+
+  // The navigation sequence. Sequential: every in-scope image in global order.
+  // Random: only still-unboxed images, in a stable seeded shuffle. The counter
+  // + prev/next walk `ordered`; the path index `n` stays global.
   const filtered = useMemo(() => (manifest ? filterByCats(manifest, cats) : []), [manifest, cats]);
-  const total = filtered.length;
+  const ordered = useMemo(() => {
+    if (seed == null) return filtered;
+    if (boxQueue == null) return []; // queue still loading
+    const set = new Set(boxQueue);
+    return orderBySeed(filtered.filter((e) => set.has(e.n)), seed);
+  }, [filtered, seed, boxQueue]);
+  const total = ordered.length;
   const globalInRange = manifest != null && Number.isInteger(n) && n >= 0 && n < manifest.length;
   const entry = globalInRange ? manifest![n] : null;
   const inCats = entry != null && cats.includes(entry.cat);
-  const pos = entry && inCats ? filtered.findIndex((e) => e.n === n) : -1;
+  const pos = entry && inCats ? ordered.findIndex((e) => e.n === n) : -1;
 
-  // Deep-link guard: if `n` isn't in the selected categories, snap to the first
-  // in-scope image at or after it (else the first in-scope image).
+  // Deep-link guard: if `n` isn't a valid stop in the nav sequence (wrong
+  // category, or — in random mode — already boxed), snap to the first in-scope
+  // image at or after it (else the first in the sequence).
   useEffect(() => {
-    if (manifest == null || filtered.length === 0) return;
-    if (entry && inCats) return;
-    const target = filtered.find((e) => e.n >= n) ?? filtered[0];
-    router.replace(withCats(`/box/${target.n}`, cats));
-  }, [manifest, filtered, entry, inCats, n, cats, router]);
+    if (manifest == null || ordered.length === 0) return;
+    if (pos >= 0) return;
+    const target = ordered.find((e) => e.n >= n) ?? ordered[0];
+    router.replace(withNav(`/box/${target.n}`, cats, seed));
+  }, [manifest, ordered, pos, n, cats, seed, router]);
 
   const cat: CatId | null = entry && inCats ? entry.cat : null;
   const name: string | null = entry && inCats ? entry.name : null;
@@ -104,19 +142,17 @@ export default function BoxPage() {
     // Advancing confirms the current image is boxed. On the last image there's
     // nothing to advance to, so head home.
     setBoxed(true);
-    const next = filtered.find((e) => e.n > n);
-    router.push(next ? withCats(`/box/${next.n}`, cats) : "/");
-  }, [filtered, n, setBoxed, router, cats]);
+    const idx = ordered.findIndex((e) => e.n === n);
+    const next = idx >= 0 ? ordered[idx + 1] : undefined;
+    router.push(next ? withNav(`/box/${next.n}`, cats, seed) : "/");
+  }, [ordered, n, setBoxed, router, cats, seed]);
 
   const goPrev = useCallback(() => {
-    let prev: ManifestEntry | null = null;
-    for (const e of filtered) {
-      if (e.n < n) prev = e;
-      else break;
-    }
+    const idx = ordered.findIndex((e) => e.n === n);
+    const prev = idx > 0 ? ordered[idx - 1] : undefined;
     if (!prev) return;
-    router.push(withCats(`/box/${prev.n}`, cats));
-  }, [filtered, n, router, cats]);
+    router.push(withNav(`/box/${prev.n}`, cats, seed));
+  }, [ordered, n, router, cats, seed]);
 
   // --- Drawing --------------------------------------------------------------
   const onDrawStart = useCallback((pt: Pt) => {
@@ -156,6 +192,12 @@ export default function BoxPage() {
       const tag = target?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
 
+      if (e.key === "Escape") {
+        e.preventDefault();
+        router.push("/");
+        return;
+      }
+
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === "z" || e.key === "Z")) {
         e.preventDefault();
@@ -184,10 +226,14 @@ export default function BoxPage() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [undo, redo, goNext, goPrev]);
+  }, [undo, redo, goNext, goPrev, router]);
 
   // --- Render guards --------------------------------------------------------
-  if (manifest == null || (entry != null && !inCats && filtered.length > 0)) {
+  if (
+    manifest == null ||
+    (seed != null && boxQueue == null) ||
+    (entry != null && !inCats && filtered.length > 0)
+  ) {
     // Loading, or briefly mid-redirect to an in-scope image.
     return (
       <main className="fixed inset-0 flex items-center justify-center bg-bg">

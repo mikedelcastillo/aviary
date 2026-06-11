@@ -12,8 +12,10 @@ import { useAnnotation } from "@/lib/use-annotation";
 import {
   categoryById,
   filterByCats,
+  orderBySeed,
   parseCats,
-  withCats,
+  parseSeed,
+  withNav,
   type CatId,
   type ManifestEntry,
   type NormRect,
@@ -35,6 +37,7 @@ export default function LabelPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
+  const seed = useMemo(() => parseSeed(searchParams.get("random")), [searchParams]);
 
   // --- Fetch manifest / roster / queue once on mount. -----------------------
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
@@ -71,21 +74,36 @@ export default function LabelPage() {
     };
   }, []);
 
-  // Selected-category subset (global-index order) for nav + counter.
+  // Selected-category subset, plus the work queue (boxed-but-unlabeled images)
+  // as manifest entries in global order.
   const filtered = useMemo(() => (manifest ? filterByCats(manifest, cats) : []), [manifest, cats]);
-  const total = filtered.length;
+  const queueEntries = useMemo(() => {
+    const set = new Set(queue ?? []);
+    return filtered.filter((e) => set.has(e.n));
+  }, [filtered, queue]);
+
+  // The navigation sequence (counter + prev/next). Sequential: every in-scope
+  // image in global order. Random: only the work queue, in a stable seeded
+  // shuffle — so already-labeled images are skipped entirely.
+  const ordered = useMemo(
+    () => (seed == null ? filtered : orderBySeed(queueEntries, seed)),
+    [seed, filtered, queueEntries],
+  );
+  const total = ordered.length;
   const globalInRange = manifest != null && Number.isInteger(n) && n >= 0 && n < manifest.length;
   const baseEntry = globalInRange ? manifest![n] : null;
   const inCats = baseEntry != null && cats.includes(baseEntry.cat);
-  const pos = baseEntry && inCats ? filtered.findIndex((e) => e.n === n) : -1;
+  const pos = baseEntry && inCats ? ordered.findIndex((e) => e.n === n) : -1;
 
-  // Deep-link guard: snap to the first in-scope image at/after `n`.
+  // Deep-link guard: if `n` isn't a valid stop in the nav sequence (wrong
+  // category, or — in random mode — already labeled), snap to the first in-scope
+  // image at/after it (else the first in the sequence).
   useEffect(() => {
-    if (manifest == null || filtered.length === 0) return;
-    if (baseEntry && inCats) return;
-    const target = filtered.find((e) => e.n >= n) ?? filtered[0];
-    router.replace(withCats(`/label/${target.n}`, cats));
-  }, [manifest, filtered, baseEntry, inCats, n, cats, router]);
+    if (manifest == null || ordered.length === 0) return;
+    if (pos >= 0) return;
+    const target = ordered.find((e) => e.n >= n) ?? ordered[0];
+    router.replace(withNav(`/label/${target.n}`, cats, seed));
+  }, [manifest, ordered, pos, n, cats, seed, router]);
 
   const entry = baseEntry && inCats ? baseEntry : null;
   const cat = entry?.cat ?? null;
@@ -135,28 +153,32 @@ export default function LabelPage() {
 
   // --- Navigation helpers (scoped to selected categories). ------------------
   const goPrev = useCallback(() => {
-    let prev: ManifestEntry | null = null;
-    for (const e of filtered) {
-      if (e.n < n) prev = e;
-      else break;
-    }
-    if (prev) router.push(withCats(`/label/${prev.n}`, cats));
-  }, [filtered, n, router, cats]);
+    const idx = ordered.findIndex((e) => e.n === n);
+    const prev = idx > 0 ? ordered[idx - 1] : undefined;
+    if (prev) router.push(withNav(`/label/${prev.n}`, cats, seed));
+  }, [ordered, n, router, cats, seed]);
 
   const goNext = useCallback(() => {
-    const next = filtered.find((e) => e.n > n);
-    if (next) router.push(withCats(`/label/${next.n}`, cats));
-  }, [filtered, n, router, cats]);
+    const idx = ordered.findIndex((e) => e.n === n);
+    const next = idx >= 0 ? ordered[idx + 1] : undefined;
+    if (next) router.push(withNav(`/label/${next.n}`, cats, seed));
+  }, [ordered, n, router, cats, seed]);
 
   const advance = useCallback(() => {
-    const q = queue ?? [];
-    const next = q.find((idx) => idx > n && (manifest == null || cats.includes(manifest[idx].cat)));
-    if (next != null) {
-      router.push(withCats(`/label/${next}`, cats));
-    } else {
-      router.push("/");
+    if (seed == null) {
+      // Sequential: the next queued image after this one (unchanged behavior).
+      const next = (queue ?? []).find(
+        (idx) => idx > n && (manifest == null || cats.includes(manifest[idx].cat)),
+      );
+      router.push(next != null ? withNav(`/label/${next}`, cats, seed) : "/");
+      return;
     }
-  }, [queue, n, router, cats, manifest]);
+    // Random: the next image in the shuffled work queue (`ordered`). Wraps to
+    // the start if `n` isn't itself queued, e.g. arrived here via prev/next.
+    const idx = ordered.findIndex((e) => e.n === n);
+    const next = idx >= 0 ? ordered[idx + 1] : ordered[0];
+    router.push(next ? withNav(`/label/${next.n}`, cats, seed) : "/");
+  }, [seed, queue, n, manifest, cats, ordered, router]);
 
   // --- Assign a label to the active box, then advance if image is done. -----
   const pick = useCallback(
@@ -182,6 +204,12 @@ export default function LabelPage() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return;
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        router.push("/");
+        return;
+      }
 
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {
@@ -233,7 +261,7 @@ export default function LabelPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, pills, pick, unbox, advance, goPrev, goNext, undo, redo]);
+  }, [activeBox, pills, pick, unbox, advance, goPrev, goNext, undo, redo, router]);
 
   // --- Render. --------------------------------------------------------------
   const category = cat ? categoryById(cat) : undefined;

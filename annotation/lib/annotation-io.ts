@@ -216,6 +216,17 @@ export async function getQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
 }
 
 /**
+ * Global indices still needing box work: images NOT yet human-confirmed
+ * (boxed !== true). Mirrors {@link getQueue} but for Box mode — drives the
+ * "skip finished images" behavior when boxing in random order.
+ */
+export async function getBoxQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
+  const manifest = filterByCats(getManifest(), cats);
+  const flags = await Promise.all(manifest.map((e) => quickState(e.cat, e.name).then((s) => !s.boxed)));
+  return manifest.filter((_, i) => flags[i]).map((e) => e.n);
+}
+
+/**
  * Where the home-page mode buttons should jump to:
  *  - box:   first image not yet human-confirmed (boxed !== true)
  *  - label: first image that still has an unlabeled box (queue head)
