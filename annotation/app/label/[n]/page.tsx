@@ -82,12 +82,13 @@ export default function LabelPage() {
     return filtered.filter((e) => set.has(e.n));
   }, [filtered, queue]);
 
-  // The navigation sequence (counter + prev/next). Sequential: every in-scope
-  // image in global order. Random: only the work queue, in a stable seeded
-  // shuffle — so already-labeled images are skipped entirely.
+  // The navigation sequence (counter + prev/next). Both modes walk ONLY the work
+  // queue (boxed-but-unlabeled images) so an un-boxed image is never presented
+  // for labeling. Sequential keeps global order; random applies a stable seeded
+  // shuffle. Already-labeled / un-boxed images are skipped entirely.
   const ordered = useMemo(
-    () => (seed == null ? filtered : orderBySeed(queueEntries, seed)),
-    [seed, filtered, queueEntries],
+    () => (seed == null ? queueEntries : orderBySeed(queueEntries, seed)),
+    [seed, queueEntries],
   );
   const total = ordered.length;
   const globalInRange = manifest != null && Number.isInteger(n) && n >= 0 && n < manifest.length;
@@ -95,15 +96,20 @@ export default function LabelPage() {
   const inCats = baseEntry != null && cats.includes(baseEntry.cat);
   const pos = baseEntry && inCats ? ordered.findIndex((e) => e.n === n) : -1;
 
-  // Deep-link guard: if `n` isn't a valid stop in the nav sequence (wrong
-  // category, or — in random mode — already labeled), snap to the first in-scope
-  // image at/after it (else the first in the sequence).
+  // Deep-link guard: if `n` isn't a valid stop in the nav sequence (un-boxed,
+  // wrong category, or already labeled), snap to the first queued image at/after
+  // it (else the first in the sequence). With the queue loaded but empty there's
+  // nothing to label — go home rather than render an un-boxed image's seed boxes.
   useEffect(() => {
-    if (manifest == null || ordered.length === 0) return;
+    if (manifest == null || queue == null) return; // still loading
+    if (ordered.length === 0) {
+      router.replace("/");
+      return;
+    }
     if (pos >= 0) return;
     const target = ordered.find((e) => e.n >= n) ?? ordered[0];
     router.replace(withNav(`/label/${target.n}`, cats, seed));
-  }, [manifest, ordered, pos, n, cats, seed, router]);
+  }, [manifest, queue, ordered, pos, n, cats, seed, router]);
 
   const entry = baseEntry && inCats ? baseEntry : null;
   const cat = entry?.cat ?? null;

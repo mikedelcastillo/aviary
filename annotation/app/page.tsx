@@ -173,7 +173,7 @@ export default function Home() {
           <p className="mt-3 font-mono text-xs text-faint">
             {totals.total.toLocaleString()} images · {totals.boxed.toLocaleString()} boxed (
             {pct(totals.boxed, totals.total)}%) · {totals.labeled.toLocaleString()} labeled (
-            {pct(totals.labeled, totals.total)}%)
+            {pct(totals.labeled, totals.boxed)}%)
           </p>
         )}
       </header>

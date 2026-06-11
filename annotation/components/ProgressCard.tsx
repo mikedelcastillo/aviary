@@ -36,10 +36,10 @@ export function ProgressCard({ progress }: { progress: CategoryProgress }) {
           <div className="mb-1.5 flex justify-between text-xs">
             <span className="text-muted">Labeled</span>
             <span className="font-mono text-fg">
-              {labeled}/{total} · {pct(labeled, total)}%
+              {labeled}/{boxed} · {pct(labeled, boxed)}%
             </span>
           </div>
-          <Bar value={labeled} total={total} color="#00e676" />
+          <Bar value={labeled} total={boxed} color="#00e676" />
         </div>
       </div>
     </div>
