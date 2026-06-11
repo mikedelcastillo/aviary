@@ -138,7 +138,7 @@ export default function BoxPage() {
   const cat: CatId | null = entry && inCats ? entry.cat : null;
   const name: string | null = entry && inCats ? entry.name : null;
 
-  const { annotation, addBox, removeBox, setBoxed, undo, redo, loading } = useAnnotation(cat, name);
+  const { annotation, addBox, removeBox, replaceBoxes, setBoxed, undo, redo, loading } = useAnnotation(cat, name);
 
   // --- Image readiness (drives the loading overlay). ------------------------
   const [ready, setReady] = useState(false);
@@ -149,13 +149,16 @@ export default function BoxPage() {
 
   // --- Navigation (within the selected categories) --------------------------
   const goNext = useCallback(() => {
-    // Advancing confirms the current image is boxed. On the last image there's
-    // nothing to advance to, so head home.
-    setBoxed(true);
+    // Advancing confirms the image — but `boxed` must always mean "the user
+    // placed boxes here", so only mark it boxed when boxes actually exist
+    // (and revert a stale flag if they were all removed). On the last image
+    // there's nothing to advance to, so head home.
+    const hasBoxes = (annotation?.boxes.length ?? 0) > 0;
+    if ((annotation?.boxed ?? false) !== hasBoxes) setBoxed(hasBoxes);
     const idx = ordered.findIndex((e) => e.n === n);
     const next = idx >= 0 ? ordered[idx + 1] : undefined;
     router.push(next ? withNav(`/box/${next.n}`, cats, seed) : "/");
-  }, [ordered, n, setBoxed, router, cats, seed]);
+  }, [ordered, n, annotation?.boxes.length, annotation?.boxed, setBoxed, router, cats, seed]);
 
   const goPrev = useCallback(() => {
     const idx = ordered.findIndex((e) => e.n === n);
@@ -186,6 +189,23 @@ export default function BoxPage() {
   const toggleRandom = useCallback(() => {
     router.replace(withNav(`/box/${n}`, cats, seed != null ? null : newSeed()));
   }, [router, n, cats, seed]);
+
+  // Wipe every box on the current image. Emptying it reverts `boxed` so the
+  // flag keeps meaning "has user boxes".
+  const clearBoxes = useCallback(() => {
+    if (!annotation?.boxes.length) return;
+    replaceBoxes([]);
+    if (annotation.boxed) setBoxed(false);
+  }, [annotation?.boxes.length, annotation?.boxed, replaceBoxes, setBoxed]);
+
+  // Delete a single box; if it was the last one, the image is no longer boxed.
+  const handleRemoveBox = useCallback(
+    (id: string) => {
+      removeBox(id);
+      if (annotation?.boxes.length === 1 && annotation.boxed) setBoxed(false);
+    },
+    [removeBox, annotation?.boxes.length, annotation?.boxed, setBoxed],
+  );
 
   // --- Drawing --------------------------------------------------------------
   const onDrawStart = useCallback((pt: Pt) => {
@@ -260,11 +280,16 @@ export default function BoxPage() {
       if (e.key === "r" || e.key === "R") {
         e.preventDefault();
         toggleRandom();
+        return;
+      }
+      if (e.key === "c" || e.key === "C") {
+        e.preventDefault();
+        clearBoxes();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleUndo, handleRedo, goNext, goPrev, toggleRandom, router]);
+  }, [handleUndo, handleRedo, goNext, goPrev, toggleRandom, clearBoxes, router]);
 
   // --- Render guards --------------------------------------------------------
   if (
@@ -307,7 +332,7 @@ export default function BoxPage() {
         onDrawMove={onDrawMove}
         onDrawEnd={onDrawEnd}
       >
-        <BoxLayer boxes={annotation?.boxes ?? []} draft={draft} showDelete onDelete={removeBox} />
+        <BoxLayer boxes={annotation?.boxes ?? []} draft={draft} showDelete onDelete={handleRemoveBox} />
       </Stage>
 
       <LoadingOverlay show={!ready || loading} label="Loading image…" />
@@ -343,7 +368,22 @@ export default function BoxPage() {
       </div>
 
       {/* Bottom-center: nav HUD. */}
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2">
+      <div className="fixed bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-2">
+        {(annotation?.boxes.length ?? 0) > 0 && (
+          <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
+            <button
+              type="button"
+              onClick={clearBoxes}
+              title="Clear all boxes (C)"
+              className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
+            >
+              <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] uppercase text-danger">
+                C
+              </kbd>
+              <span className="font-medium">Clear</span>
+            </button>
+          </div>
+        )}
         <div className="flex items-center gap-1 rounded-full border border-border bg-surface/85 px-2 py-1.5 backdrop-blur">
           <button
             type="button"

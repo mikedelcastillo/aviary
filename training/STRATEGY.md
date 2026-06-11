@@ -2,7 +2,7 @@
 
 This is the authoritative guide for how we build the bird detector/identifier.
 It documents *why* the dataset and class scheme look the way they do. The
-training mechanics live in [`training/README.md`](training/README.md) (dataset
+training mechanics live in [`README.md`](README.md) (dataset
 prep + training); labeling is done in the `/annotation` web tool (run
 `./scripts/annotation.sh`).
 

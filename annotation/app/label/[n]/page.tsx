@@ -116,7 +116,7 @@ export default function LabelPage() {
   const cat = entry?.cat ?? null;
   const name = entry?.name ?? null;
 
-  const { annotation, setLabel, removeBox, undo, redo, loading } = useAnnotation(cat, name);
+  const { annotation, setLabel, removeBox, replaceBoxes, undo, redo, loading } = useAnnotation(cat, name);
 
   const pills: Pill[] = useMemo(
     () => (cat && rosterData ? rosterData[cat] : []),
@@ -207,6 +207,13 @@ export default function LabelPage() {
     if (unlabeled.length <= 1) advance();
   }, [activeBox, removeBox, unlabeled.length, advance]);
 
+  // --- Clear: wipe every box on the image, then move on (nothing left here). --
+  const clearBoxes = useCallback(() => {
+    if (boxes.length === 0) return;
+    replaceBoxes([]);
+    advance();
+  }, [boxes.length, replaceBoxes, advance]);
+
   // --- Undo/redo: history is session-global, so a mistake made before an
   // auto-advance is undone by hopping back to the image it happened on. ------
   const navToHistory = useCallback(
@@ -283,6 +290,17 @@ export default function LabelPage() {
         return;
       }
 
+      // [C] clears every box on the image — unless a roster pill claims "c".
+      if (
+        (e.key === "c" || e.key === "C") &&
+        boxes.length > 0 &&
+        !pills.some((p) => p.shortcut.toLowerCase() === "c")
+      ) {
+        e.preventDefault();
+        clearBoxes();
+        return;
+      }
+
       // [B] unboxes the active box (takes precedence over label shortcuts).
       if (e.key.toLowerCase() === "b" && activeBox) {
         e.preventDefault();
@@ -301,7 +319,7 @@ export default function LabelPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, pills, pick, unbox, advance, goPrev, goNext, handleUndo, handleRedo, toggleRandom, router]);
+  }, [activeBox, boxes.length, pills, pick, unbox, clearBoxes, advance, goPrev, goNext, handleUndo, handleRedo, toggleRandom, router]);
 
   // --- Render. --------------------------------------------------------------
   const category = cat ? categoryById(cat) : undefined;
@@ -371,6 +389,7 @@ export default function LabelPage() {
         onPick={pick}
         activeLabel={activeBox?.label ?? null}
         onUnbox={activeBox ? unbox : undefined}
+        onClear={boxes.length > 0 ? clearBoxes : undefined}
       />
     </main>
   );

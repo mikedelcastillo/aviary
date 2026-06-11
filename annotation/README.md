@@ -28,7 +28,7 @@ Each raw image moves through two phases:
    auto-advances to the next box that needs one.
 
 Categories: `tapo/day`, `tapo/ir`, `phone`. Label pills come from
-[`models/roster.yaml`](../models/roster.yaml) and depend on the category:
+[`training/roster.yaml`](../training/roster.yaml) and depend on the category:
 
 - **Tapo · Day** → living individual bird names (live model, `kind: individual`).
 - **Tapo · IR** → species only (`cockatiel`, `lovebird`, `budgie`).
@@ -54,7 +54,7 @@ Everything autosaves (debounced); the browser tab title shows `Saving…` → `S
 The launcher sets these (absolute) env vars; override if your layout differs:
 
 - `AVIARY_DATA_ROOT` — raw image root (default `data/annotation/raw`).
-- `AVIARY_ROSTER` — roster YAML (default `models/roster.yaml`).
+- `AVIARY_ROSTER` — roster YAML (default `training/roster.yaml`).
 
 ## Stack
 

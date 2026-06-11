@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Launch the custom bird annotation web tool on http://0.0.0.0:5000.
 # Filesystem is the database: reads/writes annotations next to the raw images
-# under data/annotation/raw, labels sourced from models/roster.yaml.
+# under data/annotation/raw, labels sourced from training/roster.yaml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 
 # Absolute paths so the Next.js server resolves them regardless of cwd.
 export AVIARY_DATA_ROOT="$REPO_ROOT/data/annotation/raw"
-export AVIARY_ROSTER="$REPO_ROOT/models/roster.yaml"
+export AVIARY_ROSTER="$REPO_ROOT/training/roster.yaml"
 
 cd annotation
 if [ ! -d node_modules ]; then

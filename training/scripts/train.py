@@ -8,13 +8,29 @@ import shutil
 from pathlib import Path
 
 
+def batch_size(value: str) -> int | float:
+    """Parse --batch: 'auto' -> -1 (Ultralytics AutoBatch, ~60% GPU memory),
+    an int (fixed batch), or a float in (0, 1) (fraction of GPU memory)."""
+    if value == "auto":
+        return -1
+    try:
+        return int(value)
+    except ValueError:
+        return float(value)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", required=True, type=Path, help="Ultralytics dataset.yaml")
     parser.add_argument("--model", default="yolo11n.pt", help="Base YOLO model")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=960)
-    parser.add_argument("--batch", default="auto")
+    parser.add_argument(
+        "--batch",
+        type=batch_size,
+        default="auto",
+        help="int (fixed), float in (0,1) (fraction of GPU memory), or 'auto' (AutoBatch)",
+    )
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda:0, mps")
     parser.add_argument("--project", type=Path, default=Path("data/training/runs"))
     parser.add_argument("--name", default="bird_detector")
@@ -33,7 +49,9 @@ def main() -> None:
         "epochs": args.epochs,
         "imgsz": args.imgsz,
         "batch": args.batch,
-        "project": str(args.project),
+        # Absolute so Ultralytics writes to data/training/runs/<name> verbatim;
+        # a relative project gets nested under its global runs dir (runs/detect/...).
+        "project": str(args.project.resolve()),
         "name": args.name,
         "exist_ok": True,
     }

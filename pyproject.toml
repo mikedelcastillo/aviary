@@ -29,16 +29,16 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = [
     "server/lib",
-    "models/training/aviary_training",
+    "training/aviary_training",
 ]
 
 # ... plus each standalone script mapped explicitly to a top-level module, so
 # `train`, `evaluate`, ... import cleanly as their entry points expect.
 [tool.hatch.build.targets.wheel.force-include]
-"models/training/scripts/train.py" = "train.py"
-"models/training/scripts/evaluate.py" = "evaluate.py"
-"models/training/scripts/prepare_dataset.py" = "prepare_dataset.py"
-"models/training/scripts/extract_frames.py" = "extract_frames.py"
+"training/scripts/train.py" = "train.py"
+"training/scripts/evaluate.py" = "evaluate.py"
+"training/scripts/prepare_dataset.py" = "prepare_dataset.py"
+"training/scripts/extract_frames.py" = "extract_frames.py"
 
 # NOTE: `torch`/`torchvision` come in transitively via ultralytics (a default build that does
 # not match every GPU). The correct per-machine GPU build is installed into the venv by

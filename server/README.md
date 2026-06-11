@@ -17,7 +17,8 @@ Update:
 - `TELEGRAM_USER_IDS`
 - `TAPO_RSTP` (comma-separated RTSP URLs, ordered to match the cameras in
   `server/lib/config.py`)
-- `AVIARY_MODEL_PATH` if running outside Docker
+- `MODEL_PATH` if running outside Docker (comma-separated for multiple models —
+  each runs a separate pass per frame and their detections are merged)
 
 ## Run
 

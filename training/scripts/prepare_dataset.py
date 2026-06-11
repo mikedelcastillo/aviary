@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--roster",
         type=Path,
-        default=Path("models/roster.yaml"),
+        default=Path("training/roster.yaml"),
         help="Single-source roster YAML",
     )
     parser.add_argument(

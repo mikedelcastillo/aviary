@@ -13,7 +13,7 @@ export const DATA_ROOT =
   process.env.AVIARY_DATA_ROOT ?? path.join(REPO_ROOT, "data", "annotation", "raw");
 
 export const ROSTER_PATH =
-  process.env.AVIARY_ROSTER ?? path.join(REPO_ROOT, "models", "roster.yaml");
+  process.env.AVIARY_ROSTER ?? path.join(REPO_ROOT, "training", "roster.yaml");
 
 /** Directory of valid image basenames (no path separators, jpg/jpeg/png). */
 const NAME_RE = /^[A-Za-z0-9._-]+\.(jpe?g|png)$/i;

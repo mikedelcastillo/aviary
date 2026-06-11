@@ -5,6 +5,10 @@
 # models) lives here so it can be backed up or moved as a single folder.
 /data/
 
+# Ultralytics' default run dir, in case a command writes here instead of
+# data/training/runs (e.g. val/predict/export without an explicit project).
+/runs/
+
 # Server logfile (native FFmpeg/h264 noise + full log; AVIARY_LOG_FILE).
 aviary.log
 

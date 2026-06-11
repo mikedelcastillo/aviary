@@ -32,7 +32,10 @@ class CameraConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    path: Path
+    # One or more model files; each runs a separate pass over every frame and
+    # their detections are merged. A tuple (not a list) so this frozen dataclass
+    # stays hashable.
+    paths: tuple[Path, ...]
     confidence: float = 0.7
     iou: float = 0.5
     image_size: int = 960
@@ -93,6 +96,14 @@ def _rtsp_urls() -> list[str]:
     return [url.strip() for url in raw.split(",") if url.strip()]
 
 
+def _model_paths() -> tuple[Path, ...]:
+    raw = _require_env("MODEL_PATH")
+    paths = tuple(Path(item.strip()) for item in raw.split(",") if item.strip())
+    if not paths:
+        raise ValueError("No model paths configured; set MODEL_PATH")
+    return paths
+
+
 def _build_cameras() -> list[CameraConfig]:
     return [
         CameraConfig(
@@ -109,7 +120,7 @@ def build_config() -> AppConfig:
     if not cameras:
         raise ValueError("No cameras configured; set TAPO_RSTP")
 
-    model = ModelConfig(path=Path(_require_env("AVIARY_MODEL_PATH")))
+    model = ModelConfig(paths=_model_paths())
 
     telegram = TelegramConfig(
         enabled=True,

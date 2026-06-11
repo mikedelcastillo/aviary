@@ -6,7 +6,7 @@ The project is split into three working areas:
 
 - `annotation/`: the `/annotation` web tool to collect images and label birds
   with bounding boxes (run `./scripts/annotation.sh`).
-- `models/training/`: prepare datasets and train an Ultralytics YOLO detector.
+- `training/`: prepare datasets and train the Ultralytics YOLO detectors.
 - `server/`: consume camera streams, run inference, and send Telegram alerts.
 
 The first production goal is to identify each of the six birds. The model uses
@@ -50,33 +50,23 @@ Run from the repo root so the scripts' default relative paths resolve.
    - Extract Tapo infrared frames into `data/annotation/raw/tapo/ir/`.
 
 3. Label images with the `/annotation` web tool — run `./scripts/annotation.sh`
-   and open http://0.0.0.0:5000. It labels against `models/roster.yaml` (the
+   and open http://0.0.0.0:5000. It labels against `training/roster.yaml` (the
    single label roster for both the live and archive models — see
-   `models/README.md`).
+   `training/STRATEGY.md`) and writes YOLO `.txt` labels back next to each image.
 
-4. Save the labels in YOLO format and place them under
-   `data/annotation/exports/<dataset_version>/`.
-
-5. Prepare a YOLO dataset for the model you want (`--model` filters the roster to
-   that model's classes and remaps the labels):
+4. Build a model end-to-end — prepare its dataset from the labeled raw images,
+   train, and export the weights into `training/models/`:
 
    ```bash
-   uv run prepare-dataset \
-     --source data/annotation/exports/v001 \
-     --output data/training/datasets/v001 \
-     --model live
+   ./scripts/train_live.sh      # -> training/models/live.pt    (real-time CCTV detector)
+   ./scripts/train_archive.sh   # -> training/models/archive.pt (photo-library catalog)
    ```
 
-6. Train:
+   Flags pass through to training, e.g. `./scripts/train_live.sh --epochs 200
+   --device cuda:0`. To run the prepare/train/evaluate steps by hand instead, see
+   [`training/README.md`](training/README.md).
 
-   ```bash
-   uv run train \
-     --data data/training/datasets/v001/dataset.yaml \
-     --epochs 100 \
-     --export-to data/server/models/current/object_detector.pt
-   ```
-
-7. Set `TAPO_RSTP` in `.env` (cameras are defined in
+5. Set `TAPO_RSTP` in `.env` (cameras are defined in
    `server/lib/config.py`), then run the server:
 
    ```bash

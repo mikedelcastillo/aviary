@@ -1,4 +1,4 @@
-// Server-only roster loader. Parses models/roster.yaml, assigns global class
+// Server-only roster loader. Parses training/roster.yaml, assigns global class
 // indices (= file order), and derives the per-category pill set + shortcuts.
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
