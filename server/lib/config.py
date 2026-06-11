@@ -32,8 +32,11 @@ class CameraConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    path: Path
-    confidence: float = 0.7
+    # One or more model files; each runs a separate pass over every frame and
+    # their detections are merged. A tuple (not a list) so this frozen dataclass
+    # stays hashable.
+    paths: tuple[Path, ...]
+    confidence: float = 0.5
     iou: float = 0.5
     image_size: int = 960
     device: str = "auto"
@@ -52,7 +55,15 @@ class TelegramConfig:
 @dataclass(frozen=True)
 class CollectConfig:
     objects: frozenset[str]
-    directory: Path = Path("./collect")
+    directory: Path = Path("./data/server/collect")
+
+
+@dataclass(frozen=True)
+class FilterConfig:
+    # When non-empty, only these object labels are allowed to alert; everything
+    # else is still detected/collected but never triggers a notification. Empty
+    # means no filtering (alert on every detected object).
+    objects: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -62,6 +73,7 @@ class AppConfig:
     telegram: TelegramConfig
     cameras: list[CameraConfig]
     collect: CollectConfig
+    filter: FilterConfig
 
 
 def _require_env(name: str) -> str:
@@ -84,6 +96,14 @@ def _rtsp_urls() -> list[str]:
     return [url.strip() for url in raw.split(",") if url.strip()]
 
 
+def _model_paths() -> tuple[Path, ...]:
+    raw = _require_env("MODEL_PATH")
+    paths = tuple(Path(item.strip()) for item in raw.split(",") if item.strip())
+    if not paths:
+        raise ValueError("No model paths configured; set MODEL_PATH")
+    return paths
+
+
 def _build_cameras() -> list[CameraConfig]:
     return [
         CameraConfig(
@@ -100,7 +120,7 @@ def build_config() -> AppConfig:
     if not cameras:
         raise ValueError("No cameras configured; set TAPO_RSTP")
 
-    model = ModelConfig(path=Path(_require_env("AVIARY_MODEL_PATH")))
+    model = ModelConfig(paths=_model_paths())
 
     telegram = TelegramConfig(
         enabled=True,
@@ -109,11 +129,13 @@ def build_config() -> AppConfig:
         include_snapshot=True,
     )
     collect = CollectConfig(objects=_as_object_names(os.environ.get("COLLECT_OBJECTS", "")))
+    object_filter = FilterConfig(objects=_as_object_names(os.environ.get("FILTER_OBJECTS", "")))
 
     return AppConfig(
-        snapshot_dir=Path("./snapshots"),
+        snapshot_dir=Path("./data/server/snapshots"),
         model=model,
         telegram=telegram,
         cameras=cameras,
         collect=collect,
+        filter=object_filter,
     )

@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/* Vercel-like dark theme tokens. Defining colors here generates utilities like
+   bg-surface, text-muted, border-border in Tailwind v4. */
+@theme {
+  --color-bg: #0a0a0a;
+  --color-surface: #101012;
+  --color-surface-2: #161619;
+  --color-elevated: #1c1c20;
+  --color-border: #232327;
+  --color-border-strong: #34343b;
+  --color-fg: #ededed;
+  --color-muted: #8f8f98;
+  --color-faint: #5a5a62;
+  --color-accent: #ffffff;
+  --color-box: #00e676;
+  --color-danger: #ff4d4f;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --radius-pill: 9999px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* App-wide: no text selection, for a professional tool feel. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Opt back in only where genuinely needed (none today, but future-proof). */
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Prevent text selection while dragging boxes / panning. */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Thin, unobtrusive scrollbars. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 9999px;
+}

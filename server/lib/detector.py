@@ -20,13 +20,15 @@ class Detection:
 
 class ObjectDetector:
     def __init__(self, config: ModelConfig) -> None:
-        if not Path(config.path).exists():
-            raise FileNotFoundError(f"Model file does not exist: {config.path}")
+        for path in config.paths:
+            if not Path(path).exists():
+                raise FileNotFoundError(f"Model file does not exist: {path}")
 
         from ultralytics import YOLO
 
         self.config = config
-        self.model = YOLO(str(config.path))
+        # Each model runs its own pass per frame; detections are concatenated.
+        self.models = [YOLO(str(path)) for path in config.paths]
         self._lock = threading.Lock()
 
     def predict(self, frame) -> list[Detection]:
@@ -40,32 +42,34 @@ class ObjectDetector:
         if self.config.device != "auto":
             predict_args["device"] = self.config.device
 
-        with self._lock:
-            results = self.model.predict(**predict_args)
-
-        if not results:
-            return []
-
-        names = self.model.names
         detections: list[Detection] = []
-        for box in results[0].boxes:
-            cls_id = int(box.cls[0].item())
-            confidence = float(box.conf[0].item())
-            raw_xyxy = box.xyxy[0].tolist()
-            x1, y1, x2, y2 = (int(round(value)) for value in raw_xyxy)
+        # One lock still serializes all inference so the models never contend
+        # for the GPU; each model adds its detections to the merged list.
+        with self._lock:
+            for model in self.models:
+                results = model.predict(**predict_args)
+                if not results:
+                    continue
 
-            if isinstance(names, dict):
-                label = str(names.get(cls_id, cls_id))
-            else:
-                label = str(names[cls_id]) if cls_id < len(names) else str(cls_id)
+                names = model.names
+                for box in results[0].boxes:
+                    cls_id = int(box.cls[0].item())
+                    confidence = float(box.conf[0].item())
+                    raw_xyxy = box.xyxy[0].tolist()
+                    x1, y1, x2, y2 = (int(round(value)) for value in raw_xyxy)
 
-            detections.append(
-                Detection(
-                    label=label,
-                    confidence=confidence,
-                    bbox_xyxy=(x1, y1, x2, y2),
-                )
-            )
+                    if isinstance(names, dict):
+                        label = str(names.get(cls_id, cls_id))
+                    else:
+                        label = str(names[cls_id]) if cls_id < len(names) else str(cls_id)
+
+                    detections.append(
+                        Detection(
+                            label=label,
+                            confidence=confidence,
+                            bbox_xyxy=(x1, y1, x2, y2),
+                        )
+                    )
 
         return detections
 

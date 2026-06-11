@@ -108,6 +108,7 @@ def main() -> None:
     alert_state = AlertState(
         app_config.telegram.last_seen_alert_seconds,
         app_config.telegram.bbox_movement_alert_ratio,
+        app_config.filter.objects,
     )
     stop_event = threading.Event()
     install_signal_handlers(stop_event)

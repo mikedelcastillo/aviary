@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Import collect/bird frames into models/annotation/raw/camera_frames (day/ir).
+# Import data/server/collect/bird frames into data/annotation/raw/tapo (day/ir).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-uv run --no-sync python models/annotation/scripts/import_collect_birds.py "$@"
+uv run --no-sync python training/scripts/import_collect_birds.py "$@"

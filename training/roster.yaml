@@ -1,0 +1,62 @@
+# Bird roster — SINGLE SOURCE OF TRUTH for every label across both models AND
+# for the annotation tool (see /annotation). Used for labeling AND to derive each
+# model's class map at dataset-prep time (`prepare-dataset --model live|archive`).
+# See models/README.md.
+#
+# ORDER IS SIGNIFICANT: a label's position here is its integer class index in the
+# YOLO label files. Append new labels at the END; never reorder existing ones.
+#
+# Fields:
+#   name    -> label string written by annotators; the loader keys on this.
+#   kind    -> individual | species | unknown. Drives which pills the annotation
+#              tool shows per image category (see below). Documentation for the
+#              Python loader (it reads only name + models), authoritative for the tool.
+#   models  -> which trained model each label feeds.
+#               live    -> real-time CCTV detector (6 living birds + 3 IR species + unknown)
+#               archive -> photo-library catalog   (all individuals, RGB only, no species)
+#   species -> documentation only (the bird's species for individuals).
+#
+# Annotation tool pill rules (derived from kind + models), unknown_bird always last:
+#   tapo/day -> kind=individual AND models has `live`  (the living birds)
+#   tapo/ir  -> kind=species    (cockatiel, lovebird, budgie — species only at night)
+#   phone    -> kind=individual AND models has `archive` (every individual, living + deceased)
+
+labels:
+  # ---- Individuals — living (both models) ----
+  - { name: draft,  kind: individual, species: cockatiel, models: [live, archive] }
+  - { name: pizza,  kind: individual, species: cockatiel, models: [live, archive] }
+  - { name: percy,  kind: individual, species: lovebird,  models: [live, archive] }
+  - { name: matcha, kind: individual, species: lovebird,  models: [live, archive] }
+  - { name: jynx,   kind: individual, species: lovebird,  models: [live, archive] }
+  - { name: bambi,  kind: individual, species: budgie,    models: [live, archive] }
+
+  # ---- Individuals — archive only (deceased / historical) ----
+  - { name: rust,   kind: individual, species: lovebird, models: [archive] }
+  - { name: branch, kind: individual, species: lovebird, models: [archive] }
+  - { name: prince, kind: individual, species: lovebird, models: [archive] }
+  - { name: pasta,  kind: individual, species: lovebird, models: [archive] }
+  - { name: blu,    kind: individual, species: lovebird, models: [archive] }
+  - { name: twig,   kind: individual, species: budgie,   models: [archive] }
+  - { name: soy,    kind: individual, species: budgie,   models: [archive] }
+
+  # ---- Species labels — IR / night frames, live model only ----
+  - { name: cockatiel, kind: species, models: [live] }
+  - { name: lovebird,  kind: species, models: [live] }
+  - { name: budgie,    kind: species, models: [live] }
+
+  # ---- Fallback — every category ----
+  - { name: unknown_bird, kind: unknown, models: [live, archive] }
+
+# See models/README.md for the full rationale behind these rules.
+rules:
+  - Label by identity only. A bird is the same bird in or out of its cage — never
+    create in-cage/out-of-cage labels. Include both as data diversity.
+  - On COLOR (RGB) frames, label the individual bird name.
+  - On IR / night (grayscale) frames, use the species label (cockatiel, lovebird,
+    budgie) only — we do not need individual names at night.
+  - Apply species labels to ALL IR birds, even ones identifiable in IR. No mixed rules.
+  - Draw one tight box around each visible bird.
+  - Include partially occluded or behind-bars birds if any meaningful body area is visible.
+  - Use unknown_bird when identity is unclear.
+  - Do not label toys, shadows, reflections, cage hardware, or empty perches.
+  - Prefer camera-frame labels over phone-only labels when resolving ambiguity.

@@ -1,9 +1,13 @@
 .env
 .DS_Store
 
-# Runtime snapshots (cleared on every app start).
-/snapshots/
-/collect/
+# All persistent data (collected frames, snapshots, annotation, training,
+# models) lives here so it can be backed up or moved as a single folder.
+/data/
+
+# Ultralytics' default run dir, in case a command writes here instead of
+# data/training/runs (e.g. val/predict/export without an explicit project).
+/runs/
 
 # Server logfile (native FFmpeg/h264 noise + full log; AVIARY_LOG_FILE).
 aviary.log
@@ -16,28 +20,7 @@ __pycache__/
 .venv/
 venv/
 
-# Raw and generated data should be versioned outside git.
-models/annotation/raw/**
-models/annotation/exports/**
-models/training/datasets/**
-models/training/runs/**
-server/snapshots/**
-server/models/**
-
-!models/annotation/raw/
-!models/annotation/raw/**/
-!models/annotation/raw/**/.gitkeep
-!models/annotation/exports/
-!models/annotation/exports/.gitkeep
-!models/training/datasets/
-!models/training/datasets/.gitkeep
-!models/training/runs/
-!models/training/runs/.gitkeep
-!server/snapshots/
-!server/snapshots/.gitkeep
-!server/models/
-!server/models/current/
-!server/models/current/.gitkeep
+.next
 
 # Model artifacts are large.
 *.pt

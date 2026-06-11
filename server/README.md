@@ -17,28 +17,25 @@ Update:
 - `TELEGRAM_USER_IDS`
 - `TAPO_RSTP` (comma-separated RTSP URLs, ordered to match the cameras in
   `server/lib/config.py`)
-- `AVIARY_MODEL_PATH` if running outside Docker
+- `MODEL_PATH` if running outside Docker (comma-separated for multiple models —
+  each runs a separate pass per frame and their detections are merged)
 
-## Docker Run
-
-```bash
-docker compose -f compose.dev.yml up --build
-```
-
-The Docker container expects the model at:
-
-```text
-server/models/current/object_detector.pt
-```
-
-## Local Python Run
+## Run
 
 From the repo root (see the top-level README for installing uv):
 
 ```bash
-uv sync
-uv run server
+./scripts/server.sh
 ```
+
+This runs the server natively in the uv venv, installing the correct GPU torch
+build for the machine first. It expects the model at:
+
+```text
+data/server/models/current/object_detector.pt
+```
+
+A `server/Dockerfile` is still provided if you'd rather containerize the server.
 
 On Apple Silicon, set the model `device` to `mps` in the `ModelConfig` defaults
 in `server/lib/config.py`.
