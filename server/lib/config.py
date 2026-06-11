@@ -56,12 +56,21 @@ class CollectConfig:
 
 
 @dataclass(frozen=True)
+class FilterConfig:
+    # When non-empty, only these object labels are allowed to alert; everything
+    # else is still detected/collected but never triggers a notification. Empty
+    # means no filtering (alert on every detected object).
+    objects: frozenset[str]
+
+
+@dataclass(frozen=True)
 class AppConfig:
     snapshot_dir: Path
     model: ModelConfig
     telegram: TelegramConfig
     cameras: list[CameraConfig]
     collect: CollectConfig
+    filter: FilterConfig
 
 
 def _require_env(name: str) -> str:
@@ -109,6 +118,7 @@ def build_config() -> AppConfig:
         include_snapshot=True,
     )
     collect = CollectConfig(objects=_as_object_names(os.environ.get("COLLECT_OBJECTS", "")))
+    object_filter = FilterConfig(objects=_as_object_names(os.environ.get("FILTER_OBJECTS", "")))
 
     return AppConfig(
         snapshot_dir=Path("./data/server/snapshots"),
@@ -116,4 +126,5 @@ def build_config() -> AppConfig:
         telegram=telegram,
         cameras=cameras,
         collect=collect,
+        filter=object_filter,
     )

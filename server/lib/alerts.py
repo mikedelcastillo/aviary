@@ -39,11 +39,24 @@ def write_snapshot(snapshot_dir: Path, camera_name: str, frame, detections: list
 
 
 class AlertState:
-    def __init__(self, last_seen_alert_seconds: float, bbox_movement_alert_ratio: float) -> None:
+    def __init__(
+        self,
+        last_seen_alert_seconds: float,
+        bbox_movement_alert_ratio: float,
+        filter_objects: frozenset[str] = frozenset(),
+    ) -> None:
         self.last_seen_alert_seconds = last_seen_alert_seconds
         self.bbox_movement_alert_ratio = bbox_movement_alert_ratio
+        # When non-empty, only these labels are allowed to alert. Empty means no
+        # filtering. Mirrors COLLECT_OBJECTS membership semantics (lowercased).
+        self.filter_objects = filter_objects
         self._objects: dict[tuple[str, str], dict] = {}
         self._lock = threading.Lock()
+
+    def _passes_filter(self, detection: Detection) -> bool:
+        if not self.filter_objects:
+            return True
+        return detection.label.strip().lower() in self.filter_objects
 
     def eligible(
         self,
@@ -57,6 +70,8 @@ class AlertState:
 
         with self._lock:
             for detection in detections:
+                if not self._passes_filter(detection):
+                    continue
                 if detection.label in seen_labels:
                     continue
                 seen_labels.add(detection.label)
