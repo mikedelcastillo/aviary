@@ -5,7 +5,7 @@ export interface PillBarProps {
   pills: Pill[];
   onPick: (pill: Pill) => void;
   activeLabel?: string | null;
-  /** When provided, shows an "Unbox [U]" control that deletes the active box. */
+  /** When provided, shows an "Unbox [B]" control that deletes the active box. */
   onUnbox?: () => void;
 }
 
@@ -46,7 +46,7 @@ export function PillBar({ pills, onPick, activeLabel, onUnbox }: PillBarProps) {
               className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
             >
               <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] uppercase text-danger">
-                U
+                B
               </kbd>
               <span className="font-medium">Unbox</span>
             </button>

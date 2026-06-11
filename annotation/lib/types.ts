@@ -30,6 +30,73 @@ export function categoryById(id: string): CategoryDef | undefined {
   return CATEGORIES.find((c) => c.id === id);
 }
 
+// ---------------------------------------------------------------------------
+// Category selection helpers. Box/Label navigation and the home-page summary
+// can be scoped to a subset of categories. The selection rides in a `?cats=`
+// query param (e.g. `?cats=day,ir`); the canonical "all three" state omits the
+// param entirely so default URLs stay identical to the unfiltered tool.
+// Pure + client-safe — no fs imports.
+// ---------------------------------------------------------------------------
+
+/** All category ids in canonical manifest order (day, ir, phone). */
+export const ALL_CATS: CatId[] = CATEGORIES.map((c) => c.id);
+
+function isCatId(v: string): v is CatId {
+  return CATEGORIES.some((c) => c.id === v);
+}
+
+/**
+ * Parse a `cats` query value into a valid, canonically-ordered, de-duped subset.
+ * Empty / null / all-invalid input falls back to all three categories so a
+ * missing or garbled param never strands the user with nothing to annotate.
+ */
+export function parseCats(param: string | null | undefined): CatId[] {
+  if (!param) return [...ALL_CATS];
+  const picked = new Set(
+    param
+      .split(",")
+      .map((s) => s.trim())
+      .filter(isCatId),
+  );
+  const out = ALL_CATS.filter((c) => picked.has(c));
+  return out.length > 0 ? out : [...ALL_CATS];
+}
+
+/**
+ * Serialize a category subset for a URL. Returns null when the selection equals
+ * all three (canonical) so callers can omit the param; otherwise a canonically
+ * ordered comma list, e.g. "day,ir".
+ */
+export function serializeCats(cats: CatId[]): string | null {
+  const ordered = ALL_CATS.filter((c) => cats.includes(c));
+  if (ordered.length === 0 || ordered.length === ALL_CATS.length) return null;
+  return ordered.join(",");
+}
+
+/** Append `?cats=…` to a path, unless the selection is the canonical all-three. */
+export function withCats(href: string, cats: CatId[]): string {
+  const param = serializeCats(cats);
+  return param ? `${href}?cats=${param}` : href;
+}
+
+/** Keep only items whose `cat` is in the selected set. */
+export function filterByCats<T extends { cat: CatId }>(items: T[], cats: CatId[]): T[] {
+  const set = new Set(cats);
+  return items.filter((it) => set.has(it.cat));
+}
+
+/**
+ * Entry URL for review mode for a given label. Lands on global index 0; the
+ * review page's deep-link guard snaps to the first image that actually contains
+ * the label. Carries the category scope so review matches the leaderboard.
+ */
+export function reviewHref(label: string, cats: CatId[]): string {
+  const params = new URLSearchParams({ label });
+  const c = serializeCats(cats);
+  if (c) params.set("cats", c);
+  return `/review/0?${params.toString()}`;
+}
+
 /** A single bounding box in normalized YOLO geometry (center + size, 0..1). */
 export interface Box {
   /** Stable client key — used for hover/queue/undo. NOT written to the YOLO .txt. */

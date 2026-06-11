@@ -4,7 +4,16 @@
 import { promises as fs } from "node:fs";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { CATEGORIES, type Annotation, type Box, type CatId, type CategoryProgress, type ManifestEntry } from "./types";
+import {
+  ALL_CATS,
+  CATEGORIES,
+  filterByCats,
+  type Annotation,
+  type Box,
+  type CatId,
+  type CategoryProgress,
+  type ManifestEntry,
+} from "./types";
 import { categoryDir, imageFsPath, sidecarFsPath } from "./paths";
 import { loadRoster, nameToIndex } from "./roster";
 
@@ -188,8 +197,8 @@ export async function getProgress(): Promise<CategoryProgress[]> {
  * image that hasn't actually been boxed — auto-detection seed boxes never
  * qualify on their own.
  */
-export async function getQueue(): Promise<number[]> {
-  const manifest = getManifest();
+export async function getQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
+  const manifest = filterByCats(getManifest(), cats);
   const flags = await Promise.all(
     manifest.map(async (e) => {
       const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
@@ -212,12 +221,36 @@ export async function getQueue(): Promise<number[]> {
  *  - label: first image that still has an unlabeled box (queue head)
  * Falls back to 0 when everything is already done.
  */
-export async function getEntryPoints(): Promise<{ box: number; label: number }> {
-  const manifest = getManifest();
+export async function getEntryPoints(cats: CatId[] = ALL_CATS): Promise<{ box: number; label: number }> {
+  // Scope to the selected categories but report GLOBAL manifest indices (the
+  // path param), so the box target is the first un-boxed image among `cats`.
+  const manifest = filterByCats(getManifest(), cats);
   const boxedFlags = await Promise.all(manifest.map((e) => quickState(e.cat, e.name).then((s) => s.boxed)));
-  const boxIdx = boxedFlags.findIndex((b) => !b);
-  const queue = await getQueue();
-  return { box: boxIdx === -1 ? 0 : boxIdx, label: queue[0] ?? 0 };
+  const firstUnboxed = manifest.find((_, i) => !boxedFlags[i]);
+  const queue = await getQueue(cats);
+  return { box: firstUnboxed?.n ?? manifest[0]?.n ?? 0, label: queue[0] ?? manifest[0]?.n ?? 0 };
+}
+
+/**
+ * Global indices of images that contain at least one box labeled `label`
+ * (scoped to `cats`). Drives review mode's navigation.
+ */
+export async function getReviewQueue(label: string, cats: CatId[] = ALL_CATS): Promise<number[]> {
+  if (!label) return [];
+  const manifest = filterByCats(getManifest(), cats);
+  const flags = await Promise.all(
+    manifest.map(async (e) => {
+      const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
+      try {
+        const raw = await fs.readFile(jsonPath, "utf8");
+        const data = JSON.parse(raw) as Annotation;
+        return (data.boxes ?? []).some((b) => b.label === label);
+      } catch {
+        return false;
+      }
+    }),
+  );
+  return manifest.filter((_, i) => flags[i]).map((e) => e.n);
 }
 
 export interface LabelStat {
@@ -229,8 +262,8 @@ export interface LabelStat {
  * Total labeled boxes per roster label across all images, ranked desc. Every
  * roster label is included (even 0-count) so the home page can list them all.
  */
-export async function getLabelStats(): Promise<LabelStat[]> {
-  const manifest = getManifest();
+export async function getLabelStats(cats: CatId[] = ALL_CATS): Promise<LabelStat[]> {
+  const manifest = filterByCats(getManifest(), cats);
   const counts = new Map<string, number>();
   await Promise.all(
     manifest.map(async (e) => {

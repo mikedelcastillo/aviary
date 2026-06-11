@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Stage } from "@/components/Stage";
 import { Spotlight } from "@/components/Spotlight";
@@ -11,6 +11,9 @@ import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { useAnnotation } from "@/lib/use-annotation";
 import {
   categoryById,
+  filterByCats,
+  parseCats,
+  withCats,
   type CatId,
   type ManifestEntry,
   type NormRect,
@@ -30,6 +33,8 @@ export default function LabelPage() {
   const params = useParams<{ n: string }>();
   const n = Number(params.n);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
 
   // --- Fetch manifest / roster / queue once on mount. -----------------------
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
@@ -66,11 +71,25 @@ export default function LabelPage() {
     };
   }, []);
 
-  const entry: ManifestEntry | null =
-    manifest && Number.isInteger(n) && n >= 0 && n < manifest.length ? manifest[n] : null;
+  // Selected-category subset (global-index order) for nav + counter.
+  const filtered = useMemo(() => (manifest ? filterByCats(manifest, cats) : []), [manifest, cats]);
+  const total = filtered.length;
+  const globalInRange = manifest != null && Number.isInteger(n) && n >= 0 && n < manifest.length;
+  const baseEntry = globalInRange ? manifest![n] : null;
+  const inCats = baseEntry != null && cats.includes(baseEntry.cat);
+  const pos = baseEntry && inCats ? filtered.findIndex((e) => e.n === n) : -1;
+
+  // Deep-link guard: snap to the first in-scope image at/after `n`.
+  useEffect(() => {
+    if (manifest == null || filtered.length === 0) return;
+    if (baseEntry && inCats) return;
+    const target = filtered.find((e) => e.n >= n) ?? filtered[0];
+    router.replace(withCats(`/label/${target.n}`, cats));
+  }, [manifest, filtered, baseEntry, inCats, n, cats, router]);
+
+  const entry = baseEntry && inCats ? baseEntry : null;
   const cat = entry?.cat ?? null;
   const name = entry?.name ?? null;
-  const total = manifest?.length ?? 0;
 
   const { annotation, setLabel, removeBox, undo, redo, loading } = useAnnotation(cat, name);
 
@@ -114,25 +133,30 @@ export default function LabelPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, activeBox?.id]);
 
-  // --- Navigation helpers. --------------------------------------------------
-  const goToImage = useCallback(
-    (target: number) => {
-      if (!manifest) return;
-      if (target < 0 || target >= manifest.length) return;
-      router.push(`/label/${target}`);
-    },
-    [manifest, router],
-  );
+  // --- Navigation helpers (scoped to selected categories). ------------------
+  const goPrev = useCallback(() => {
+    let prev: ManifestEntry | null = null;
+    for (const e of filtered) {
+      if (e.n < n) prev = e;
+      else break;
+    }
+    if (prev) router.push(withCats(`/label/${prev.n}`, cats));
+  }, [filtered, n, router, cats]);
+
+  const goNext = useCallback(() => {
+    const next = filtered.find((e) => e.n > n);
+    if (next) router.push(withCats(`/label/${next.n}`, cats));
+  }, [filtered, n, router, cats]);
 
   const advance = useCallback(() => {
     const q = queue ?? [];
-    const next = q.find((idx) => idx > n);
+    const next = q.find((idx) => idx > n && (manifest == null || cats.includes(manifest[idx].cat)));
     if (next != null) {
-      router.push(`/label/${next}`);
+      router.push(withCats(`/label/${next}`, cats));
     } else {
       router.push("/");
     }
-  }, [queue, n, router]);
+  }, [queue, n, router, cats, manifest]);
 
   // --- Assign a label to the active box, then advance if image is done. -----
   const pick = useCallback(
@@ -173,19 +197,26 @@ export default function LabelPage() {
       }
       if (mod) return; // leave other shortcuts (copy/paste/etc.) alone
 
+      // Space skips to the next image needing labels (home after the last).
+      if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        advance();
+        return;
+      }
+
       if (e.key === "ArrowLeft") {
         e.preventDefault();
-        goToImage(n - 1);
+        goPrev();
         return;
       }
       if (e.key === "ArrowRight") {
         e.preventDefault();
-        goToImage(n + 1);
+        goNext();
         return;
       }
 
-      // [U] unboxes the active box (takes precedence over label shortcuts).
-      if (e.key.toLowerCase() === "u" && activeBox) {
+      // [B] unboxes the active box (takes precedence over label shortcuts).
+      if (e.key.toLowerCase() === "b" && activeBox) {
         e.preventDefault();
         unbox();
         return;
@@ -202,7 +233,7 @@ export default function LabelPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, pills, pick, unbox, goToImage, n, undo, redo]);
+  }, [activeBox, pills, pick, unbox, advance, goPrev, goNext, undo, redo]);
 
   // --- Render. --------------------------------------------------------------
   const category = cat ? categoryById(cat) : undefined;
@@ -246,7 +277,7 @@ export default function LabelPage() {
       {/* Top-right counter. */}
       {total > 0 && (
         <div className="pointer-events-none fixed right-4 top-4 z-30 font-mono text-xs text-faint">
-          {n + 1} / {total}
+          {pos + 1} / {total}
         </div>
       )}
 

@@ -1,14 +1,24 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Stage } from "@/components/Stage";
 import { BoxLayer } from "@/components/BoxLayer";
 import { useAnnotation } from "@/lib/use-annotation";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { Spinner } from "@/components/Spinner";
-import { categoryById, type CatId, type ManifestEntry, type NormRect, type Pt, type StageHandle } from "@/lib/types";
+import {
+  categoryById,
+  filterByCats,
+  parseCats,
+  withCats,
+  type CatId,
+  type ManifestEntry,
+  type NormRect,
+  type Pt,
+  type StageHandle,
+} from "@/lib/types";
 
 const MIN_DRAG = 0.005;
 
@@ -33,6 +43,8 @@ function rectFromPoints(a: Pt, b: Pt, w: number, h: number): NormRect {
 export default function BoxPage() {
   const router = useRouter();
   const n = Number(useParams().n);
+  const searchParams = useSearchParams();
+  const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
 
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [draft, setDraft] = useState<NormRect | null>(null);
@@ -57,12 +69,26 @@ export default function BoxPage() {
     };
   }, []);
 
-  const total = manifest?.length ?? 0;
-  const inRange = manifest != null && Number.isInteger(n) && n >= 0 && n < total;
-  const entry = inRange ? manifest![n] : null;
+  // The selected-category subset, in global-index order. Navigation + the
+  // counter are scoped to this list; the path index `n` stays global.
+  const filtered = useMemo(() => (manifest ? filterByCats(manifest, cats) : []), [manifest, cats]);
+  const total = filtered.length;
+  const globalInRange = manifest != null && Number.isInteger(n) && n >= 0 && n < manifest.length;
+  const entry = globalInRange ? manifest![n] : null;
+  const inCats = entry != null && cats.includes(entry.cat);
+  const pos = entry && inCats ? filtered.findIndex((e) => e.n === n) : -1;
 
-  const cat: CatId | null = entry?.cat ?? null;
-  const name: string | null = entry?.name ?? null;
+  // Deep-link guard: if `n` isn't in the selected categories, snap to the first
+  // in-scope image at or after it (else the first in-scope image).
+  useEffect(() => {
+    if (manifest == null || filtered.length === 0) return;
+    if (entry && inCats) return;
+    const target = filtered.find((e) => e.n >= n) ?? filtered[0];
+    router.replace(withCats(`/box/${target.n}`, cats));
+  }, [manifest, filtered, entry, inCats, n, cats, router]);
+
+  const cat: CatId | null = entry && inCats ? entry.cat : null;
+  const name: string | null = entry && inCats ? entry.name : null;
 
   const { annotation, addBox, removeBox, setBoxed, undo, redo, loading } = useAnnotation(cat, name);
 
@@ -73,17 +99,24 @@ export default function BoxPage() {
     setReady(false);
   }, [cat, name]);
 
-  // --- Navigation -----------------------------------------------------------
+  // --- Navigation (within the selected categories) --------------------------
   const goNext = useCallback(() => {
-    if (n + 1 >= total) return;
+    // Advancing confirms the current image is boxed. On the last image there's
+    // nothing to advance to, so head home.
     setBoxed(true);
-    router.push(`/box/${n + 1}`);
-  }, [n, total, setBoxed, router]);
+    const next = filtered.find((e) => e.n > n);
+    router.push(next ? withCats(`/box/${next.n}`, cats) : "/");
+  }, [filtered, n, setBoxed, router, cats]);
 
   const goPrev = useCallback(() => {
-    if (n - 1 < 0) return;
-    router.push(`/box/${n - 1}`);
-  }, [n, router]);
+    let prev: ManifestEntry | null = null;
+    for (const e of filtered) {
+      if (e.n < n) prev = e;
+      else break;
+    }
+    if (!prev) return;
+    router.push(withCats(`/box/${prev.n}`, cats));
+  }, [filtered, n, router, cats]);
 
   // --- Drawing --------------------------------------------------------------
   const onDrawStart = useCallback((pt: Pt) => {
@@ -108,9 +141,12 @@ export default function BoxPage() {
       const r = rectFromPoints(start, pt, size.width, size.height);
       if (r.w > MIN_DRAG && r.h > MIN_DRAG) {
         addBox({ cx: r.x + r.w / 2, cy: r.y + r.h / 2, w: r.w, h: r.h, label: null });
+        // Drawing a box is itself a confirmation — mark the image boxed right
+        // away so it counts even if the user never advances (e.g. last image).
+        if (!annotation?.boxed) setBoxed(true);
       }
     },
-    [addBox],
+    [addBox, setBoxed, annotation?.boxed],
   );
 
   // --- Keyboard -------------------------------------------------------------
@@ -132,7 +168,7 @@ export default function BoxPage() {
         redo();
         return;
       }
-      if (e.key === "ArrowRight") {
+      if (e.key === "ArrowRight" || e.key === " " || e.code === "Space") {
         e.preventDefault();
         goNext();
         return;
@@ -151,7 +187,8 @@ export default function BoxPage() {
   }, [undo, redo, goNext, goPrev]);
 
   // --- Render guards --------------------------------------------------------
-  if (manifest == null) {
+  if (manifest == null || (entry != null && !inCats && filtered.length > 0)) {
+    // Loading, or briefly mid-redirect to an in-scope image.
     return (
       <main className="fixed inset-0 flex items-center justify-center bg-bg">
         <Spinner size={22} className="text-muted" />
@@ -159,10 +196,12 @@ export default function BoxPage() {
     );
   }
 
-  if (!inRange || !entry || !cat || !name) {
+  if (!entry || !inCats || !cat || !name) {
     return (
       <main className="fixed inset-0 bg-bg flex flex-col items-center justify-center gap-3">
-        <span className="text-sm text-muted">Image {Number.isInteger(n) ? n + 1 : "?"} is out of range.</span>
+        <span className="text-sm text-muted">
+          {total === 0 ? "No images in the selected categories." : `Image ${Number.isInteger(n) ? n + 1 : "?"} is out of range.`}
+        </span>
         <Link href="/" className="text-xs text-faint hover:text-fg transition-colors">
           ← Home
         </Link>
@@ -216,20 +255,20 @@ export default function BoxPage() {
           <button
             type="button"
             onClick={goPrev}
-            disabled={n === 0}
+            disabled={pos <= 0}
             aria-label="Previous image"
             className="flex h-7 w-7 items-center justify-center rounded-full text-muted transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-30"
           >
             ‹
           </button>
           <span className="px-2 font-mono text-xs tabular-nums text-fg">
-            {n + 1} / {total}
+            {pos + 1} / {total}
           </span>
           <button
             type="button"
             onClick={goNext}
-            disabled={n === total - 1}
-            aria-label="Next image (confirm)"
+            disabled={pos < 0}
+            aria-label={pos === total - 1 ? "Confirm & finish" : "Next image (confirm)"}
             className="flex h-7 w-7 items-center justify-center rounded-full text-muted transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-30"
           >
             ›

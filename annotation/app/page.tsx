@@ -1,10 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { ProgressCard } from "@/components/ProgressCard";
+import { CatToggle } from "@/components/CatToggle";
 import { Spinner } from "@/components/Spinner";
-import type { CategoryProgress } from "@/lib/types";
+import {
+  ALL_CATS,
+  parseCats,
+  reviewHref,
+  serializeCats,
+  withCats,
+  type CatId,
+  type CategoryProgress,
+} from "@/lib/types";
+
+const CATS_STORAGE_KEY = "aviary.cats";
 
 interface LabelStat {
   label: string;
@@ -39,30 +51,66 @@ export default function Home() {
   const [entry, setEntry] = useState<{ box: number; label: number } | null>(null);
   const [labelStats, setLabelStats] = useState<LabelStat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cats, setCats] = useState<CatId[]>(ALL_CATS);
 
+  // Restore the saved selection after mount (avoids SSR hydration mismatch).
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(CATS_STORAGE_KEY);
+      if (saved) setCats(parseCats(saved));
+    } catch {
+      /* localStorage unavailable — keep default */
+    }
+  }, []);
+
+  // Persist the selection whenever it changes.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(CATS_STORAGE_KEY, serializeCats(cats) ?? "");
+    } catch {
+      /* ignore */
+    }
+  }, [cats]);
+
+  // Per-category progress is selection-independent — fetch once.
   useEffect(() => {
     let cancelled = false;
-
-    async function load(): Promise<void> {
+    (async () => {
       try {
-        const [progressRes, queueRes, entryRes, statsRes] = await Promise.all([
-          fetch("/api/progress"),
-          fetch("/api/queue"),
-          fetch("/api/entry"),
-          fetch("/api/label-stats"),
+        const res = await fetch("/api/progress");
+        if (!res.ok) throw new Error(`progress: ${res.status}`);
+        const data = (await res.json()) as CategoryProgress[];
+        if (!cancelled) setProgress(data);
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Entry points, queue, and the leaderboard are scoped to the selection.
+  useEffect(() => {
+    let cancelled = false;
+    const param = serializeCats(cats);
+    const qs = param ? `?cats=${param}` : "";
+    (async () => {
+      try {
+        const [queueRes, entryRes, statsRes] = await Promise.all([
+          fetch(`/api/queue${qs}`),
+          fetch(`/api/entry${qs}`),
+          fetch(`/api/label-stats${qs}`),
         ]);
-        if (!progressRes.ok) throw new Error(`progress: ${progressRes.status}`);
         if (!queueRes.ok) throw new Error(`queue: ${queueRes.status}`);
         if (!entryRes.ok) throw new Error(`entry: ${entryRes.status}`);
         if (!statsRes.ok) throw new Error(`label-stats: ${statsRes.status}`);
 
-        const progressData = (await progressRes.json()) as CategoryProgress[];
         const queueData = (await queueRes.json()) as number[];
         const entryData = (await entryRes.json()) as { box: number; label: number };
         const statsData = (await statsRes.json()) as LabelStat[];
 
         if (!cancelled) {
-          setProgress(progressData);
           setQueue(queueData);
           setEntry(entryData);
           setLabelStats(statsData);
@@ -70,17 +118,31 @@ export default function Home() {
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
       }
-    }
-
-    void load();
+    })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [cats]);
 
-  const totals = progress ? sumTotals(progress) : null;
+  const catSet = useMemo(() => new Set(cats), [cats]);
+  const selectedProgress = useMemo(
+    () => (progress ? progress.filter((p) => catSet.has(p.id)) : []),
+    [progress, catSet],
+  );
+  const totals = progress ? sumTotals(selectedProgress) : null;
+  const categoryTotals = useMemo(() => {
+    if (!progress) return null;
+    return progress.reduce(
+      (acc, p) => {
+        acc[p.id] = p.total;
+        return acc;
+      },
+      {} as Record<CatId, number>,
+    );
+  }, [progress]);
+
   const queueLen = queue?.length ?? 0;
-  // Mode buttons jump to the first unboxed / first unlabeled image.
+  // Mode buttons jump to the first unboxed / first unlabeled image in selection.
   const boxTarget = entry?.box ?? 0;
   const labelTarget = entry?.label ?? (queue && queue.length > 0 ? queue[0] : 0);
   const labelEmpty = queue !== null && queue.length === 0;
@@ -118,11 +180,16 @@ export default function Home() {
 
       {!error && progress && (
         <>
+          {/* Category selector — scopes everything below. */}
+          <div className="mt-8">
+            <CatToggle selected={cats} totals={categoryTotals} onChange={setCats} />
+          </div>
+
           {/* Primary entry points */}
-          <div className="mt-8 grid gap-4 sm:grid-cols-2">
+          <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <button
               type="button"
-              onClick={() => router.push(`/box/${boxTarget}`)}
+              onClick={() => router.push(withCats(`/box/${boxTarget}`, cats))}
               className="group flex cursor-pointer flex-col rounded-2xl bg-fg p-6 text-left text-bg transition-opacity hover:opacity-90"
             >
               <span className="text-lg font-semibold">Box mode</span>
@@ -136,7 +203,7 @@ export default function Home() {
 
             <button
               type="button"
-              onClick={() => router.push(`/label/${labelTarget}`)}
+              onClick={() => !labelEmpty && router.push(withCats(`/label/${labelTarget}`, cats))}
               aria-disabled={labelEmpty}
               title={labelEmpty ? "Nothing to label yet" : undefined}
               className={
@@ -154,22 +221,27 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Per-category progress */}
+          {/* Per-category progress — unselected categories dimmed. */}
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {progress.map((p) => (
-              <ProgressCard key={p.id} progress={p} />
+              <div
+                key={p.id}
+                className={catSet.has(p.id) ? "" : "opacity-40 transition-opacity"}
+              >
+                <ProgressCard progress={p} />
+              </div>
             ))}
           </div>
 
           {/* Label leaderboard */}
-          {labelStats && <LabelLeaderboard stats={labelStats} />}
+          {labelStats && <LabelLeaderboard stats={labelStats} cats={cats} />}
         </>
       )}
     </main>
   );
 }
 
-function LabelLeaderboard({ stats }: { stats: LabelStat[] }) {
+function LabelLeaderboard({ stats, cats }: { stats: LabelStat[]; cats: CatId[] }) {
   const max = stats.reduce((m, s) => Math.max(m, s.count), 0);
   return (
     <section className="mt-12">
@@ -180,7 +252,7 @@ function LabelLeaderboard({ stats }: { stats: LabelStat[] }) {
       <div className="rounded-2xl border border-border bg-surface p-5">
         <ol className="space-y-2.5">
           {stats.map((s, i) => (
-            <li key={s.label} className="flex items-center gap-3">
+            <li key={s.label} className="group flex items-center gap-3">
               <span className="w-6 text-right font-mono text-xs text-faint">{i + 1}</span>
               <span className="w-28 shrink-0 truncate text-sm text-fg">{s.label}</span>
               <div className="h-2 flex-1 overflow-hidden rounded-full bg-elevated">
@@ -190,6 +262,16 @@ function LabelLeaderboard({ stats }: { stats: LabelStat[] }) {
                 />
               </div>
               <span className="w-12 shrink-0 text-right font-mono text-sm text-muted">{s.count}</span>
+              {s.count > 0 ? (
+                <Link
+                  href={reviewHref(s.label, cats)}
+                  className="shrink-0 rounded-pill border border-border px-2.5 py-1 text-xs text-muted opacity-0 transition-all hover:border-border-strong hover:text-fg focus:opacity-100 group-hover:opacity-100"
+                >
+                  Review
+                </Link>
+              ) : (
+                <span className="w-[4.25rem] shrink-0" aria-hidden />
+              )}
             </li>
           ))}
         </ol>
