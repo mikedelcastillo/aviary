@@ -2,15 +2,16 @@
 
 This is the authoritative guide for how we build the bird detector/identifier.
 It documents *why* the dataset and class scheme look the way they do. The
-mechanics live in [`annotation/README.md`](annotation/README.md) (labeling) and
-[`training/README.md`](training/README.md) (dataset prep + training).
+training mechanics live in [`training/README.md`](training/README.md) (dataset
+prep + training); labeling is done in the `/annotation` web tool (run
+`./scripts/annotation.sh`).
 
 Deployment target: **Tapo CCTV**. Everything below optimizes for that domain.
 
 ## Scope: two models, one roster
 
 We train **two** models from a **single label roster**
-([`annotation/roster.yaml`](annotation/roster.yaml)):
+([`roster.yaml`](roster.yaml)):
 
 | | **Live model** | **Archive model** |
 |---|---|---|
@@ -75,7 +76,7 @@ gives named daytime ID and species-only night tagging from a single model, with
 the abstain-at-night rule.
 
 The canonical label list lives in
-[`annotation/roster.yaml`](annotation/roster.yaml). The live model's classes are
+[`roster.yaml`](roster.yaml). The live model's classes are
 the roster entries tagged `live`, renumbered to a contiguous range by
 `prepare-dataset --model live`.
 
@@ -98,9 +99,9 @@ the roster entries tagged `live`, renumbered to a contiguous range by
 ## Data sources & splits
 
 - **CCTV is the primary domain — keep it the majority of the training set.**
-  `raw/camera_frames/day/` and `raw/camera_frames/ir/`.
-- **Phone photos are a supplement, not the bulk** (`raw/phone_photos/`,
-  `raw/immich_birds/`). They are RGB-only, so they help the daytime case only —
+  `raw/tapo/day/` and `raw/tapo/ir/`.
+- **Phone photos are a supplement, not the bulk** (`raw/phone/`).
+  They are RGB-only, so they help the daytime case only —
   they do nothing for IR. Their highest value is crisp close-ups of the **hard
   pairs** (cheek spot, mask), which teach discriminative features a blurry CCTV
   crop cannot. Different domain (close, eye-level, sharp) — if they dominate, the

@@ -4,7 +4,8 @@ Computer vision platform for monitoring a bird room with Tapo cameras.
 
 The project is split into three working areas:
 
-- `models/annotation/`: collect images and label birds with bounding boxes.
+- `annotation/`: the `/annotation` web tool to collect images and label birds
+  with bounding boxes (run `./scripts/annotation.sh`).
 - `models/training/`: prepare datasets and train an Ultralytics YOLO detector.
 - `server/`: consume camera streams, run inference, and send Telegram alerts.
 
@@ -44,28 +45,25 @@ Run from the repo root so the scripts' default relative paths resolve.
 
 2. Collect seed images:
 
-   - Put phone photos in `models/annotation/raw/phone_photos/`.
-   - Pull likely bird photos from Immich with the standalone
-     [immich-auto-albums](https://github.com/mikedelcastillo/immich-auto-albums) tool
-     into `models/annotation/raw/immich_birds/`.
-   - Extract Tapo day frames into `models/annotation/raw/camera_frames/day/`.
-   - Extract Tapo infrared frames into `models/annotation/raw/camera_frames/ir/`.
+   - Put phone photos in `data/annotation/raw/phone/`.
+   - Extract Tapo day frames into `data/annotation/raw/tapo/day/`.
+   - Extract Tapo infrared frames into `data/annotation/raw/tapo/ir/`.
 
-3. Label images with the bird tagger (a custom tool — TBD; see
-   `models/annotation/README.md`) using `models/annotation/roster.yaml` (the
+3. Label images with the `/annotation` web tool — run `./scripts/annotation.sh`
+   and open http://0.0.0.0:5000. It labels against `models/roster.yaml` (the
    single label roster for both the live and archive models — see
    `models/README.md`).
 
 4. Save the labels in YOLO format and place them under
-   `models/annotation/exports/<dataset_version>/`.
+   `data/annotation/exports/<dataset_version>/`.
 
 5. Prepare a YOLO dataset for the model you want (`--model` filters the roster to
    that model's classes and remaps the labels):
 
    ```bash
    uv run prepare-dataset \
-     --source models/annotation/exports/v001 \
-     --output models/training/datasets/v001 \
+     --source data/annotation/exports/v001 \
+     --output data/training/datasets/v001 \
      --model live
    ```
 
@@ -73,9 +71,9 @@ Run from the repo root so the scripts' default relative paths resolve.
 
    ```bash
    uv run train \
-     --data models/training/datasets/v001/dataset.yaml \
+     --data data/training/datasets/v001/dataset.yaml \
      --epochs 100 \
-     --export-to server/models/current/object_detector.pt
+     --export-to data/server/models/current/object_detector.pt
    ```
 
 7. Set `TAPO_RSTP` in `.env` (cameras are defined in
@@ -102,13 +100,6 @@ Linux GPU machine. A `server/Dockerfile` is still provided if you prefer to
 containerize. On Apple Silicon, Docker usually will not expose MPS acceleration
 to PyTorch, so run natively and set the model `device` to `mps` in
 `server/lib/config.py`.
-
-## Immich Import
-
-Bird-photo prefiltering from Immich now lives in its own repository:
-[immich-auto-albums](https://github.com/mikedelcastillo/immich-auto-albums). Use its
-`download-birds` command to pull each account's `Birds` album, then drop the images into
-`models/annotation/raw/immich_birds/` for labeling.
 
 ## External References
 

@@ -52,7 +52,7 @@ class TelegramConfig:
 @dataclass(frozen=True)
 class CollectConfig:
     objects: frozenset[str]
-    directory: Path = Path("./collect")
+    directory: Path = Path("./data/server/collect")
 
 
 @dataclass(frozen=True)
@@ -111,7 +111,7 @@ def build_config() -> AppConfig:
     collect = CollectConfig(objects=_as_object_names(os.environ.get("COLLECT_OBJECTS", "")))
 
     return AppConfig(
-        snapshot_dir=Path("./snapshots"),
+        snapshot_dir=Path("./data/server/snapshots"),
         model=model,
         telegram=telegram,
         cameras=cameras,

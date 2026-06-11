@@ -38,7 +38,7 @@ packages = [
 "models/training/scripts/train.py" = "train.py"
 "models/training/scripts/evaluate.py" = "evaluate.py"
 "models/training/scripts/prepare_dataset.py" = "prepare_dataset.py"
-"models/annotation/scripts/extract_frames.py" = "extract_frames.py"
+"models/training/scripts/extract_frames.py" = "extract_frames.py"
 
 # NOTE: `torch`/`torchvision` come in transitively via ultralytics (a default build that does
 # not match every GPU). The correct per-machine GPU build is installed into the venv by

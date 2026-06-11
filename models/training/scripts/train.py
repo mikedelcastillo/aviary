@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--batch", default="auto")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda:0, mps")
-    parser.add_argument("--project", type=Path, default=Path("models/training/runs"))
+    parser.add_argument("--project", type=Path, default=Path("data/training/runs"))
     parser.add_argument("--name", default="bird_detector")
     parser.add_argument("--export-to", type=Path, help="Copy best.pt to this path")
     return parser.parse_args()

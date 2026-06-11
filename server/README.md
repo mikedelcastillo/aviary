@@ -31,7 +31,7 @@ This runs the server natively in the uv venv, installing the correct GPU torch
 build for the machine first. It expects the model at:
 
 ```text
-server/models/current/object_detector.pt
+data/server/models/current/object_detector.pt
 ```
 
 A `server/Dockerfile` is still provided if you'd rather containerize the server.
