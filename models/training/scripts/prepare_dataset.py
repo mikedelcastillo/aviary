@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Normalize a CVAT YOLO export into an Ultralytics dataset directory."""
+"""Normalize a YOLO label export into an Ultralytics dataset directory."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class Sample:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, type=Path, help="CVAT YOLO export directory")
+    parser.add_argument("--source", required=True, type=Path, help="YOLO label export directory")
     parser.add_argument("--output", required=True, type=Path, help="Output Ultralytics dataset directory")
     parser.add_argument(
         "--roster",

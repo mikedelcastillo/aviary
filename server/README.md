@@ -19,26 +19,22 @@ Update:
   `server/lib/config.py`)
 - `AVIARY_MODEL_PATH` if running outside Docker
 
-## Docker Run
+## Run
+
+From the repo root (see the top-level README for installing uv):
 
 ```bash
-docker compose -f compose.dev.yml up --build
+./scripts/server.sh
 ```
 
-The Docker container expects the model at:
+This runs the server natively in the uv venv, installing the correct GPU torch
+build for the machine first. It expects the model at:
 
 ```text
 server/models/current/object_detector.pt
 ```
 
-## Local Python Run
-
-From the repo root (see the top-level README for installing uv):
-
-```bash
-uv sync
-uv run server
-```
+A `server/Dockerfile` is still provided if you'd rather containerize the server.
 
 On Apple Silicon, set the model `device` to `mps` in the `ModelConfig` defaults
 in `server/lib/config.py`.

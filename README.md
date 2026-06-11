@@ -25,7 +25,7 @@ Run any subsystem with a short named command (think `npm run`):
 
 | Command | Runs |
 | --- | --- |
-| `uv run prepare-dataset` | normalize a CVAT YOLO export into a training dataset |
+| `uv run prepare-dataset` | normalize a YOLO label export into a training dataset |
 | `uv run train` | train the Ultralytics YOLO detector |
 | `uv run evaluate` | evaluate a trained model |
 | `uv run extract-frames` | extract frames from an RTSP stream or video |
@@ -51,10 +51,12 @@ Run from the repo root so the scripts' default relative paths resolve.
    - Extract Tapo day frames into `models/annotation/raw/camera_frames/day/`.
    - Extract Tapo infrared frames into `models/annotation/raw/camera_frames/ir/`.
 
-3. Label images in CVAT using `models/annotation/roster.yaml` (the single label
-   roster for both the live and archive models — see `models/README.md`).
+3. Label images with the bird tagger (a custom tool — TBD; see
+   `models/annotation/README.md`) using `models/annotation/roster.yaml` (the
+   single label roster for both the live and archive models — see
+   `models/README.md`).
 
-4. Export the labeled CVAT task as YOLO and place it under
+4. Save the labels in YOLO format and place them under
    `models/annotation/exports/<dataset_version>/`.
 
 5. Prepare a YOLO dataset for the model you want (`--model` filters the roster to
@@ -80,7 +82,7 @@ Run from the repo root so the scripts' default relative paths resolve.
    `server/lib/config.py`), then run the server:
 
    ```bash
-   docker compose -f compose.dev.yml up --build
+   ./scripts/server.sh
    ```
 
 ## Practical Dataset Targets
@@ -94,10 +96,12 @@ important for validation because they match the deployment view.
 
 ## Runtime Notes
 
-The Dockerized server is the default deployment path for a Linux GPU machine.
-On Apple Silicon, Docker usually will not expose MPS acceleration to PyTorch.
-For that case, run the Python server directly in a local virtual environment
-and set the model `device` to `mps` in `server/lib/config.py`.
+`./scripts/server.sh` runs the server natively in the uv venv (it picks the
+right GPU torch build via `scripts/install-gpu.sh`) and is the default path on a
+Linux GPU machine. A `server/Dockerfile` is still provided if you prefer to
+containerize. On Apple Silicon, Docker usually will not expose MPS acceleration
+to PyTorch, so run natively and set the model `device` to `mps` in
+`server/lib/config.py`.
 
 ## Immich Import
 
@@ -108,7 +112,6 @@ Bird-photo prefiltering from Immich now lives in its own repository:
 
 ## External References
 
-- CVAT YOLO export format: https://docs.cvat.ai/docs/dataset_management/formats/format-yolo/
-- CVAT self-hosted installation: https://docs.cvat.ai/docs/administration/community/basics/installation/
+- Ultralytics YOLO dataset / label format: https://docs.ultralytics.com/datasets/detect/
 - Ultralytics detection training: https://docs.ultralytics.com/tasks/detect/
 - Tapo RTSP/ONVIF guidance: https://www.tapo.com/faq/34/

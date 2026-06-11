@@ -2,7 +2,7 @@
 
 One YAML lists every label across both models; each label is tagged with which
 model(s) it feeds (``live`` / ``archive``). The order of labels defines the
-integer class index used in CVAT exports, so a given model's class map is a
+integer class index used in the YOLO label exports, so a given model's class map is a
 *filtered, remapped* view of the full roster. See ``models/README.md``.
 """
 
@@ -16,7 +16,7 @@ from typing import Iterable
 @dataclass(frozen=True)
 class RosterLabel:
     name: str
-    index: int  # global class index = position in the roster = CVAT export index
+    index: int  # global class index = position in the roster = YOLO export index
     models: tuple[str, ...]
 
 

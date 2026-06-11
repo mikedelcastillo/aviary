@@ -1,21 +1,22 @@
 # Annotation Workflow
 
-Use CVAT to label bird bounding boxes. Keep the images local where possible.
+Label bird bounding boxes against the shared roster, then save YOLO-format
+labels for training. Keep the images local where possible.
 
-## Start CVAT
+## Annotation Tool
 
-CVAT changes its Docker Compose stack over time, so this project intentionally
-uses the official CVAT repository instead of copying a large Compose file here.
+> **TODO: build a custom bird tagger.** We tried CVAT and dropped it — a
+> 17-container stack is far too heavy for one annotator, and it has no notion of
+> "which images are already labeled," so re-dumping a folder re-imports work
+> you've already done. A small, purpose-built tagger will replace it: read
+> images straight from `raw/`, skip the ones that already have a label, draw one
+> box per bird, pick a label from `roster.yaml`, and write a YOLO `.txt` sidecar
+> directly — no separate export/unzip step.
 
-```bash
-cd annotation
-git clone https://github.com/cvat-ai/cvat.git cvat
-cd cvat
-docker compose up -d
-```
-
-Open CVAT at `http://localhost:8080`, create a user, and create one task per
-image source or capture session.
+Until the tagger exists, label with whatever tool you like. The only contract is
+the output: YOLO-format `.txt` files under `exports/` (see **Export**). The
+label **order in `roster.yaml` is the integer class index**, so the labels must
+be emitted in that order.
 
 ## Label Schema
 
@@ -38,7 +39,7 @@ Do not draw boxes around reflections, toys, shadows, or bird-shaped objects.
   [immich-auto-albums](https://github.com/mikedelcastillo/immich-auto-albums) tool.
 - `raw/camera_frames/day/`: extracted visible-light camera frames.
 - `raw/camera_frames/ir/`: extracted infrared/night-mode frames.
-- `exports/`: CVAT YOLO exports, one folder per dataset version.
+- `exports/`: YOLO-format label exports, one folder per dataset version.
 
 Keep raw image filenames descriptive enough to preserve source context:
 
@@ -50,7 +51,8 @@ phone_pixel8_2026-05-18_00012.jpg
 
 ## Export
 
-In CVAT, export tasks as YOLO format. Unzip each export under:
+Each labeled batch becomes a YOLO-format export — images plus their `.txt`
+label files — placed under a versioned folder:
 
 ```text
 models/annotation/exports/v001/

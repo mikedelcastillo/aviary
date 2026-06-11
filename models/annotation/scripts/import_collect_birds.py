@@ -5,8 +5,8 @@ Reads `*.jpg` + paired `*.json` detection files from a collection folder
 (default `collect/bird`), classifies each frame as `day` (color) or `ir`
 (infrared/night) from image content, moves it into
 `models/annotation/raw/camera_frames/{day,ir}/` with a clean name, and writes
-a YOLO sidecar `.txt` from the detection box so the bird is pre-boxed when the
-frame is opened in CVAT. The consumed `.json` is deleted.
+a YOLO sidecar `.txt` from the detection box so the bird is pre-boxed when you
+open the frame to label it. The consumed `.json` is deleted.
 
 Day/IR is decided from content, not timestamps: IR/night frames are grayscale
 (R=G=B) even though the JPEG is still 3-channel, so we measure the fraction of

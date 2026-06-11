@@ -1,9 +1,9 @@
 # Bird roster — SINGLE SOURCE OF TRUTH for every label across both models.
-# Used for CVAT labeling AND to derive each model's class map at dataset-prep
+# Used for labeling AND to derive each model's class map at dataset-prep
 # time (`prepare-dataset --model live|archive`). See models/README.md.
 #
 # ORDER IS SIGNIFICANT: a label's position here is its integer class index in
-# CVAT YOLO exports. Append new labels at the END; never reorder existing ones.
+# the YOLO label files. Append new labels at the END; never reorder existing ones.
 #
 # models: which trained model each label feeds.
 #   live    -> real-time CCTV detector  (6 living birds + 3 IR species + unknown)
