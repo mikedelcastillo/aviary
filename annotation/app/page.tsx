@@ -13,6 +13,7 @@ import {
   parseCats,
   reviewHref,
   serializeCats,
+  withCats,
   withNav,
   type CatId,
   type CategoryProgress,
@@ -286,6 +287,15 @@ export default function Home() {
               </span>
             </button>
           </div>
+
+          {/* Auxiliary mode — understated, below the primary entry points. */}
+          <Link
+            href={withCats("/dedupe", cats)}
+            className="mt-3 flex items-center justify-between rounded-xl border border-border bg-surface px-5 py-3 text-sm transition-colors hover:border-border-strong hover:bg-surface-2"
+          >
+            <span className="font-medium text-fg">Dedupe</span>
+            <span className="text-muted">Find &amp; remove near-duplicate frames →</span>
+          </Link>
 
           {/* Per-category progress — unselected categories dimmed. */}
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

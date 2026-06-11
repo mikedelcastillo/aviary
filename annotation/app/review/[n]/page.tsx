@@ -12,6 +12,7 @@ import { useAnnotation } from "@/lib/use-annotation";
 import {
   categoryById,
   filterByCats,
+  gridReviewHref,
   parseCats,
   withCats,
   type ManifestEntry,
@@ -280,6 +281,16 @@ export default function ReviewPage() {
         <span className="text-fg/80">
           Reviewing <span className="font-mono text-box">{label}</span>
         </span>
+        {/* Focus (active) ⇄ Grid toggle — same label + category scope. */}
+        <div className="pointer-events-auto mt-0.5 flex w-fit items-center rounded-pill border border-border bg-surface p-0.5">
+          <span className="rounded-pill bg-fg px-2.5 py-1 font-medium text-bg">Focus</span>
+          <Link
+            href={gridReviewHref(label, cats)}
+            className="rounded-pill px-2.5 py-1 text-muted transition-colors hover:text-fg"
+          >
+            Grid
+          </Link>
+        </div>
         {category && <span className="text-faint">{category.title}</span>}
         {name && <span className="max-w-[40ch] truncate text-faint">{name}</span>}
         <span className="text-muted">

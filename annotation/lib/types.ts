@@ -155,6 +155,18 @@ export function reviewHref(label: string, cats: CatId[]): string {
   return `/review/0?${params.toString()}`;
 }
 
+/**
+ * Grid (camera-roll) review for a label — the bird's-eye sibling of
+ * {@link reviewHref}. Not tied to a manifest index; carries the same label +
+ * category scope so the two views toggle in place.
+ */
+export function gridReviewHref(label: string, cats: CatId[]): string {
+  const params = new URLSearchParams({ label });
+  const c = serializeCats(cats);
+  if (c) params.set("cats", c);
+  return `/review/grid?${params.toString()}`;
+}
+
 /** A single bounding box in normalized YOLO geometry (center + size, 0..1). */
 export interface Box {
   /** Stable client key — used for hover/queue/undo. NOT written to the YOLO .txt. */
@@ -177,6 +189,15 @@ export interface Annotation {
   boxes: Box[];
 }
 
+/** One labeled box plus the image it lives on — a single grid-review cell. */
+export interface ReviewBox {
+  /** Global manifest index of the image (path param for Focus Review). */
+  n: number;
+  cat: CatId;
+  name: string;
+  box: Box;
+}
+
 /** One entry in the global image manifest. */
 export interface ManifestEntry {
   /** Global index across all categories (day first, then ir, then phone). */
@@ -195,6 +216,34 @@ export interface CategoryProgress {
   labeled: number;
   /** Global index of the first image in this category (for entering modes). */
   startN: number;
+}
+
+// ---------------------------------------------------------------------------
+// Dedupe mode: near-duplicate clusters. Client-safe (no fs) so both the API
+// (lib/dedupe.ts) and the page (app/dedupe) share one contract.
+// ---------------------------------------------------------------------------
+
+/** Default pHash Hamming threshold — strict / near-identical only. */
+export const DEDUPE_DEFAULT_THRESHOLD = 3;
+
+/** One image within a near-duplicate cluster. */
+export interface DedupeMember {
+  /** Image filename including extension. */
+  name: string;
+  /** True when a non-empty YOLO .txt sidecar exists (has real labels). */
+  hasLabels: boolean;
+  /** Source jpg size in bytes (sharpness proxy for keep-selection). */
+  sizeBytes: number;
+  /** pHash Hamming distance to the cluster anchor. */
+  dist: number;
+}
+
+/** A cluster of near-duplicate images within a single category. */
+export interface DedupeCluster {
+  cat: CatId;
+  /** Suggested image to keep (the rest are removal candidates). */
+  keepName: string;
+  members: DedupeMember[];
 }
 
 /** A label option rendered as a pill in label mode. */
