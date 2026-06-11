@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Annotation, Box, CatId } from "./types";
 import { useSaveStore } from "./save-store";
+import { useHistoryStore, type HistoryKey } from "./history-store";
 
 let boxCounter = 0;
 function newId(): string {
@@ -34,8 +35,14 @@ export interface UseAnnotation {
   setLabel: (id: string, label: string | null) => void;
   setBoxed: (boxed: boolean) => void;
   replaceBoxes: (boxes: Box[]) => void;
-  undo: () => void;
-  redo: () => void;
+  /**
+   * Undo the newest action in the session-global timeline. Returns the image the
+   * action belongs to when it differs from the one currently shown — the caller
+   * must navigate there (the restored snapshot is already staged and applied on
+   * load). Returns null when handled in place or when there's nothing to undo.
+   */
+  undo: () => HistoryKey | null;
+  redo: () => HistoryKey | null;
   canUndo: boolean;
   canRedo: boolean;
   saveNow: () => void;
@@ -52,8 +59,6 @@ export function useAnnotation(cat: CatId | null, name: string | null): UseAnnota
   const [version, setVersion] = useState(0); // bump to recompute canUndo/canRedo
 
   const annRef = useRef<Annotation | null>(null);
-  const pastRef = useRef<Annotation[]>([]);
-  const futureRef = useRef<Annotation[]>([]);
   const dirtyRef = useRef(false);
   const keyRef = useRef<{ cat: CatId; name: string } | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -101,18 +106,36 @@ export function useAnnotation(cat: CatId | null, name: string | null): UseAnnota
     void doSave();
   }, [doSave]);
 
-  /** Apply a mutation: snapshot for undo, clear redo, schedule save. */
+  /** Apply a mutation: record a before/after snapshot for undo, schedule save. */
   const mutate = useCallback(
     (fn: (a: Annotation) => Annotation) => {
       const cur = annRef.current;
-      if (!cur) return;
-      pastRef.current.push(clone(cur));
-      if (pastRef.current.length > 100) pastRef.current.shift();
-      futureRef.current = [];
+      const key = keyRef.current;
+      if (!cur || !key) return;
       const next = fn(clone(cur));
+      useHistoryStore.getState().record({
+        cat: key.cat,
+        name: key.name,
+        before: clone(cur),
+        after: clone(next),
+      });
       commit(next);
       scheduleSave();
       setVersion((v) => v + 1);
+    },
+    [commit, scheduleSave],
+  );
+
+  /** Apply (and persist) a snapshot staged for an image by undo/redo. */
+  const applyStaged = useCallback(
+    (cat: CatId, name: string) => {
+      const ann = useHistoryStore.getState().takeOverride(cat, name);
+      if (!ann) return false;
+      commit(clone(ann));
+      dirtyRef.current = true;
+      scheduleSave();
+      setVersion((v) => v + 1);
+      return true;
     },
     [commit, scheduleSave],
   );
@@ -134,11 +157,23 @@ export function useAnnotation(cat: CatId | null, name: string | null): UseAnnota
       return;
     }
 
-    let cancelled = false;
     keyRef.current = { cat, name };
-    pastRef.current = [];
-    futureRef.current = [];
     dirtyRef.current = false;
+
+    // Cross-image undo/redo: if a restored snapshot was staged for this image
+    // (we navigated here to undo an action that happened on it), apply that
+    // instead of fetching, and persist it.
+    const staged = useHistoryStore.getState().takeOverride(cat, name);
+    if (staged) {
+      commit(clone(staged));
+      dirtyRef.current = true;
+      scheduleSave();
+      setLoading(false);
+      setVersion((v) => v + 1);
+      return;
+    }
+
+    let cancelled = false;
     setLoading(true);
     setStatus("idle");
     (async () => {
@@ -160,7 +195,7 @@ export function useAnnotation(cat: CatId | null, name: string | null): UseAnnota
     return () => {
       cancelled = true;
     };
-  }, [cat, name, commit, setStatus]);
+  }, [cat, name, commit, setStatus, scheduleSave]);
 
   // --- Flush on tab close. ----------------------------------------------------
   useEffect(() => {
@@ -207,27 +242,31 @@ export function useAnnotation(cat: CatId | null, name: string | null): UseAnnota
 
   const replaceBoxes = useCallback((boxes: Box[]) => mutate((a) => ({ ...a, boxes })), [mutate]);
 
-  const undo = useCallback(() => {
-    const cur = annRef.current;
-    if (!cur || pastRef.current.length === 0) return;
-    const prev = pastRef.current.pop()!;
-    futureRef.current.push(clone(cur));
-    commit(prev);
-    scheduleSave();
-    setVersion((v) => v + 1);
-  }, [commit, scheduleSave]);
+  const undo = useCallback((): HistoryKey | null => {
+    const r = useHistoryStore.getState().popUndo();
+    if (!r) return null;
+    const key = keyRef.current;
+    if (key && key.cat === r.cat && key.name === r.name) {
+      applyStaged(r.cat, r.name); // same image — restore in place
+      return null;
+    }
+    return { cat: r.cat, name: r.name }; // caller navigates; staged snapshot applies on load
+  }, [applyStaged]);
 
-  const redo = useCallback(() => {
-    const cur = annRef.current;
-    if (!cur || futureRef.current.length === 0) return;
-    const next = futureRef.current.pop()!;
-    pastRef.current.push(clone(cur));
-    commit(next);
-    scheduleSave();
-    setVersion((v) => v + 1);
-  }, [commit, scheduleSave]);
+  const redo = useCallback((): HistoryKey | null => {
+    const r = useHistoryStore.getState().popRedo();
+    if (!r) return null;
+    const key = keyRef.current;
+    if (key && key.cat === r.cat && key.name === r.name) {
+      applyStaged(r.cat, r.name);
+      return null;
+    }
+    return { cat: r.cat, name: r.name };
+  }, [applyStaged]);
 
-  void version; // referenced to recompute the booleans below on each change
+  void version;
+  const canUndo = useHistoryStore((s) => s.past.length > 0);
+  const canRedo = useHistoryStore((s) => s.future.length > 0);
 
   return {
     annotation,
@@ -240,8 +279,8 @@ export function useAnnotation(cat: CatId | null, name: string | null): UseAnnota
     replaceBoxes,
     undo,
     redo,
-    canUndo: pastRef.current.length > 0,
-    canRedo: futureRef.current.length > 0,
+    canUndo,
+    canRedo,
     saveNow,
   };
 }

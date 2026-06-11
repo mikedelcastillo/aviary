@@ -11,6 +11,7 @@ import { Spinner } from "@/components/Spinner";
 import {
   categoryById,
   filterByCats,
+  newSeed,
   orderBySeed,
   parseCats,
   parseSeed,
@@ -77,14 +78,23 @@ export default function BoxPage() {
 
   // In random mode, fetch the set of still-unboxed images so the shuffle skips
   // ones already done. Sequential mode shows everything, so no fetch needed.
+  //
+  // This snapshot is captured ONCE per (seed, category-scope) and deliberately
+  // not refreshed on navigation. Depending on the `cats` array would re-run the
+  // effect on every route change — it's a fresh array reference each render — and
+  // since boxing an image drops it from the queue, the refetched list shrinks.
+  // `orderBySeed` is a function of the list's contents, so a shorter list yields a
+  // wholly different permutation: prev/next would jump to seemingly random images.
+  // A stable string key (value-compared in the deps) freezes the worklist so the
+  // seeded order stays put and prev/next walk a coherent sequence.
+  const catsKey = serializeCats(cats);
   useEffect(() => {
     if (seed == null) {
       setBoxQueue(null);
       return;
     }
     let cancelled = false;
-    const c = serializeCats(cats);
-    const qs = c ? `?cats=${c}` : "";
+    const qs = catsKey ? `?cats=${catsKey}` : "";
     (async () => {
       try {
         const res = await fetch(`/api/box-queue${qs}`);
@@ -97,7 +107,7 @@ export default function BoxPage() {
     return () => {
       cancelled = true;
     };
-  }, [seed, cats]);
+  }, [seed, catsKey]);
 
   // The navigation sequence. Sequential: every in-scope image in global order.
   // Random: only still-unboxed images, in a stable seeded shuffle. The counter
@@ -154,6 +164,29 @@ export default function BoxPage() {
     router.push(withNav(`/box/${prev.n}`, cats, seed));
   }, [ordered, n, router, cats, seed]);
 
+  // --- Undo/redo: history is session-global, so an edit made before advancing
+  // is undone by hopping back to the image it happened on. ------------------
+  const navToHistory = useCallback(
+    (key: { cat: CatId; name: string }) => {
+      const target = manifest?.find((e) => e.cat === key.cat && e.name === key.name);
+      if (target) router.push(withNav(`/box/${target.n}`, cats, seed));
+    },
+    [manifest, router, cats, seed],
+  );
+  const handleUndo = useCallback(() => {
+    const target = undo();
+    if (target) navToHistory(target);
+  }, [undo, navToHistory]);
+  const handleRedo = useCallback(() => {
+    const target = redo();
+    if (target) navToHistory(target);
+  }, [redo, navToHistory]);
+
+  // Flip random/sequential order in place (no need to bounce through Home).
+  const toggleRandom = useCallback(() => {
+    router.replace(withNav(`/box/${n}`, cats, seed != null ? null : newSeed()));
+  }, [router, n, cats, seed]);
+
   // --- Drawing --------------------------------------------------------------
   const onDrawStart = useCallback((pt: Pt) => {
     startRef.current = pt;
@@ -201,13 +234,13 @@ export default function BoxPage() {
       const mod = e.metaKey || e.ctrlKey;
       if (mod && (e.key === "z" || e.key === "Z")) {
         e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
         return;
       }
       if (mod && (e.key === "y" || e.key === "Y")) {
         e.preventDefault();
-        redo();
+        handleRedo();
         return;
       }
       if (e.key === "ArrowRight" || e.key === " " || e.code === "Space") {
@@ -222,11 +255,16 @@ export default function BoxPage() {
       }
       if (e.key === "f" || e.key === "F") {
         stageRef.current?.fit();
+        return;
+      }
+      if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        toggleRandom();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [undo, redo, goNext, goPrev, router]);
+  }, [handleUndo, handleRedo, goNext, goPrev, toggleRandom, router]);
 
   // --- Render guards --------------------------------------------------------
   if (
@@ -284,6 +322,15 @@ export default function BoxPage() {
         <span className="max-w-[18rem] truncate text-faint" title={name}>
           {name}
         </span>
+        <span className="text-border-strong">|</span>
+        <button
+          type="button"
+          onClick={toggleRandom}
+          title="Toggle random / sequential order (R)"
+          className="text-faint hover:text-fg transition-colors"
+        >
+          {seed != null ? "random" : "sequential"}
+        </button>
       </div>
 
       {/* Top-right: boxed indicator. */}

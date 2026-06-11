@@ -9,6 +9,7 @@ import { Spinner } from "@/components/Spinner";
 import {
   ALL_CATS,
   newSeed,
+  orderBySeed,
   parseCats,
   reviewHref,
   serializeCats,
@@ -16,6 +17,7 @@ import {
   type CatId,
   type CategoryProgress,
 } from "@/lib/types";
+import { useHistoryStore } from "@/lib/history-store";
 
 const CATS_STORAGE_KEY = "aviary.cats";
 const RANDOM_STORAGE_KEY = "aviary.random";
@@ -50,6 +52,7 @@ export default function Home() {
   const router = useRouter();
   const [progress, setProgress] = useState<CategoryProgress[] | null>(null);
   const [queue, setQueue] = useState<number[] | null>(null);
+  const [boxQueue, setBoxQueue] = useState<number[] | null>(null);
   const [entry, setEntry] = useState<{ box: number; label: number } | null>(null);
   const [labelStats, setLabelStats] = useState<LabelStat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +68,9 @@ export default function Home() {
     } catch {
       /* localStorage unavailable — keep default */
     }
+    // Home is the boundary between sessions — drop the cross-image undo timeline
+    // so each Box/Label run starts with a clean history.
+    useHistoryStore.getState().clear();
   }, []);
 
   // Persist the selection whenever it changes.
@@ -110,21 +116,25 @@ export default function Home() {
     const qs = param ? `?cats=${param}` : "";
     (async () => {
       try {
-        const [queueRes, entryRes, statsRes] = await Promise.all([
+        const [queueRes, boxQueueRes, entryRes, statsRes] = await Promise.all([
           fetch(`/api/queue${qs}`),
+          fetch(`/api/box-queue${qs}`),
           fetch(`/api/entry${qs}`),
           fetch(`/api/label-stats${qs}`),
         ]);
         if (!queueRes.ok) throw new Error(`queue: ${queueRes.status}`);
+        if (!boxQueueRes.ok) throw new Error(`box-queue: ${boxQueueRes.status}`);
         if (!entryRes.ok) throw new Error(`entry: ${entryRes.status}`);
         if (!statsRes.ok) throw new Error(`label-stats: ${statsRes.status}`);
 
         const queueData = (await queueRes.json()) as number[];
+        const boxQueueData = (await boxQueueRes.json()) as number[];
         const entryData = (await entryRes.json()) as { box: number; label: number };
         const statsData = (await statsRes.json()) as LabelStat[];
 
         if (!cancelled) {
           setQueue(queueData);
+          setBoxQueue(boxQueueData);
           setEntry(entryData);
           setLabelStats(statsData);
         }
@@ -159,6 +169,24 @@ export default function Home() {
   const boxTarget = entry?.box ?? 0;
   const labelTarget = entry?.label ?? (queue && queue.length > 0 ? queue[0] : 0);
   const labelEmpty = queue !== null && queue.length === 0;
+
+  // Enter a mode. In random mode, start at the FIRST image of the seeded shuffle
+  // (not the global-first one) so the forward-only walk covers the whole worklist
+  // and only finishes when everything is actually done. The same seed drives the
+  // URL and the target, so the entry matches the page's computed sequence.
+  const enterBox = () => {
+    const seed = random ? newSeed() : null;
+    const target =
+      seed != null && boxQueue && boxQueue.length > 0 ? orderBySeed([...boxQueue], seed)[0] : boxTarget;
+    router.push(withNav(`/box/${target}`, cats, seed));
+  };
+  const enterLabel = () => {
+    if (labelEmpty) return;
+    const seed = random ? newSeed() : null;
+    const target =
+      seed != null && queue && queue.length > 0 ? orderBySeed([...queue], seed)[0] : labelTarget;
+    router.push(withNav(`/label/${target}`, cats, seed));
+  };
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-16">
@@ -227,7 +255,7 @@ export default function Home() {
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <button
               type="button"
-              onClick={() => router.push(withNav(`/box/${boxTarget}`, cats, random ? newSeed() : null))}
+              onClick={enterBox}
               className="group flex cursor-pointer flex-col rounded-2xl bg-fg p-6 text-left text-bg transition-opacity hover:opacity-90"
             >
               <span className="text-lg font-semibold">Box mode</span>
@@ -241,10 +269,7 @@ export default function Home() {
 
             <button
               type="button"
-              onClick={() =>
-                !labelEmpty &&
-                router.push(withNav(`/label/${labelTarget}`, cats, random ? newSeed() : null))
-              }
+              onClick={enterLabel}
               aria-disabled={labelEmpty}
               title={labelEmpty ? "Nothing to label yet" : undefined}
               className={

@@ -172,6 +172,12 @@ export default function ReviewPage() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (isTypingTarget(e.target)) return;
 
+      if (e.key === "Escape") {
+        e.preventDefault();
+        router.push("/");
+        return;
+      }
+
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -214,7 +220,7 @@ export default function ReviewPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, advance, goPrev, goNext, unbox, unlabel, undo, redo]);
+  }, [activeBox, advance, goPrev, goNext, unbox, unlabel, undo, redo, router]);
 
   // --- Render guards. -------------------------------------------------------
   if (!label) {

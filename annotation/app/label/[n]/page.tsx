@@ -12,6 +12,7 @@ import { useAnnotation } from "@/lib/use-annotation";
 import {
   categoryById,
   filterByCats,
+  newSeed,
   orderBySeed,
   parseCats,
   parseSeed,
@@ -206,6 +207,29 @@ export default function LabelPage() {
     if (unlabeled.length <= 1) advance();
   }, [activeBox, removeBox, unlabeled.length, advance]);
 
+  // --- Undo/redo: history is session-global, so a mistake made before an
+  // auto-advance is undone by hopping back to the image it happened on. ------
+  const navToHistory = useCallback(
+    (key: { cat: CatId; name: string }) => {
+      const target = manifest?.find((e) => e.cat === key.cat && e.name === key.name);
+      if (target) router.push(withNav(`/label/${target.n}`, cats, seed));
+    },
+    [manifest, router, cats, seed],
+  );
+  const handleUndo = useCallback(() => {
+    const target = undo();
+    if (target) navToHistory(target);
+  }, [undo, navToHistory]);
+  const handleRedo = useCallback(() => {
+    const target = redo();
+    if (target) navToHistory(target);
+  }, [redo, navToHistory]);
+
+  // Flip random/sequential order in place (no need to bounce through Home).
+  const toggleRandom = useCallback(() => {
+    router.replace(withNav(`/label/${n}`, cats, seed != null ? null : newSeed()));
+  }, [router, n, cats, seed]);
+
   // --- Keyboard. ------------------------------------------------------------
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -220,13 +244,13 @@ export default function LabelPage() {
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
         return;
       }
       if (mod && e.key.toLowerCase() === "y") {
         e.preventDefault();
-        redo();
+        handleRedo();
         return;
       }
       if (mod) return; // leave other shortcuts (copy/paste/etc.) alone
@@ -249,6 +273,16 @@ export default function LabelPage() {
         return;
       }
 
+      // [R] flips random/sequential order — unless a roster pill claims "r".
+      if (
+        (e.key === "r" || e.key === "R") &&
+        !pills.some((p) => p.shortcut.toLowerCase() === "r")
+      ) {
+        e.preventDefault();
+        toggleRandom();
+        return;
+      }
+
       // [B] unboxes the active box (takes precedence over label shortcuts).
       if (e.key.toLowerCase() === "b" && activeBox) {
         e.preventDefault();
@@ -267,7 +301,7 @@ export default function LabelPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, pills, pick, unbox, advance, goPrev, goNext, undo, redo, router]);
+  }, [activeBox, pills, pick, unbox, advance, goPrev, goNext, handleUndo, handleRedo, toggleRandom, router]);
 
   // --- Render. --------------------------------------------------------------
   const category = cat ? categoryById(cat) : undefined;
@@ -306,6 +340,14 @@ export default function LabelPage() {
             ? `${unlabeled.length} box${unlabeled.length === 1 ? "" : "es"} left`
             : "No boxes to label here — →"}
         </span>
+        <button
+          type="button"
+          onClick={toggleRandom}
+          title="Toggle random / sequential order (R)"
+          className="pointer-events-auto w-fit text-faint transition-colors hover:text-fg"
+        >
+          {seed != null ? "random order" : "sequential order"}
+        </button>
       </div>
 
       {/* Top-right counter. */}
