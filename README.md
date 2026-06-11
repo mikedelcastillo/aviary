@@ -55,11 +55,12 @@ Run from the repo root so the scripts' default relative paths resolve.
    `training/STRATEGY.md`) and writes YOLO `.txt` labels back next to each image.
 
 4. Build a model end-to-end — prepare its dataset from the labeled raw images,
-   train, and export the weights into `training/models/`:
+   train, and export the weights into `data/models/` (each run increments rather
+   than overwriting, so prior weights stay for comparison/rollback):
 
    ```bash
-   ./scripts/train_live.sh      # -> training/models/live.pt    (real-time CCTV detector)
-   ./scripts/train_archive.sh   # -> training/models/archive.pt (photo-library catalog)
+   ./scripts/train_live.sh      # -> data/models/live-NNN.pt    (real-time CCTV detector)
+   ./scripts/train_archive.sh   # -> data/models/archive-NNN.pt (photo-library catalog)
    ```
 
    Flags pass through to training, e.g. `./scripts/train_live.sh --epochs 200

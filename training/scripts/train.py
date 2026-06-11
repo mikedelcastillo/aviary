@@ -7,6 +7,8 @@ import argparse
 import shutil
 from pathlib import Path
 
+from aviary_training.models import next_version_path
+
 
 def batch_size(value: str) -> int | float:
     """Parse --batch: 'auto' -> -1 (Ultralytics AutoBatch, ~60% GPU memory),
@@ -34,7 +36,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda:0, mps")
     parser.add_argument("--project", type=Path, default=Path("data/training/runs"))
     parser.add_argument("--name", default="bird_detector")
-    parser.add_argument("--export-to", type=Path, help="Copy best.pt to this path")
+    parser.add_argument(
+        "--export-dir",
+        type=Path,
+        default=Path("data/models"),
+        help="Directory to export the trained best.pt into (see --export-name)",
+    )
+    parser.add_argument(
+        "--export-name",
+        help="Export best.pt as <export-dir>/<export-name>-NNN.pt, incrementing "
+        "NNN each run (e.g. live -> live-001.pt, live-002.pt). Skips export if unset.",
+    )
     return parser.parse_args()
 
 
@@ -67,10 +79,11 @@ def main() -> None:
 
     print(f"Best checkpoint: {best}")
 
-    if args.export_to:
-        args.export_to.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(best, args.export_to)
-        print(f"Exported checkpoint to {args.export_to}")
+    if args.export_name:
+        args.export_dir.mkdir(parents=True, exist_ok=True)
+        export_to = next_version_path(args.export_dir, args.export_name)
+        shutil.copy2(best, export_to)
+        print(f"Exported checkpoint to {export_to}")
 
 
 if __name__ == "__main__":

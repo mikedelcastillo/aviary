@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the archive (photo-library catalog) bird detector end-to-end:
-# prepare dataset from labeled raw data -> train -> export training/models/archive.pt
+# prepare dataset from labeled raw data -> train -> export data/models/archive-NNN.pt
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -23,9 +23,9 @@ uv run --no-sync python training/scripts/prepare_dataset.py \
   --output "$DATASET" \
   --model archive
 
-mkdir -p training/models
 uv run --no-sync python training/scripts/train.py \
   --data "$DATASET/dataset.yaml" \
   --name archive \
-  --export-to training/models/archive.pt \
+  --export-dir data/models \
+  --export-name archive \
   "$@"

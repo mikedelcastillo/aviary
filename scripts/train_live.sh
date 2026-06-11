@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the live (real-time CCTV) bird detector end-to-end:
-# prepare dataset from labeled raw data -> train -> export training/models/live.pt
+# prepare dataset from labeled raw data -> train -> export data/models/live-NNN.pt
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -23,9 +23,9 @@ uv run --no-sync python training/scripts/prepare_dataset.py \
   --output "$DATASET" \
   --model live
 
-mkdir -p training/models
 uv run --no-sync python training/scripts/train.py \
   --data "$DATASET/dataset.yaml" \
   --name live \
-  --export-to training/models/live.pt \
+  --export-dir data/models \
+  --export-name live \
   "$@"

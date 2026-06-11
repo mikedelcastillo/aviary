@@ -9,7 +9,11 @@ Two models are built from that one roster:
 - `live` — 6 living birds + 3 IR species + `unknown_bird` (the real-time CCTV detector).
 - `archive` — all individuals (living + deceased), no species (the photo-library catalog).
 
-Trained weights land in `training/models/`: `live.pt` and `archive.pt` (gitignored).
+Trained weights land in `data/models/` (gitignored) as `live-NNN.pt` and
+`archive-NNN.pt`. Each training run increments `NNN` (`live-001.pt`,
+`live-002.pt`, …) rather than overwriting, so prior weights stay around for
+comparison and rollback. Point the server's `MODEL_PATH` at whichever version
+you want to run.
 
 ## One-command build (recommended)
 
@@ -17,8 +21,8 @@ From the repo root, build a model end-to-end — prepare its dataset from the
 labeled raw images, train, and export the weights:
 
 ```bash
-./scripts/train_live.sh      # -> training/models/live.pt
-./scripts/train_archive.sh   # -> training/models/archive.pt
+./scripts/train_live.sh      # -> data/models/live-NNN.pt
+./scripts/train_archive.sh   # -> data/models/archive-NNN.pt
 ```
 
 Each script runs `uv sync`, picks the right per-machine GPU torch build via
@@ -69,18 +73,22 @@ uv run train \
   --imgsz 960 \
   --model yolo11n.pt \
   --name live \
-  --export-to training/models/live.pt
+  --export-name live          # -> data/models/live-NNN.pt (next free NNN)
 ```
 
-Use `--device cuda:0` on a Linux NVIDIA machine or `--device mps` on Apple
-Silicon. Omit `--device` to let Ultralytics decide. `--name live`/`archive` keeps
-each model's runs separate under `data/training/runs/`.
+`--export-name live` copies the run's `best.pt` to `data/models/live-NNN.pt`,
+incrementing `NNN` each run; override the directory with `--export-dir`. Omit
+`--export-name` to skip the export and leave the checkpoint under
+`data/training/runs/`. Use `--device cuda:0` on a Linux NVIDIA machine or
+`--device mps` on Apple Silicon. Omit `--device` to let Ultralytics decide.
+`--name live`/`archive` keeps each model's runs separate under
+`data/training/runs/`.
 
 ### Evaluate
 
 ```bash
 uv run evaluate \
-  --model training/models/live.pt \
+  --model data/models/live-001.pt \
   --data data/training/datasets/live/dataset.yaml
 ```
 
