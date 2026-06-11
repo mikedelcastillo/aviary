@@ -40,29 +40,41 @@ export function isValidName(name: string): boolean {
   return NAME_RE.test(name) && !name.includes("..");
 }
 
-function catDir(cat: CatId): string {
-  const def = CATEGORIES.find((c) => c.id === cat)!;
-  return path.join(DATA_ROOT, def.dir);
+/** Category subdirectory name (e.g. "camera_frames/day") for a valid category. */
+function catSubdir(cat: CatId): string {
+  return CATEGORIES.find((c) => c.id === cat)!.dir;
 }
 
-/** Absolute path to an image file, guarded against traversal. Throws if invalid. */
-export function imageFsPath(cat: string, name: string): string {
+function catDir(cat: CatId): string {
+  return path.join(DATA_ROOT, catSubdir(cat));
+}
+
+/**
+ * Resolve `name` for category `cat` under `root`, validating the inputs and
+ * containing the result to the category directory (traversal guard). Shared by
+ * the raw tree ({@link imageFsPath}) and the removed tree ({@link removedFsPath})
+ * so the containment check lives in exactly one place.
+ */
+function resolveInTree(root: string, cat: string, name: string): string {
   if (!isValidCat(cat) || !isValidName(name)) {
     throw new Error("invalid category or filename");
   }
-  const dir = catDir(cat);
+  const dir = path.join(root, catSubdir(cat));
   const full = path.resolve(dir, name);
-  // Ensure the resolved path stays inside the category directory.
   if (full !== path.join(dir, name) || !full.startsWith(path.resolve(dir) + path.sep)) {
     throw new Error("path traversal blocked");
   }
   return full;
 }
 
+/** Absolute path to an image file, guarded against traversal. Throws if invalid. */
+export function imageFsPath(cat: string, name: string): string {
+  return resolveInTree(DATA_ROOT, cat, name);
+}
+
 /** Absolute path to a sidecar with the given extension (".json" / ".txt"). */
 export function sidecarFsPath(cat: string, name: string, ext: string): string {
-  const img = imageFsPath(cat, name);
-  return img.replace(/\.(jpe?g|png)$/i, ext);
+  return imageFsPath(cat, name).replace(/\.(jpe?g|png)$/i, ext);
 }
 
 export function categoryDir(cat: CatId): string {
@@ -70,29 +82,15 @@ export function categoryDir(cat: CatId): string {
 }
 
 // --- Soft-delete (removed) tree --------------------------------------------
-// Mirror of imageFsPath/sidecarFsPath rooted under REMOVED_ROOT, with the same
-// validation + traversal containment so the move/restore endpoints are safe.
-
-function removedCatDir(cat: CatId): string {
-  const def = CATEGORIES.find((c) => c.id === cat)!;
-  return path.join(REMOVED_ROOT, def.dir);
-}
+// Mirror of imageFsPath/sidecarFsPath rooted under REMOVED_ROOT, sharing the
+// same validation + traversal containment via resolveInTree.
 
 /** Absolute path to an image inside the removed tree, guarded against traversal. */
 export function removedFsPath(cat: string, name: string): string {
-  if (!isValidCat(cat) || !isValidName(name)) {
-    throw new Error("invalid category or filename");
-  }
-  const dir = removedCatDir(cat);
-  const full = path.resolve(dir, name);
-  if (full !== path.join(dir, name) || !full.startsWith(path.resolve(dir) + path.sep)) {
-    throw new Error("path traversal blocked");
-  }
-  return full;
+  return resolveInTree(REMOVED_ROOT, cat, name);
 }
 
 /** Sidecar path (".json" / ".txt") inside the removed tree. */
 export function removedSidecarFsPath(cat: string, name: string, ext: string): string {
-  const img = removedFsPath(cat, name);
-  return img.replace(/\.(jpe?g|png)$/i, ext);
+  return removedFsPath(cat, name).replace(/\.(jpe?g|png)$/i, ext);
 }

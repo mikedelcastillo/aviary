@@ -56,6 +56,7 @@ function GridReview() {
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const undoing = useRef(false);
 
   // --- Fetch every box carrying `label` (scoped to cats). --------------------
   useEffect(() => {
@@ -166,8 +167,13 @@ function GridReview() {
 
   // --- Undo (LIFO; re-show + send the inverse op). ---------------------------
   const undo = useCallback(async () => {
+    // Re-entrancy guard: two ⌘Z presses within one frame would otherwise both
+    // read the same stale stack top and each pop one entry, stranding the
+    // second-from-top cell hidden forever with its inverse op never sent.
+    if (undoing.current) return;
     const entry = undoStack[undoStack.length - 1];
     if (!entry) return;
+    undoing.current = true;
     const k = cellKey(entry.cell);
     setUndoStack((s) => s.slice(0, -1));
     setRemoved((s) => {
@@ -175,11 +181,15 @@ function GridReview() {
       n.delete(k);
       return n;
     });
-    const ok = await postOp(entry.cell.cat, entry.cell.name, entry.inverse);
-    if (!ok) {
-      setRemoved((s) => new Set(s).add(k));
-      setUndoStack((s) => [...s, entry]);
-      setError("Couldn't undo — try again.");
+    try {
+      const ok = await postOp(entry.cell.cat, entry.cell.name, entry.inverse);
+      if (!ok) {
+        setRemoved((s) => new Set(s).add(k));
+        setUndoStack((s) => [...s, entry]);
+        setError("Couldn't undo — try again.");
+      }
+    } finally {
+      undoing.current = false;
     }
   }, [undoStack, postOp]);
 

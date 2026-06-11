@@ -19,7 +19,7 @@ interface MemRec {
 }
 
 const mem = new Map<string, MemRec>(); // key: `${cat}/${name}`
-let diskLoaded = false;
+let diskLoad: Promise<void> | null = null;
 
 function key(cat: CatId, name: string): string {
   return `${cat}/${name}`;
@@ -32,9 +32,18 @@ interface DiskShape {
   entries: Record<string, { mtimeMs: number; size: number; hash: string }>;
 }
 
-async function loadDisk(): Promise<void> {
-  if (diskLoaded) return;
-  diskLoaded = true; // mark first so a parse failure doesn't retry every call
+/**
+ * Load the on-disk snapshot into `mem` exactly once. Memoized as a single shared
+ * promise so concurrent callers all await the SAME read (and so mem is fully
+ * populated before any of them proceeds) — without this, a second request that
+ * arrives mid-read would see an empty cache and needlessly re-hash everything.
+ * A parse failure resolves (never retried), matching the original behavior.
+ */
+function loadDisk(): Promise<void> {
+  return (diskLoad ??= readDisk());
+}
+
+async function readDisk(): Promise<void> {
   try {
     const raw = await fs.readFile(DEDUPE_CACHE_PATH, "utf8");
     const data = JSON.parse(raw) as DiskShape;

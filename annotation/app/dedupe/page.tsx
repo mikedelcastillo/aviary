@@ -244,6 +244,12 @@ export default function DedupePage() {
           e.preventDefault();
           back();
           return;
+        // Undo the last committed group's removals (matches the done-screen hint).
+        case "z":
+        case "Z":
+          e.preventDefault();
+          undo();
+          return;
         // Select every frame except the suggested keeper (toggle).
         case "a":
         case "A":
@@ -277,7 +283,7 @@ export default function DedupePage() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [router, approve, advance, back, bumpThreshold, toggle, selectAll]);
+  }, [router, approve, advance, back, undo, bumpThreshold, toggle, selectAll]);
 
   const total = clusters?.length ?? 0;
   const done = !loading && clusters !== null && groupIdx >= total;

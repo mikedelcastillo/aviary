@@ -7,6 +7,9 @@ export const runtime = "nodejs";
 type RouteParams = { params: Promise<{ cat: string; name: string }> };
 
 function clampWidth(raw: string | null): number {
+  // Number(null) and Number("") are 0 (finite), so guard the missing/empty param
+  // explicitly — otherwise the intended 280 default would collapse to 64.
+  if (raw === null || raw === "") return 280;
   const n = Number(raw);
   if (!Number.isFinite(n)) return 280;
   return Math.min(1024, Math.max(64, Math.floor(n)));

@@ -28,7 +28,9 @@ import { dropFromCache } from "./hash-cache";
 
 const IMG_RE = /\.(jpe?g|png)$/i;
 
-function listImages(cat: CatId): string[] {
+/** Sorted image basenames in a category — the canonical listing rule (also used
+ * by dedupe so it clusters exactly the file set the manifest indexes). */
+export function listImages(cat: CatId): string[] {
   const dir = categoryDir(cat);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
@@ -107,6 +109,23 @@ function toYolo(boxes: Box[]): string {
   return lines.length ? lines.join("\n") + "\n" : "";
 }
 
+/**
+ * Canonicalize a raw boxes array to the persisted shape: a stable id (falling
+ * back to the positional `b-${i}` that the crop/box-op routes key on), the
+ * numeric geometry, and an explicit null label. Single source of truth for
+ * read, write, mutate, and the grid scan so their ids/labels never diverge.
+ */
+function normalizeBoxes(boxes: Box[] | undefined): Box[] {
+  return (boxes ?? []).map((b, i) => ({
+    id: b.id ?? `b-${i}`,
+    cx: b.cx,
+    cy: b.cy,
+    w: b.w,
+    h: b.h,
+    label: b.label ?? null,
+  }));
+}
+
 // --- Read / write -----------------------------------------------------------
 
 /**
@@ -118,17 +137,7 @@ export async function readAnnotation(cat: CatId, name: string): Promise<Annotati
   try {
     const raw = await fs.readFile(jsonPath, "utf8");
     const data = JSON.parse(raw) as Annotation;
-    return {
-      boxed: Boolean(data.boxed),
-      boxes: (data.boxes ?? []).map((b, i) => ({
-        id: b.id ?? `b-${i}`,
-        cx: b.cx,
-        cy: b.cy,
-        w: b.w,
-        h: b.h,
-        label: b.label ?? null,
-      })),
-    };
+    return { boxed: Boolean(data.boxed), boxes: normalizeBoxes(data.boxes) };
   } catch {
     // No JSON yet: seed from the auto-detection .txt if present.
     const txtPath = sidecarFsPath(cat, name, ".txt");
@@ -149,27 +158,24 @@ export async function readAnnotation(cat: CatId, name: string): Promise<Annotati
 export async function writeAnnotation(cat: CatId, name: string, ann: Annotation): Promise<void> {
   const jsonPath = sidecarFsPath(cat, name, ".json");
   const txtPath = sidecarFsPath(cat, name, ".txt");
-  const clean: Annotation = {
-    boxed: Boolean(ann.boxed),
-    boxes: (ann.boxes ?? []).map((b, i) => ({
-      id: b.id ?? `b-${i}`,
-      cx: b.cx,
-      cy: b.cy,
-      w: b.w,
-      h: b.h,
-      label: b.label ?? null,
-    })),
-  };
+  const clean: Annotation = { boxed: Boolean(ann.boxed), boxes: normalizeBoxes(ann.boxes) };
+  await withFileLock(jsonPath, () => persistAnnotationFiles(jsonPath, txtPath, clean));
+}
 
-  await withFileLock(jsonPath, async () => {
-    // Atomic JSON write (temp + rename).
-    const tmp = `${jsonPath}.tmp-${process.pid}`;
-    await fs.writeFile(tmp, JSON.stringify(clean, null, 2), "utf8");
-    await fs.rename(tmp, jsonPath);
-
-    // Mirror to YOLO export (overwrite; empty file == reviewed negative).
-    await fs.writeFile(txtPath, toYolo(clean.boxes), "utf8");
-  });
+/**
+ * Atomic JSON write (temp + rename) + YOLO .txt mirror. The CALLER must hold the
+ * file lock for `jsonPath`; shared by writeAnnotation and mutateAnnotation so the
+ * on-disk format and the "empty .txt == reviewed negative" rule live in one place.
+ */
+async function persistAnnotationFiles(
+  jsonPath: string,
+  txtPath: string,
+  clean: Annotation,
+): Promise<void> {
+  const tmp = `${jsonPath}.tmp-${process.pid}`;
+  await fs.writeFile(tmp, JSON.stringify(clean, null, 2), "utf8");
+  await fs.rename(tmp, jsonPath);
+  await fs.writeFile(txtPath, toYolo(clean.boxes), "utf8");
 }
 
 /**
@@ -184,28 +190,13 @@ export async function mutateAnnotation(
   mut: (boxes: Box[]) => Box[],
 ): Promise<Annotation> {
   const jsonPath = sidecarFsPath(cat, name, ".json");
+  const txtPath = sidecarFsPath(cat, name, ".txt");
   return withFileLock(jsonPath, async () => {
     const cur = await readAnnotation(cat, name);
-    const next: Annotation = { boxed: cur.boxed, boxes: mut(cur.boxes) };
-    // writeAnnotation re-acquires the same lock; that's safe because the lock
-    // chain runs links sequentially, not re-entrantly within one link. To avoid
-    // self-deadlock we inline the write here instead of calling writeAnnotation.
-    const txtPath = sidecarFsPath(cat, name, ".txt");
-    const clean: Annotation = {
-      boxed: Boolean(next.boxed),
-      boxes: (next.boxes ?? []).map((b, i) => ({
-        id: b.id ?? `b-${i}`,
-        cx: b.cx,
-        cy: b.cy,
-        w: b.w,
-        h: b.h,
-        label: b.label ?? null,
-      })),
-    };
-    const tmp = `${jsonPath}.tmp-${process.pid}`;
-    await fs.writeFile(tmp, JSON.stringify(clean, null, 2), "utf8");
-    await fs.rename(tmp, jsonPath);
-    await fs.writeFile(txtPath, toYolo(clean.boxes), "utf8");
+    const clean: Annotation = { boxed: Boolean(cur.boxed), boxes: normalizeBoxes(mut(cur.boxes)) };
+    // Persist inline: the caller already holds this file's lock, so calling
+    // writeAnnotation (which re-acquires the same lock) would just queue behind us.
+    await persistAnnotationFiles(jsonPath, txtPath, clean);
     return clean;
   });
 }
@@ -245,26 +236,48 @@ function transferPairs(cat: CatId, name: string, dir: "remove" | "restore"): Tra
   return pairs;
 }
 
-/** Move a bundle of files, refusing to clobber any existing destination. EXDEV-safe. */
+/** Move one file: rename, falling back to copy+unlink across filesystems (EXDEV). */
+async function moveFile(src: string, dest: string): Promise<void> {
+  try {
+    await fs.rename(src, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EXDEV") {
+      await fs.copyFile(src, dest);
+      await fs.unlink(src);
+    } else {
+      throw err;
+    }
+  }
+}
+
+/**
+ * Move a bundle of files, refusing to clobber any existing destination. If a
+ * move fails partway, roll back the moves already made (LIFO, best effort) so a
+ * bundle is never left split across the raw and removed trees. EXDEV-safe.
+ */
 async function moveBundle(pairs: Transfer[]): Promise<string[]> {
   // Precheck all destinations first so a clobber aborts before anything moves.
   for (const p of pairs) {
     if (existsSync(p.dest)) throw new Error(`refusing to overwrite existing file: ${p.dest}`);
   }
   const moved: string[] = [];
-  for (const p of pairs) {
-    await fs.mkdir(path.dirname(p.dest), { recursive: true });
-    try {
-      await fs.rename(p.src, p.dest);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EXDEV") {
-        await fs.copyFile(p.src, p.dest);
-        await fs.unlink(p.src);
-      } else {
-        throw err;
+  const done: Transfer[] = [];
+  try {
+    for (const p of pairs) {
+      await fs.mkdir(path.dirname(p.dest), { recursive: true });
+      await moveFile(p.src, p.dest);
+      done.push(p);
+      moved.push(p.label);
+    }
+  } catch (err) {
+    for (const p of done.reverse()) {
+      try {
+        await moveFile(p.dest, p.src);
+      } catch {
+        /* leave this one where it landed; the original error is what matters */
       }
     }
-    moved.push(p.label);
+    throw err;
   }
   return moved;
 }
@@ -426,15 +439,7 @@ export async function getReviewBoxes(label: string, cats: CatId[] = ALL_CATS): P
       const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
       try {
         const data = JSON.parse(await fs.readFile(jsonPath, "utf8")) as Annotation;
-        return (data.boxes ?? [])
-          .map((b, i): Box => ({
-            id: b.id ?? `b-${i}`,
-            cx: b.cx,
-            cy: b.cy,
-            w: b.w,
-            h: b.h,
-            label: b.label ?? null,
-          }))
+        return normalizeBoxes(data.boxes)
           .filter((b) => b.label === label)
           .map((box) => ({ n: e.n, cat: e.cat, name: e.name, box }));
       } catch {

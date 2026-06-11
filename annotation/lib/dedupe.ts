@@ -1,21 +1,11 @@
 // Server-only dedupe orchestration: hash -> cluster -> keep-best metadata.
 // Delegates hashing to lib/hash-cache.ts (which uses lib/phash.ts); no sharp here.
-import { promises as fs, existsSync, readdirSync } from "node:fs";
-import { categoryDir, sidecarFsPath } from "./paths";
+import { promises as fs } from "node:fs";
+import { sidecarFsPath } from "./paths";
 import { CATEGORIES, type CatId, type DedupeCluster, type DedupeMember } from "./types";
+import { listImages } from "./annotation-io";
 import { ensureHashes, type HashInfo } from "./hash-cache";
 import { hamming } from "./phash";
-
-const IMG_RE = /\.(jpe?g|png)$/i;
-
-/** Sorted image basenames in a category (same listing rule as annotation-io). */
-function listImages(cat: CatId): string[] {
-  const dir = categoryDir(cat);
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => IMG_RE.test(f))
-    .sort((a, b) => a.localeCompare(b));
-}
 
 /** True when a non-empty YOLO .txt sidecar exists (real labels; empty = negative). */
 async function hasLabels(cat: CatId, name: string): Promise<boolean> {
