@@ -19,9 +19,15 @@ image source or capture session.
 
 ## Label Schema
 
-Use the labels in `labeling_schema.yaml`. Each visible bird gets exactly one
-bounding box. Label the box with the bird identity if you are confident. Use
-`unknown_bird` when the bird is visible but identity is not clear.
+Use the labels in `roster.yaml` — the single roster shared by both the live and
+archive models. Label **every** bird against this one schema; the per-model
+class split happens later at dataset-prep time (`prepare-dataset --model …`), so
+you never think about models while labeling.
+
+Each visible bird gets exactly one bounding box. On **color** frames label the
+individual name; on **IR/night** frames label the species (`cockatiel`,
+`lovebird`, `budgie`) only. Use `unknown_bird` when identity is not clear. See
+the `rules:` block in `roster.yaml` and `../README.md` for the full rationale.
 
 Do not draw boxes around reflections, toys, shadows, or bird-shaped objects.
 

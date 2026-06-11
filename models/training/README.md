@@ -12,13 +12,23 @@ uv sync
 
 ## Prepare a Dataset
 
-Place a CVAT YOLO export under `models/annotation/exports/v001`, then normalize it:
+Place a CVAT YOLO export under `models/annotation/exports/v001`, then normalize
+it for the model you are building. `--model` filters `models/annotation/roster.yaml`
+to that model's classes and remaps the exported label indices to a contiguous
+range (dropping classes the model does not use):
 
 ```bash
 uv run prepare-dataset \
   --source models/annotation/exports/v001 \
-  --output models/training/datasets/v001
+  --output models/training/datasets/v001-live \
+  --model live      # or: --model archive
 ```
+
+- `live` — 6 living birds + 3 IR species + `unknown_bird` (the CCTV detector).
+- `archive` — all individuals (living + deceased), no species (photo catalog).
+
+CVAT labels everything once against the full roster; this step produces each
+model's dataset. See [`../README.md`](../README.md) for the two-model rationale.
 
 This creates:
 

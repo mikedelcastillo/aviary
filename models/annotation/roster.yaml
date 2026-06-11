@@ -1,0 +1,52 @@
+# Bird roster — SINGLE SOURCE OF TRUTH for every label across both models.
+# Used for CVAT labeling AND to derive each model's class map at dataset-prep
+# time (`prepare-dataset --model live|archive`). See models/README.md.
+#
+# ORDER IS SIGNIFICANT: a label's position here is its integer class index in
+# CVAT YOLO exports. Append new labels at the END; never reorder existing ones.
+#
+# models: which trained model each label feeds.
+#   live    -> real-time CCTV detector  (6 living birds + 3 IR species + unknown)
+#   archive -> photo-library catalog    (all individuals, RGB only, no species)
+#
+# >>> TODO: mark the 6 LIVING birds. For each, set `models: [live, archive]`
+# >>> and fill in its `species`. Deceased birds stay `models: [archive]`.
+# >>> (`species`/`status` are documentation only — the loader reads name+models.)
+
+labels:
+  # ---- Individuals (rename/prune to your real roster) ----
+  - { name: draft,  species: cockatiel, models: [live, archive] }
+  - { name: pizza,  species: cockatiel, models: [live, archive] }
+  - { name: percy,  species: lovebird, models: [live, archive] }
+  - { name: matcha, species: lovebird, models: [live, archive] }
+  - { name: jynx,   species: lovebird, models: [live, archive] }
+  - { name: bambi,  species: budgie, models: [live, archive] }
+  - { name: rust,   species: lovebird, models: [archive] }
+  - { name: branch, species: lovebird, models: [archive] }
+  - { name: prince, species: lovebird, models: [archive] }
+  - { name: pasta,  species: lovebird, models: [archive] }
+  - { name: blu,    species: lovebird, models: [archive] }
+  - { name: twig,   species: budgie, models: [archive] }
+  - { name: soy,    species: budgie, models: [archive] }
+
+  # ---- Species labels — IR / night frames, live model only ----
+  - { name: cockatiel, kind: species, models: [live] }
+  - { name: lovebird,  kind: species, models: [live] }
+  - { name: budgie,    kind: species, models: [live] }
+
+  # ---- Fallback — both models ----
+  - { name: unknown_bird, models: [live, archive] }
+
+# See models/README.md for the full rationale behind these rules.
+rules:
+  - Label by identity only. A bird is the same bird in or out of its cage — never
+    create in-cage/out-of-cage labels. Include both as data diversity.
+  - On COLOR (RGB) frames, label the individual bird name.
+  - On IR / night (grayscale) frames, use the species label (cockatiel, lovebird,
+    budgie) only — we do not need individual names at night.
+  - Apply species labels to ALL IR birds, even ones identifiable in IR. No mixed rules.
+  - Draw one tight box around each visible bird.
+  - Include partially occluded or behind-bars birds if any meaningful body area is visible.
+  - Use unknown_bird when identity is unclear.
+  - Do not label toys, shadows, reflections, cage hardware, or empty perches.
+  - Prefer camera-frame labels over phone-only labels when resolving ambiguity.

@@ -1,9 +1,0 @@
-# Rename these labels to the actual bird names before the first serious dataset.
-names:
-  0: bird_1
-  1: bird_2
-  2: bird_3
-  3: bird_4
-  4: bird_5
-  5: bird_6
-  6: unknown_bird

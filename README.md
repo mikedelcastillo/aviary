@@ -51,17 +51,20 @@ Run from the repo root so the scripts' default relative paths resolve.
    - Extract Tapo day frames into `models/annotation/raw/camera_frames/day/`.
    - Extract Tapo infrared frames into `models/annotation/raw/camera_frames/ir/`.
 
-3. Label images in CVAT using `models/annotation/labeling_schema.yaml`.
+3. Label images in CVAT using `models/annotation/roster.yaml` (the single label
+   roster for both the live and archive models — see `models/README.md`).
 
 4. Export the labeled CVAT task as YOLO and place it under
    `models/annotation/exports/<dataset_version>/`.
 
-5. Prepare a YOLO dataset:
+5. Prepare a YOLO dataset for the model you want (`--model` filters the roster to
+   that model's classes and remaps the labels):
 
    ```bash
    uv run prepare-dataset \
      --source models/annotation/exports/v001 \
-     --output models/training/datasets/v001
+     --output models/training/datasets/v001 \
+     --model live
    ```
 
 6. Train:

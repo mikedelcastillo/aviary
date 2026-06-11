@@ -11,17 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from aviary_training.roster import classes_for_model, load_roster, remap_label_lines
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-DEFAULT_NAMES = {
-    0: "bird_1",
-    1: "bird_2",
-    2: "bird_3",
-    3: "bird_4",
-    4: "bird_5",
-    5: "bird_6",
-    6: "unknown_bird",
-}
 
 
 @dataclass(frozen=True)
@@ -34,7 +27,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, type=Path, help="CVAT YOLO export directory")
     parser.add_argument("--output", required=True, type=Path, help="Output Ultralytics dataset directory")
-    parser.add_argument("--names", type=Path, default=Path("models/training/config/birds.yaml"))
+    parser.add_argument(
+        "--roster",
+        type=Path,
+        default=Path("models/annotation/roster.yaml"),
+        help="Single-source roster YAML",
+    )
+    parser.add_argument(
+        "--model",
+        required=True,
+        choices=["live", "archive"],
+        help="Build the class subset for this model: filter roster labels by tag "
+        "and remap export indices to a contiguous 0..N-1 range",
+    )
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--test-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
@@ -44,21 +49,6 @@ def parse_args() -> argparse.Namespace:
         help="Fail if any image is missing a matching YOLO .txt label file",
     )
     return parser.parse_args()
-
-
-def load_names(path: Path) -> dict[int, str]:
-    if not path.exists():
-        return DEFAULT_NAMES
-
-    import yaml
-
-    with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-
-    names = data.get("names", DEFAULT_NAMES)
-    if isinstance(names, list):
-        return {index: name for index, name in enumerate(names)}
-    return {int(index): str(name) for index, name in names.items()}
 
 
 def iter_images(root: Path) -> Iterable[Path]:
@@ -132,7 +122,13 @@ def slug_for(path: Path, root: Path) -> str:
     return "__".join(relative.parts).replace(" ", "_")
 
 
-def copy_split(split: str, samples: list[Sample], source: Path, output: Path) -> list[dict[str, str]]:
+def copy_split(
+    split: str,
+    samples: list[Sample],
+    source: Path,
+    output: Path,
+    remap: dict[int, int] | None = None,
+) -> list[dict[str, str]]:
     image_dir = output / "images" / split
     label_dir = output / "labels" / split
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -145,7 +141,12 @@ def copy_split(split: str, samples: list[Sample], source: Path, output: Path) ->
         dest_label = label_dir / f"{dest_stem}.txt"
 
         shutil.copy2(sample.image, dest_image)
-        if sample.label:
+        if sample.label and remap is not None:
+            lines = sample.label.read_text(encoding="utf-8").splitlines()
+            kept = remap_label_lines(lines, remap)
+            dest_label.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+            label_status = "remapped" if kept else "remapped_empty"
+        elif sample.label:
             shutil.copy2(sample.label, dest_label)
             label_status = "provided"
         else:
@@ -217,12 +218,16 @@ def main() -> None:
         if missing:
             raise SystemExit(f"{len(missing)} images have no label file.")
 
+    model_classes = classes_for_model(load_roster(args.roster), args.model)
+    names = model_classes.names
+    remap = model_classes.remap
+
     splits = split_samples(samples, args.val_ratio, args.test_ratio, args.seed)
     rows: list[dict[str, str]] = []
     for split, split_samples_ in splits.items():
-        rows.extend(copy_split(split, split_samples_, source, output))
+        rows.extend(copy_split(split, split_samples_, source, output, remap))
 
-    write_dataset_yaml(output, load_names(args.names))
+    write_dataset_yaml(output, names)
     write_manifest(output, rows)
 
     print(f"Wrote {len(samples)} samples to {output}")
