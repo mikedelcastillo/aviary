@@ -23,11 +23,17 @@ class CameraStats:
         sample_fps: float,
         registry: ObjectRegistry | None = None,
         fps_window: float = 2.0,
+        filter_objects: frozenset[str] = frozenset(),
     ) -> None:
         self.name = name
         self.sample_fps = sample_fps
         self._registry = registry
         self._fps_window = fps_window
+        # When non-empty, only these labels are surfaced in the terminal stats
+        # (the "detect" row and the objects-by-camera panel). Everything else is
+        # still detected, but kept out of the display. Mirrors FILTER_OBJECTS /
+        # AlertState membership semantics (lowercased).
+        self._filter_objects = filter_objects
         self._lock = threading.Lock()
 
         self.status = "connecting"
@@ -58,6 +64,14 @@ class CameraStats:
         frame_size: FrameSize | None = None,
     ) -> None:
         now = time.monotonic()
+        if self._filter_objects:
+            labels = [label for label in labels if label.strip().lower() in self._filter_objects]
+            if detections is not None:
+                detections = [
+                    detection
+                    for detection in detections
+                    if detection.label.strip().lower() in self._filter_objects
+                ]
         with self._lock:
             self.frames_total += 1
             self.last_frame_at = now

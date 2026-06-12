@@ -60,9 +60,11 @@ class CollectConfig:
 
 @dataclass(frozen=True)
 class FilterConfig:
-    # When non-empty, only these object labels are allowed to alert; everything
-    # else is still detected/collected but never triggers a notification. Empty
-    # means no filtering (alert on every detected object).
+    # When non-empty, only these object labels are allowed to alert and are the
+    # only labels surfaced in the terminal stats (detect row + objects panel);
+    # everything else is still detected/collected but never triggers a
+    # notification and is kept out of the display. Empty means no filtering
+    # (alert on and show every detected object).
     objects: frozenset[str]
 
 

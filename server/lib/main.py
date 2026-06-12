@@ -120,7 +120,12 @@ def main() -> None:
 
     registry = ObjectRegistry()
     stats = {
-        camera.name: CameraStats(camera.name, camera.sample_fps, registry)
+        camera.name: CameraStats(
+            camera.name,
+            camera.sample_fps,
+            registry,
+            filter_objects=app_config.filter.objects,
+        )
         for camera in enabled_cameras
     }
 
