@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -13,6 +15,18 @@ from lib.detector import Detection
 
 LOGGER = logging.getLogger("lib.telegram")
 
+# Telegram answers bursts with HTTP 429 and a ``retry_after`` (seconds). Every
+# send shares one bot token, so the limit is global: ``_blocked_until`` parks
+# every recipient thread when a 429 lands, and ``_next_send_at`` paces normal
+# traffic so we stay clear of the limit in the first place.
+DEFAULT_MIN_SEND_INTERVAL_SECONDS = 0.05
+DEFAULT_MAX_SEND_RETRIES = 5
+# Cushion added on top of Telegram's retry_after so we resume just past the
+# window instead of racing its trailing edge.
+RETRY_AFTER_BUFFER_SECONDS = 1.0
+# Fallback pause when a 429 arrives without any retry_after hint.
+RETRY_AFTER_FALLBACK_SECONDS = 1.0
+
 
 class TelegramNotifier:
     def __init__(
@@ -21,19 +35,29 @@ class TelegramNotifier:
         user_ids: list[str],
         timeout_seconds: int = 15,
         photo_timeout_seconds: int = 60,
+        min_send_interval_seconds: float = DEFAULT_MIN_SEND_INTERVAL_SECONDS,
+        max_send_retries: int = DEFAULT_MAX_SEND_RETRIES,
     ) -> None:
         self.bot_token = bot_token
         self.user_ids = user_ids
         self.timeout_seconds = timeout_seconds
         # Photo uploads are far heavier than text and slow uplinks need headroom.
         self.photo_timeout_seconds = photo_timeout_seconds
+        self.min_send_interval_seconds = min_send_interval_seconds
+        self.max_send_retries = max_send_retries
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
         # Deliver to all recipients concurrently so 3-4 recipients cost one
-        # upload's worth of latency, not the sum. Sized to the recipient count.
+        # send's worth of latency, not the sum. Sized to the recipient count.
         self._pool = ThreadPoolExecutor(
             max_workers=max(1, len(user_ids)),
             thread_name_prefix="telegram-send",
         )
+        # Shared rate-limit gate guarding the two timestamps below.
+        self._rate_lock = threading.Lock()
+        self._next_send_at = 0.0
+        self._blocked_until = 0.0
+
+    # -- public API --------------------------------------------------------
 
     def send_detections(
         self,
@@ -47,42 +71,159 @@ class TelegramNotifier:
         text = ", ".join(sorted({detection.label for detection in detections}))
         has_photo = bool(snapshot_path and snapshot_path.exists())
 
-        # Fan out to all recipients in parallel and wait for them to finish, so
-        # the caller can safely delete the snapshot afterwards. map() blocks
-        # until every send returns; failures are swallowed inside _deliver.
-        list(
-            self._pool.map(
-                lambda user_id: self._deliver(user_id, text, snapshot_path if has_photo else None),
-                self.user_ids,
-            )
-        )
+        if not has_photo:
+            self._broadcast(self.user_ids, lambda user_id: self._send_message(user_id, text))
+            return
 
-    def _deliver(self, user_id: str, text: str, snapshot_path: Path | None) -> None:
-        # Network failures here must never propagate: this runs inside the camera
-        # capture loop, and an unhandled error would tear down and reconnect the
-        # RTSP stream. A dropped alert is logged and swallowed.
-        try:
-            if snapshot_path is not None:
-                self._send_photo(user_id, text, snapshot_path)
-            else:
-                self._send_message(user_id, text)
-        except requests.RequestException as exc:
-            LOGGER.warning("Failed to send alert to %s: %s", user_id, exc)
+        # Upload the image bytes once. Telegram returns a ``file_id`` for the
+        # stored photo; every remaining recipient is served that handle instead
+        # of re-uploading the bytes, so N recipients cost one upload plus N-1
+        # cheap references.
+        image_bytes = snapshot_path.read_bytes()
+        file_id: str | None = None
+        uploaded: set[str] = set()
+        for user_id in self.user_ids:
+            try:
+                file_id = self._send_photo_upload(user_id, text, image_bytes)
+                uploaded.add(user_id)
+            except requests.RequestException as exc:
+                LOGGER.warning("Photo upload to %s failed: %s", user_id, exc)
+                continue
+            if file_id:
+                # Got a reusable handle; stop pushing bytes and fan the rest out.
+                break
+
+        if file_id:
+            remaining = [user_id for user_id in self.user_ids if user_id not in uploaded]
+            if remaining:
+                self._broadcast(
+                    remaining,
+                    lambda user_id: self._send_photo_by_file_id(user_id, text, file_id),
+                )
+        # If no file_id was ever obtained, the loop above already attempted a
+        # direct upload to every recipient, so there is nothing left to send.
+
+    # -- delivery primitives ----------------------------------------------
+
+    def _broadcast(self, user_ids: list[str], send) -> None:
+        # Fan out in parallel and wait for all to finish, so the caller can
+        # safely delete the snapshot afterwards. map() blocks until every send
+        # returns; per-recipient network failures are swallowed so one bad chat
+        # never blocks the rest or tears down the camera loop upstream.
+        def safe(user_id: str) -> None:
+            try:
+                send(user_id)
+            except requests.RequestException as exc:
+                LOGGER.warning("Failed to send alert to %s: %s", user_id, exc)
+
+        list(self._pool.map(safe, user_ids))
 
     def _send_message(self, user_id: str, text: str) -> None:
-        response = requests.post(
+        response = self._post(
             f"{self.base_url}/sendMessage",
             json={"chat_id": user_id, "text": text},
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
 
-    def _send_photo(self, user_id: str, caption: str, snapshot_path: Path) -> None:
-        with snapshot_path.open("rb") as image_file:
-            response = requests.post(
-                f"{self.base_url}/sendPhoto",
-                data={"chat_id": user_id, "caption": caption},
-                files={"photo": image_file},
-                timeout=self.photo_timeout_seconds,
-            )
+    def _send_photo_upload(self, user_id: str, caption: str, image_bytes: bytes) -> str | None:
+        response = self._post(
+            f"{self.base_url}/sendPhoto",
+            data={"chat_id": user_id, "caption": caption},
+            files={"photo": ("snapshot.jpg", image_bytes, "image/jpeg")},
+            timeout=self.photo_timeout_seconds,
+        )
         response.raise_for_status()
+        return self._extract_file_id(response)
+
+    def _send_photo_by_file_id(self, user_id: str, caption: str, file_id: str) -> None:
+        # No upload: Telegram already holds the bytes, so this is a small form
+        # post and uses the regular (short) timeout.
+        response = self._post(
+            f"{self.base_url}/sendPhoto",
+            data={"chat_id": user_id, "caption": caption, "photo": file_id},
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+
+    # -- rate limiting -----------------------------------------------------
+
+    def _post(self, url: str, **kwargs):
+        """POST through the shared gate, honoring 429 retry_after backoff.
+
+        Returns the response (its status may still be an error for the caller's
+        ``raise_for_status``); only 429 is retried here.
+        """
+        attempt = 0
+        while True:
+            self._acquire_send_slot()
+            response = requests.post(url, **kwargs)
+            if response.status_code != 429:
+                return response
+
+            retry_after = self._retry_after_seconds(response)
+            with self._rate_lock:
+                self._blocked_until = max(
+                    self._blocked_until, time.monotonic() + retry_after
+                )
+            attempt += 1
+            LOGGER.warning(
+                "Telegram rate-limited (429); pausing %.1fs before retry %d/%d",
+                retry_after,
+                attempt,
+                self.max_send_retries,
+            )
+            if attempt > self.max_send_retries:
+                # Out of retries: hand back the 429 so the caller's
+                # raise_for_status surfaces it and the alert is dropped.
+                return response
+
+    def _acquire_send_slot(self) -> None:
+        # Block until the gate is clear (no active 429 pause) and the minimum
+        # inter-send spacing has elapsed, then reserve the next slot.
+        while True:
+            with self._rate_lock:
+                now = time.monotonic()
+                wait = max(self._blocked_until - now, self._next_send_at - now, 0.0)
+                if wait <= 0.0:
+                    self._next_send_at = now + self.min_send_interval_seconds
+                    return
+            time.sleep(wait)
+
+    def _retry_after_seconds(self, response) -> float:
+        retry_after = None
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if isinstance(payload, dict):
+            parameters = payload.get("parameters")
+            if isinstance(parameters, dict):
+                retry_after = parameters.get("retry_after")
+        if retry_after is None:
+            header = response.headers.get("Retry-After") if response.headers else None
+            if header is not None:
+                try:
+                    retry_after = float(header)
+                except (TypeError, ValueError):
+                    retry_after = None
+        if retry_after is None:
+            retry_after = RETRY_AFTER_FALLBACK_SECONDS
+        return float(retry_after) + RETRY_AFTER_BUFFER_SECONDS
+
+    @staticmethod
+    def _extract_file_id(response) -> str | None:
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        result = payload.get("result")
+        photos = result.get("photo") if isinstance(result, dict) else None
+        if not photos:
+            return None
+        # PhotoSize entries run small -> large; the largest carries the best
+        # quality and works as a handle for any chat of this bot.
+        best = max(photos, key=lambda size: size.get("file_size", 0))
+        return best.get("file_id")
