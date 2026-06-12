@@ -17,6 +17,8 @@ import {
 } from "./types";
 import {
   categoryDir,
+  deletedFsPath,
+  deletedSidecarFsPath,
   imageFsPath,
   removedFsPath,
   removedSidecarFsPath,
@@ -201,10 +203,10 @@ export async function mutateAnnotation(
   });
 }
 
-// --- Soft-delete (dedupe mode) ---------------------------------------------
-// Move an image + its sidecars between the raw tree and the removed tree. The
-// move is the reversible alternative to deletion: dedupe approvals send losers to
-// REMOVED_ROOT; an undo (or manual mv) brings them back.
+// --- Reversible moves between the raw tree and a side tree -----------------
+// Moving an image + its sidecars is the reversible alternative to deletion. Two
+// side trees share this machinery: the dedupe loser tree (REMOVED_ROOT) and the
+// manual-delete trash (DELETED_ROOT). An undo (or manual mv) brings files back.
 
 const SIDECAR_EXTS = [".json", ".txt"] as const;
 
@@ -215,22 +217,34 @@ interface Transfer {
   label: string;
 }
 
-/** Build the move pairs (only for files that exist) for a remove/restore. */
-function transferPairs(cat: CatId, name: string, dir: "remove" | "restore"): Transfer[] {
+/** Path resolvers for a side tree (removed/deleted), mirroring the raw helpers. */
+interface SideTree {
+  img: (cat: string, name: string) => string;
+  sidecar: (cat: string, name: string, ext: string) => string;
+}
+
+const REMOVED_TREE: SideTree = { img: removedFsPath, sidecar: removedSidecarFsPath };
+const DELETED_TREE: SideTree = { img: deletedFsPath, sidecar: deletedSidecarFsPath };
+
+/**
+ * Build the move pairs (only for files that exist) between the raw tree and the
+ * given side tree. dir "out" = raw -> side (remove/delete); "in" = side -> raw
+ * (restore). Image extension is derived by the *FsPath helpers; never assume ".jpg".
+ */
+function transferPairs(cat: CatId, name: string, side: SideTree, dir: "out" | "in"): Transfer[] {
   const pairs: Transfer[] = [];
   const add = (src: string, dest: string, label: string) => {
     if (existsSync(src)) pairs.push({ src, dest, label });
   };
-  // Image extension is derived by the *FsPath helpers; never assume ".jpg".
-  if (dir === "remove") {
-    add(imageFsPath(cat, name), removedFsPath(cat, name), name);
+  if (dir === "out") {
+    add(imageFsPath(cat, name), side.img(cat, name), name);
     for (const ext of SIDECAR_EXTS) {
-      add(sidecarFsPath(cat, name, ext), removedSidecarFsPath(cat, name, ext), name.replace(IMG_RE, ext));
+      add(sidecarFsPath(cat, name, ext), side.sidecar(cat, name, ext), name.replace(IMG_RE, ext));
     }
   } else {
-    add(removedFsPath(cat, name), imageFsPath(cat, name), name);
+    add(side.img(cat, name), imageFsPath(cat, name), name);
     for (const ext of SIDECAR_EXTS) {
-      add(removedSidecarFsPath(cat, name, ext), sidecarFsPath(cat, name, ext), name.replace(IMG_RE, ext));
+      add(side.sidecar(cat, name, ext), sidecarFsPath(cat, name, ext), name.replace(IMG_RE, ext));
     }
   }
   return pairs;
@@ -290,7 +304,7 @@ async function moveBundle(pairs: Transfer[]): Promise<string[]> {
  */
 export async function removeImage(cat: CatId, name: string): Promise<{ moved: string[] }> {
   return withFileLock(sidecarFsPath(cat, name, ".json"), async () => {
-    const moved = await moveBundle(transferPairs(cat, name, "remove"));
+    const moved = await moveBundle(transferPairs(cat, name, REMOVED_TREE, "out"));
     if (moved.length) {
       invalidateManifest();
       dropFromCache(cat, [name]);
@@ -302,7 +316,34 @@ export async function removeImage(cat: CatId, name: string): Promise<{ moved: st
 /** Reverse {@link removeImage}: move files removed -> raw. Refuses to clobber live files. */
 export async function restoreImage(cat: CatId, name: string): Promise<{ moved: string[] }> {
   return withFileLock(sidecarFsPath(cat, name, ".json"), async () => {
-    const moved = await moveBundle(transferPairs(cat, name, "restore"));
+    const moved = await moveBundle(transferPairs(cat, name, REMOVED_TREE, "in"));
+    if (moved.length) invalidateManifest();
+    return { moved };
+  });
+}
+
+/**
+ * Manually delete an image: move its jpg/png + existing .json/.txt sidecars from
+ * the raw tree into the trash tree (DELETED_ROOT), preserving the category subpath.
+ * Reversible via {@link restoreDeletedImage}. Invalidates the manifest cache and
+ * drops the hash-cache entry (the image left the raw set). Same lock key as the
+ * autosave writers, so it can't race a pending save for the same image.
+ */
+export async function deleteImage(cat: CatId, name: string): Promise<{ moved: string[] }> {
+  return withFileLock(sidecarFsPath(cat, name, ".json"), async () => {
+    const moved = await moveBundle(transferPairs(cat, name, DELETED_TREE, "out"));
+    if (moved.length) {
+      invalidateManifest();
+      dropFromCache(cat, [name]);
+    }
+    return { moved };
+  });
+}
+
+/** Reverse {@link deleteImage}: move files deleted -> raw. Refuses to clobber live files. */
+export async function restoreDeletedImage(cat: CatId, name: string): Promise<{ moved: string[] }> {
+  return withFileLock(sidecarFsPath(cat, name, ".json"), async () => {
+    const moved = await moveBundle(transferPairs(cat, name, DELETED_TREE, "in"));
     if (moved.length) invalidateManifest();
     return { moved };
   });

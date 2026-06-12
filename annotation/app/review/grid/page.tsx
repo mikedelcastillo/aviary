@@ -4,7 +4,9 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CropCell } from "@/components/CropCell";
+import { DeleteToast } from "@/components/DeleteToast";
 import { Spinner } from "@/components/Spinner";
+import { useImageDelete } from "@/lib/use-image-delete";
 import { useSaveStore } from "@/lib/save-store";
 import { parseCats, reviewHref, withCats, type Box, type CatId, type ReviewBox } from "@/lib/types";
 
@@ -15,6 +17,16 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 const cellKey = (c: ReviewBox) => `${c.cat}/${c.name}/${c.box.id}`;
+
+// Grid cell sizing: min column width in px. Persisted so the chosen density
+// survives reloads. Bounds keep cells legible without overflowing the viewport.
+const CELL_SIZE_MIN = 72;
+const CELL_SIZE_MAX = 280;
+const CELL_SIZE_STEP = 24;
+const CELL_SIZE_DEFAULT = 112;
+const CELL_SIZE_KEY = "grid-cell-size";
+const clampCellSize = (n: number) =>
+  Math.max(CELL_SIZE_MIN, Math.min(CELL_SIZE_MAX, n));
 
 /** The op POSTed to /api/annotation/[cat]/[name]/box-op. */
 type BoxOp =
@@ -55,8 +67,33 @@ function GridReview() {
   const [removed, setRemoved] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [cellSize, setCellSize] = useState(CELL_SIZE_DEFAULT);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const undoing = useRef(false);
+
+  // Whole-image delete (moves the source image + sidecars to trash) with an
+  // ephemeral undo toast. Separate from the box-op undoStack above.
+  const {
+    pending: pendingDelete,
+    remove: deleteImage,
+    undo: undoDelete,
+    dismiss: dismissDelete,
+  } = useImageDelete();
+
+  // Load the persisted cell size once on mount (kept out of the initial state to
+  // avoid an SSR/CSR hydration mismatch on localStorage).
+  useEffect(() => {
+    const stored = Number(window.localStorage.getItem(CELL_SIZE_KEY));
+    if (Number.isFinite(stored) && stored > 0) setCellSize(clampCellSize(stored));
+  }, []);
+
+  const changeCellSize = useCallback((delta: number) => {
+    setCellSize((s) => {
+      const next = clampCellSize(s + delta);
+      window.localStorage.setItem(CELL_SIZE_KEY, String(next));
+      return next;
+    });
+  }, []);
 
   // --- Fetch every box carrying `label` (scoped to cats). --------------------
   useEffect(() => {
@@ -165,6 +202,37 @@ function GridReview() {
     [act],
   );
 
+  // --- Whole-image delete (hides every cell owned by the image). -------------
+  // Hiding runs inside the onDeleted callback, which the hook only fires after a
+  // successful move — so a failed delete leaves the cells visible.
+  const handleDelete = useCallback(
+    async (cell: ReviewBox) => {
+      const keys = (all ?? [])
+        .filter((c) => c.cat === cell.cat && c.name === cell.name)
+        .map(cellKey);
+      await deleteImage(cell.cat, cell.name, () => {
+        setRemoved((s) => {
+          const n = new Set(s);
+          keys.forEach((k) => n.add(k));
+          return n;
+        });
+      });
+    },
+    [all, deleteImage],
+  );
+
+  const handleDeleteUndo = useCallback(() => {
+    void undoDelete((p) => {
+      setRemoved((s) => {
+        const n = new Set(s);
+        (all ?? [])
+          .filter((c) => c.cat === p.cat && c.name === p.name)
+          .forEach((c) => n.delete(cellKey(c)));
+        return n;
+      });
+    });
+  }, [undoDelete, all]);
+
   // --- Undo (LIFO; re-show + send the inverse op). ---------------------------
   const undo = useCallback(async () => {
     // Re-entrancy guard: two ⌘Z presses within one frame would otherwise both
@@ -245,6 +313,29 @@ function GridReview() {
           <ViewToggle focusHref={focusHref} />
         </div>
         <div className="flex items-center gap-3">
+          {/* Grid density: shrink / grow the cells. */}
+          <div className="flex items-center rounded-pill border border-border bg-surface p-0.5">
+            <button
+              type="button"
+              onClick={() => changeCellSize(-CELL_SIZE_STEP)}
+              disabled={cellSize <= CELL_SIZE_MIN}
+              aria-label="Smaller grid"
+              title="Smaller cells"
+              className="grid h-6 w-6 place-items-center rounded-pill text-sm text-muted transition-colors hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              onClick={() => changeCellSize(CELL_SIZE_STEP)}
+              disabled={cellSize >= CELL_SIZE_MAX}
+              aria-label="Larger grid"
+              title="Larger cells"
+              className="grid h-6 w-6 place-items-center rounded-pill text-sm text-muted transition-colors hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+            >
+              +
+            </button>
+          </div>
           <span className="font-mono text-xs text-faint">
             {visible.length} box{visible.length === 1 ? "" : "es"}
           </span>
@@ -279,7 +370,12 @@ function GridReview() {
           </Link>
         </div>
       ) : (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-2 p-4">
+        <div
+          className="grid gap-2 p-4"
+          style={{
+            gridTemplateColumns: `repeat(auto-fill, minmax(${cellSize}px, 1fr))`,
+          }}
+        >
           {visible.map((cell) => (
             <CropCell
               key={cellKey(cell)}
@@ -287,9 +383,18 @@ function GridReview() {
               onOpen={openFocus}
               onUnbox={unbox}
               onUnlabel={unlabel}
+              onDelete={handleDelete}
             />
           ))}
         </div>
+      )}
+
+      {pendingDelete && (
+        <DeleteToast
+          name={pendingDelete.name}
+          onUndo={handleDeleteUndo}
+          onDismiss={dismissDelete}
+        />
       )}
     </main>
   );

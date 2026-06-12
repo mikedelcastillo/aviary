@@ -5,7 +5,9 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Stage } from "@/components/Stage";
 import { BoxLayer } from "@/components/BoxLayer";
+import { DeleteToast } from "@/components/DeleteToast";
 import { useAnnotation } from "@/lib/use-annotation";
+import { useImageDelete } from "@/lib/use-image-delete";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { Spinner } from "@/components/Spinner";
 import {
@@ -59,22 +61,25 @@ export default function BoxPage() {
   const stageRef = useRef<StageHandle>(null);
   const startRef = useRef<Pt | null>(null);
 
+  // Load the global manifest into state and return it (so a post-delete handler
+  // can navigate against the freshly-renumbered indices). Used on mount and after
+  // a delete/undo, which renumber the server manifest.
+  const loadManifest = useCallback(async (): Promise<ManifestEntry[]> => {
+    try {
+      const res = await fetch("/api/manifest");
+      const data = (await res.json()) as ManifestEntry[];
+      setManifest(data);
+      return data;
+    } catch {
+      setManifest([]);
+      return [];
+    }
+  }, []);
+
   // Fetch the global manifest once.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/manifest");
-        const data = (await res.json()) as ManifestEntry[];
-        if (!cancelled) setManifest(data);
-      } catch {
-        if (!cancelled) setManifest([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void loadManifest();
+  }, [loadManifest]);
 
   // In random mode, fetch the set of still-unboxed images so the shuffle skips
   // ones already done. Sequential mode shows everything, so no fetch needed.
@@ -88,26 +93,29 @@ export default function BoxPage() {
   // A stable string key (value-compared in the deps) freezes the worklist so the
   // seeded order stays put and prev/next walk a coherent sequence.
   const catsKey = serializeCats(cats);
-  useEffect(() => {
+  // Load (or refresh) the still-unboxed worklist for random mode. Called on
+  // seed/scope change and after a delete/undo (a deletion legitimately changes
+  // the worklist; the reshuffle that implies is acceptable for that rare action).
+  const loadBoxQueue = useCallback(async (): Promise<number[] | null> => {
     if (seed == null) {
       setBoxQueue(null);
-      return;
+      return null;
     }
-    let cancelled = false;
     const qs = catsKey ? `?cats=${catsKey}` : "";
-    (async () => {
-      try {
-        const res = await fetch(`/api/box-queue${qs}`);
-        const data = (await res.json()) as number[];
-        if (!cancelled) setBoxQueue(data);
-      } catch {
-        if (!cancelled) setBoxQueue([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const res = await fetch(`/api/box-queue${qs}`);
+      const data = (await res.json()) as number[];
+      setBoxQueue(data);
+      return data;
+    } catch {
+      setBoxQueue([]);
+      return [];
+    }
   }, [seed, catsKey]);
+
+  useEffect(() => {
+    void loadBoxQueue();
+  }, [loadBoxQueue]);
 
   // The navigation sequence. Sequential: every in-scope image in global order.
   // Random: only still-unboxed images, in a stable seeded shuffle. The counter
@@ -139,6 +147,10 @@ export default function BoxPage() {
   const name: string | null = entry && inCats ? entry.name : null;
 
   const { annotation, addBox, removeBox, replaceBoxes, setBoxed, undo, redo, loading } = useAnnotation(cat, name);
+
+  // Manual image delete (whole image -> trash tree) with an undo toast.
+  const { pending: pendingDelete, remove: deleteCurrent, undo: undoDelete, dismiss: dismissDelete } =
+    useImageDelete();
 
   // --- Image readiness (drives the loading overlay). ------------------------
   const [ready, setReady] = useState(false);
@@ -207,6 +219,31 @@ export default function BoxPage() {
     [removeBox, annotation?.boxes.length, annotation?.boxed, setBoxed],
   );
 
+  // --- Delete the whole image (move to trash), then advance. Undo restores it
+  // and hops back. Navigation is by image identity against a freshly-refetched
+  // manifest, since deleting renumbers the global indices the URL uses. --------
+  const handleDelete = useCallback(async () => {
+    if (!cat || !name) return;
+    const idx = ordered.findIndex((e) => e.n === n);
+    const nextEntry = idx >= 0 ? ordered[idx + 1] : undefined;
+    const nextId = nextEntry ? { cat: nextEntry.cat, name: nextEntry.name } : null;
+    await deleteCurrent(cat, name, async () => {
+      const fresh = await loadManifest();
+      await loadBoxQueue();
+      const t = nextId ? fresh.find((e) => e.cat === nextId.cat && e.name === nextId.name) : undefined;
+      router.push(t ? withNav(`/box/${t.n}`, cats, seed) : "/");
+    });
+  }, [cat, name, ordered, n, deleteCurrent, loadManifest, loadBoxQueue, router, cats, seed]);
+
+  const handleDeleteUndo = useCallback(() => {
+    void undoDelete(async (p) => {
+      const fresh = await loadManifest();
+      await loadBoxQueue();
+      const t = fresh.find((e) => e.cat === p.cat && e.name === p.name);
+      if (t) router.push(withNav(`/box/${t.n}`, cats, seed));
+    });
+  }, [undoDelete, loadManifest, loadBoxQueue, router, cats, seed]);
+
   // --- Drawing --------------------------------------------------------------
   const onDrawStart = useCallback((pt: Pt) => {
     startRef.current = pt;
@@ -263,6 +300,11 @@ export default function BoxPage() {
         handleRedo();
         return;
       }
+      if (mod && e.key === "Backspace") {
+        e.preventDefault();
+        void handleDelete();
+        return;
+      }
       if (e.key === "ArrowRight" || e.key === " " || e.code === "Space") {
         e.preventDefault();
         goNext();
@@ -289,7 +331,7 @@ export default function BoxPage() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleUndo, handleRedo, goNext, goPrev, toggleRandom, clearBoxes, router]);
+  }, [handleUndo, handleRedo, handleDelete, goNext, goPrev, toggleRandom, clearBoxes, router]);
 
   // --- Render guards --------------------------------------------------------
   if (
@@ -384,6 +426,19 @@ export default function BoxPage() {
             </button>
           </div>
         )}
+        <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
+          <button
+            type="button"
+            onClick={() => void handleDelete()}
+            title="Delete this image (⌘/Ctrl + Backspace)"
+            className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
+          >
+            <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] text-danger">
+              ⌘⌫
+            </kbd>
+            <span className="font-medium">Delete</span>
+          </button>
+        </div>
         <div className="flex items-center gap-1 rounded-full border border-border bg-surface/85 px-2 py-1.5 backdrop-blur">
           <button
             type="button"
@@ -408,6 +463,14 @@ export default function BoxPage() {
           </button>
         </div>
       </div>
+
+      {pendingDelete && (
+        <DeleteToast
+          name={pendingDelete.name}
+          onUndo={handleDeleteUndo}
+          onDismiss={dismissDelete}
+        />
+      )}
     </main>
   );
 }

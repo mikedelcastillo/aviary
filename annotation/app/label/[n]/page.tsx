@@ -7,8 +7,10 @@ import { Stage } from "@/components/Stage";
 import { Spotlight } from "@/components/Spotlight";
 import { BoxLayer } from "@/components/BoxLayer";
 import { PillBar } from "@/components/PillBar";
+import { DeleteToast } from "@/components/DeleteToast";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { useAnnotation } from "@/lib/use-annotation";
+import { useImageDelete } from "@/lib/use-image-delete";
 import {
   categoryById,
   filterByCats,
@@ -45,35 +47,45 @@ export default function LabelPage() {
   const [rosterData, setRosterData] = useState<RosterData | null>(null);
   const [queue, setQueue] = useState<number[] | null>(null);
 
+  // Load (or refresh) the manifest + label queue together, returning both so a
+  // post-delete handler can navigate against the freshly-renumbered indices.
+  // The roster is static for the session, so it's fetched only on mount below.
+  const loadManifestQueue = useCallback(async (): Promise<{
+    manifest: ManifestEntry[];
+    queue: number[];
+  }> => {
+    try {
+      const [mRes, qRes] = await Promise.all([fetch("/api/manifest"), fetch("/api/queue")]);
+      const [m, q] = await Promise.all([
+        mRes.json() as Promise<ManifestEntry[]>,
+        qRes.json() as Promise<number[]>,
+      ]);
+      setManifest(m);
+      setQueue(q);
+      return { manifest: m, queue: q };
+    } catch {
+      setManifest([]);
+      setQueue([]);
+      return { manifest: [], queue: [] };
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [mRes, rRes, qRes] = await Promise.all([
-          fetch("/api/manifest"),
-          fetch("/api/roster"),
-          fetch("/api/queue"),
-        ]);
-        const [m, r, q] = await Promise.all([
-          mRes.json() as Promise<ManifestEntry[]>,
-          rRes.json() as Promise<RosterData>,
-          qRes.json() as Promise<number[]>,
-        ]);
-        if (cancelled) return;
-        setManifest(m);
-        setRosterData(r);
-        setQueue(q);
+        const rRes = await fetch("/api/roster");
+        const r = (await rRes.json()) as RosterData;
+        if (!cancelled) setRosterData(r);
       } catch {
-        if (cancelled) return;
-        setManifest([]);
-        setRosterData({ day: [], ir: [], phone: [] });
-        setQueue([]);
+        if (!cancelled) setRosterData({ day: [], ir: [], phone: [] });
       }
     })();
+    void loadManifestQueue();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadManifestQueue]);
 
   // Selected-category subset, plus the work queue (boxed-but-unlabeled images)
   // as manifest entries in global order.
@@ -117,6 +129,10 @@ export default function LabelPage() {
   const name = entry?.name ?? null;
 
   const { annotation, setLabel, removeBox, replaceBoxes, undo, redo, loading } = useAnnotation(cat, name);
+
+  // Manual image delete (whole image -> trash tree) with an undo toast.
+  const { pending: pendingDelete, remove: deleteCurrent, undo: undoDelete, dismiss: dismissDelete } =
+    useImageDelete();
 
   const pills: Pill[] = useMemo(
     () => (cat && rosterData ? rosterData[cat] : []),
@@ -214,6 +230,29 @@ export default function LabelPage() {
     advance();
   }, [boxes.length, replaceBoxes, advance]);
 
+  // --- Delete the whole image (move to trash), then advance to the next queued
+  // image. Undo restores it and hops back. Navigation is by identity against a
+  // freshly-refetched manifest, since deleting renumbers the global indices. ----
+  const handleDelete = useCallback(async () => {
+    if (!cat || !name) return;
+    const idx = ordered.findIndex((e) => e.n === n);
+    const nextEntry = idx >= 0 ? ordered[idx + 1] : undefined;
+    const nextId = nextEntry ? { cat: nextEntry.cat, name: nextEntry.name } : null;
+    await deleteCurrent(cat, name, async () => {
+      const { manifest: fresh } = await loadManifestQueue();
+      const t = nextId ? fresh.find((e) => e.cat === nextId.cat && e.name === nextId.name) : undefined;
+      router.push(t ? withNav(`/label/${t.n}`, cats, seed) : "/");
+    });
+  }, [cat, name, ordered, n, deleteCurrent, loadManifestQueue, router, cats, seed]);
+
+  const handleDeleteUndo = useCallback(() => {
+    void undoDelete(async (p) => {
+      const { manifest: fresh } = await loadManifestQueue();
+      const t = fresh.find((e) => e.cat === p.cat && e.name === p.name);
+      if (t) router.push(withNav(`/label/${t.n}`, cats, seed));
+    });
+  }, [undoDelete, loadManifestQueue, router, cats, seed]);
+
   // --- Undo/redo: history is session-global, so a mistake made before an
   // auto-advance is undone by hopping back to the image it happened on. ------
   const navToHistory = useCallback(
@@ -258,6 +297,11 @@ export default function LabelPage() {
       if (mod && e.key.toLowerCase() === "y") {
         e.preventDefault();
         handleRedo();
+        return;
+      }
+      if (mod && e.key === "Backspace") {
+        e.preventDefault();
+        void handleDelete();
         return;
       }
       if (mod) return; // leave other shortcuts (copy/paste/etc.) alone
@@ -319,7 +363,7 @@ export default function LabelPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, boxes.length, pills, pick, unbox, clearBoxes, advance, goPrev, goNext, handleUndo, handleRedo, toggleRandom, router]);
+  }, [activeBox, boxes.length, pills, pick, unbox, clearBoxes, advance, goPrev, goNext, handleUndo, handleRedo, handleDelete, toggleRandom, router]);
 
   // --- Render. --------------------------------------------------------------
   const category = cat ? categoryById(cat) : undefined;
@@ -390,7 +434,16 @@ export default function LabelPage() {
         activeLabel={activeBox?.label ?? null}
         onUnbox={activeBox ? unbox : undefined}
         onClear={boxes.length > 0 ? clearBoxes : undefined}
+        onDelete={name ? () => void handleDelete() : undefined}
       />
+
+      {pendingDelete && (
+        <DeleteToast
+          name={pendingDelete.name}
+          onUndo={handleDeleteUndo}
+          onDismiss={dismissDelete}
+        />
+      )}
     </main>
   );
 }

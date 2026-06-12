@@ -23,11 +23,19 @@ export const DEDUPE_CACHE_PATH =
   process.env.AVIARY_DEDUPE_CACHE ?? path.join(ANNOTATION_ROOT, ".dedupe-cache.json");
 
 /**
- * Soft-delete root for dedupe removals (sibling of raw/). Matches the original
- * Python prototype's default so both tools, if ever run, share one removed tree.
+ * Soft-delete root for dedupe removals (sibling of raw/). The dedupe loser tree;
+ * kept distinct from the manual-delete tree ({@link DELETED_ROOT}).
  */
 export const REMOVED_ROOT =
-  process.env.AVIARY_REMOVED_ROOT ?? path.join(ANNOTATION_ROOT, "_dedup_removed");
+  process.env.AVIARY_REMOVED_ROOT ?? path.join(ANNOTATION_ROOT, "dedup");
+
+/**
+ * Trash root for manual image deletions from Box/Label/Review (sibling of raw/).
+ * Separate from {@link REMOVED_ROOT} because "manually deleted" and "deduped" are
+ * different intents; both are reversible moves, never destructive unlinks.
+ */
+export const DELETED_ROOT =
+  process.env.AVIARY_DELETED_ROOT ?? path.join(ANNOTATION_ROOT, "deleted");
 
 /** Directory of valid image basenames (no path separators, jpg/jpeg/png). */
 const NAME_RE = /^[A-Za-z0-9._-]+\.(jpe?g|png)$/i;
@@ -93,4 +101,18 @@ export function removedFsPath(cat: string, name: string): string {
 /** Sidecar path (".json" / ".txt") inside the removed tree. */
 export function removedSidecarFsPath(cat: string, name: string, ext: string): string {
   return removedFsPath(cat, name).replace(/\.(jpe?g|png)$/i, ext);
+}
+
+// --- Manual-delete (trash) tree --------------------------------------------
+// Mirror of imageFsPath/sidecarFsPath rooted under DELETED_ROOT, sharing the
+// same validation + traversal containment via resolveInTree.
+
+/** Absolute path to an image inside the deleted tree, guarded against traversal. */
+export function deletedFsPath(cat: string, name: string): string {
+  return resolveInTree(DELETED_ROOT, cat, name);
+}
+
+/** Sidecar path (".json" / ".txt") inside the deleted tree. */
+export function deletedSidecarFsPath(cat: string, name: string, ext: string): string {
+  return deletedFsPath(cat, name).replace(/\.(jpe?g|png)$/i, ext);
 }

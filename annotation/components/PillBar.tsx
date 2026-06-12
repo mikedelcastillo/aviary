@@ -9,10 +9,12 @@ export interface PillBarProps {
   onUnbox?: () => void;
   /** When provided, shows a "Clear [C]" control that deletes every box. */
   onClear?: () => void;
+  /** When provided, shows a "Delete [⌘⌫]" control that trashes the whole image. */
+  onDelete?: () => void;
 }
 
 /** Bottom label options for label mode. Each pill shows its keyboard shortcut. */
-export function PillBar({ pills, onPick, activeLabel, onUnbox, onClear }: PillBarProps) {
+export function PillBar({ pills, onPick, activeLabel, onUnbox, onClear, onDelete }: PillBarProps) {
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-6">
       <div className="pointer-events-auto flex max-w-[min(96vw,920px)] flex-wrap items-center justify-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
@@ -40,7 +42,7 @@ export function PillBar({ pills, onPick, activeLabel, onUnbox, onClear }: PillBa
           );
         })}
 
-        {(onUnbox || onClear) && (
+        {(onUnbox || onClear || onDelete) && (
           <span className="mx-1 h-6 w-px shrink-0 bg-border" aria-hidden />
         )}
         {onUnbox && (
@@ -63,6 +65,18 @@ export function PillBar({ pills, onPick, activeLabel, onUnbox, onClear }: PillBa
               C
             </kbd>
             <span className="font-medium">Clear</span>
+          </button>
+        )}
+        {onDelete && (
+          <button
+            onClick={onDelete}
+            title="Delete this image (⌘/Ctrl + Backspace)"
+            className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
+          >
+            <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] text-danger">
+              ⌘⌫
+            </kbd>
+            <span className="font-medium">Delete</span>
           </button>
         )}
       </div>

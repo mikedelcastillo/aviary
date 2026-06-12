@@ -5,9 +5,9 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ProgressCard } from "@/components/ProgressCard";
 import { CatToggle } from "@/components/CatToggle";
-import { Spinner } from "@/components/Spinner";
 import {
   ALL_CATS,
+  CATEGORIES,
   newSeed,
   orderBySeed,
   parseCats,
@@ -95,54 +95,55 @@ export default function Home() {
   // Per-category progress is selection-independent — fetch once.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/progress");
+    fetch("/api/progress")
+      .then((res) => {
         if (!res.ok) throw new Error(`progress: ${res.status}`);
-        const data = (await res.json()) as CategoryProgress[];
-        if (!cancelled) setProgress(data);
-      } catch (e) {
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setProgress(data as CategoryProgress[]);
+      })
+      .catch((e) => {
         if (!cancelled) setError((e as Error).message);
-      }
-    })();
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Entry points, queue, and the leaderboard are scoped to the selection.
+  // Entry points, queue, and the leaderboard are scoped to the selection. Each
+  // endpoint loads on its own so a slow one never blocks the others — every
+  // module renders a skeleton until its own data lands. Resetting to null on
+  // selection change snaps the affected modules back to their skeleton state.
   useEffect(() => {
     let cancelled = false;
     const param = serializeCats(cats);
     const qs = param ? `?cats=${param}` : "";
-    (async () => {
-      try {
-        const [queueRes, boxQueueRes, entryRes, statsRes] = await Promise.all([
-          fetch(`/api/queue${qs}`),
-          fetch(`/api/box-queue${qs}`),
-          fetch(`/api/entry${qs}`),
-          fetch(`/api/label-stats${qs}`),
-        ]);
-        if (!queueRes.ok) throw new Error(`queue: ${queueRes.status}`);
-        if (!boxQueueRes.ok) throw new Error(`box-queue: ${boxQueueRes.status}`);
-        if (!entryRes.ok) throw new Error(`entry: ${entryRes.status}`);
-        if (!statsRes.ok) throw new Error(`label-stats: ${statsRes.status}`);
 
-        const queueData = (await queueRes.json()) as number[];
-        const boxQueueData = (await boxQueueRes.json()) as number[];
-        const entryData = (await entryRes.json()) as { box: number; label: number };
-        const statsData = (await statsRes.json()) as LabelStat[];
+    setQueue(null);
+    setBoxQueue(null);
+    setEntry(null);
+    setLabelStats(null);
 
-        if (!cancelled) {
-          setQueue(queueData);
-          setBoxQueue(boxQueueData);
-          setEntry(entryData);
-          setLabelStats(statsData);
-        }
-      } catch (e) {
-        if (!cancelled) setError((e as Error).message);
-      }
-    })();
+    function load<T>(url: string, set: (v: T) => void): void {
+      fetch(url)
+        .then((res) => {
+          if (!res.ok) throw new Error(`${url}: ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          if (!cancelled) set(data as T);
+        })
+        .catch((e) => {
+          if (!cancelled) setError((e as Error).message);
+        });
+    }
+
+    load<number[]>(`/api/queue${qs}`, setQueue);
+    load<number[]>(`/api/box-queue${qs}`, setBoxQueue);
+    load<{ box: number; label: number }>(`/api/entry${qs}`, setEntry);
+    load<LabelStat[]>(`/api/label-stats${qs}`, setLabelStats);
+
     return () => {
       cancelled = true;
     };
@@ -198,127 +199,125 @@ export default function Home() {
         <p className="mt-1 text-sm text-muted">
           Box and label bird detections — filesystem is the source of truth.
         </p>
-        {totals && (
+        {totals ? (
           <p className="mt-3 font-mono text-xs text-faint">
             {totals.total.toLocaleString()} images · {totals.boxed.toLocaleString()} boxed (
             {pct(totals.boxed, totals.total)}%) · {totals.labeled.toLocaleString()} labeled (
             {pct(totals.labeled, totals.boxed)}%)
           </p>
+        ) : (
+          <div className="mt-3 h-4 w-72 max-w-full animate-pulse rounded bg-elevated" />
         )}
       </header>
 
       {error && (
         <div className="mt-8 rounded-xl border border-danger/40 bg-surface p-5 text-sm text-danger">
-          Failed to load progress: {error}
+          Failed to load: {error}
         </div>
       )}
 
-      {!error && !progress && (
-        <div className="mt-16 flex items-center justify-center gap-3 text-sm text-muted">
-          <Spinner size={18} className="text-fg" />
-          <span>Loading…</span>
-        </div>
-      )}
-
-      {!error && progress && (
-        <>
-          {/* Category selector (left) + randomize toggle (right). Scopes and
-              orders everything below. */}
-          <div className="mt-8 flex flex-wrap items-center justify-between gap-2">
-            <CatToggle selected={cats} totals={categoryTotals} onChange={setCats} />
-            <button
-              type="button"
-              role="checkbox"
-              aria-checked={random}
-              onClick={() => setRandom(!random)}
-              title="Shuffle image order each time you enter Box/Label"
-              className={
-                "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
-                (random
-                  ? "border-fg bg-fg text-bg"
-                  : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
-              }
-            >
-              <span
-                aria-hidden
-                className={
-                  "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border text-[9px] leading-none " +
-                  (random ? "border-bg/40 bg-bg/20 text-bg" : "border-border-strong text-transparent")
-                }
-              >
-                ✓
-              </span>
-              <span className="font-medium">Randomize</span>
-            </button>
-          </div>
-
-          {/* Primary entry points */}
-          <div className="mt-5 grid gap-4 sm:grid-cols-2">
-            <button
-              type="button"
-              onClick={enterBox}
-              className="group flex cursor-pointer flex-col rounded-2xl bg-fg p-6 text-left text-bg transition-opacity hover:opacity-90"
-            >
-              <span className="text-lg font-semibold">Box mode</span>
-              <span className="mt-1 text-sm opacity-70">Draw &amp; vet bounding boxes</span>
-              {totals && (
-                <span className="mt-4 font-mono text-xs opacity-60">
-                  {totals.boxed}/{totals.total} boxed
-                </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={enterLabel}
-              aria-disabled={labelEmpty}
-              title={labelEmpty ? "Nothing to label yet" : undefined}
-              className={
-                "group flex cursor-pointer flex-col rounded-2xl border p-6 text-left transition-colors " +
-                (labelEmpty
-                  ? "border-border bg-surface text-faint hover:border-border-strong"
-                  : "border-border-strong bg-surface text-fg hover:bg-surface-2")
-              }
-            >
-              <span className="text-lg font-semibold">Label mode</span>
-              <span className="mt-1 text-sm text-muted">Assign roster labels to boxed birds</span>
-              <span className="mt-4 font-mono text-xs text-faint">
-                {labelEmpty ? "Nothing to label yet" : `${queueLen} in queue`}
-              </span>
-            </button>
-          </div>
-
-          {/* Auxiliary mode — understated, below the primary entry points. */}
-          <Link
-            href={withCats("/dedupe", cats)}
-            className="mt-3 flex items-center justify-between rounded-xl border border-border bg-surface px-5 py-3 text-sm transition-colors hover:border-border-strong hover:bg-surface-2"
+      {/* Category selector (left) + randomize toggle (right). Scopes and
+          orders everything below. Both are interactive immediately — the
+          per-category counts pop in once progress lands. */}
+      <div className="mt-8 flex flex-wrap items-center justify-between gap-2">
+        <CatToggle selected={cats} totals={categoryTotals} onChange={setCats} />
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={random}
+          onClick={() => setRandom(!random)}
+          title="Shuffle image order each time you enter Box/Label"
+          className={
+            "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
+            (random
+              ? "border-fg bg-fg text-bg"
+              : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
+          }
+        >
+          <span
+            aria-hidden
+            className={
+              "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border text-[9px] leading-none " +
+              (random ? "border-bg/40 bg-bg/20 text-bg" : "border-border-strong text-transparent")
+            }
           >
-            <span className="font-medium text-fg">Dedupe</span>
-            <span className="text-muted">Find &amp; remove near-duplicate frames →</span>
-          </Link>
+            ✓
+          </span>
+          <span className="font-medium">Randomize</span>
+        </button>
+      </div>
 
-          {/* Per-category progress — unselected categories dimmed. */}
-          <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {progress.map((p) => (
-              <div
-                key={p.id}
-                className={catSet.has(p.id) ? "" : "opacity-40 transition-opacity"}
-              >
+      {/* Primary entry points */}
+      <div className="mt-5 grid gap-4 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={enterBox}
+          className="group flex cursor-pointer flex-col rounded-2xl bg-fg p-6 text-left text-bg transition-opacity hover:opacity-90"
+        >
+          <span className="text-lg font-semibold">Box mode</span>
+          <span className="mt-1 text-sm opacity-70">Draw &amp; vet bounding boxes</span>
+          {totals ? (
+            <span className="mt-4 font-mono text-xs opacity-60">
+              {totals.boxed}/{totals.total} boxed
+            </span>
+          ) : (
+            <span className="mt-4 h-4 w-20 animate-pulse rounded bg-bg/20" />
+          )}
+        </button>
+
+        <button
+          type="button"
+          onClick={enterLabel}
+          aria-disabled={labelEmpty}
+          title={labelEmpty ? "Nothing to label yet" : undefined}
+          className={
+            "group flex cursor-pointer flex-col rounded-2xl border p-6 text-left transition-colors " +
+            (labelEmpty
+              ? "border-border bg-surface text-faint hover:border-border-strong"
+              : "border-border-strong bg-surface text-fg hover:bg-surface-2")
+          }
+        >
+          <span className="text-lg font-semibold">Label mode</span>
+          <span className="mt-1 text-sm text-muted">Assign roster labels to boxed birds</span>
+          {queue === null ? (
+            <span className="mt-4 h-4 w-24 animate-pulse rounded bg-elevated" />
+          ) : (
+            <span className="mt-4 font-mono text-xs text-faint">
+              {labelEmpty ? "Nothing to label yet" : `${queueLen} in queue`}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {/* Auxiliary mode — understated, below the primary entry points. */}
+      <Link
+        href={withCats("/dedupe", cats)}
+        className="mt-3 flex items-center justify-between rounded-xl border border-border bg-surface px-5 py-3 text-sm transition-colors hover:border-border-strong hover:bg-surface-2"
+      >
+        <span className="font-medium text-fg">Dedupe</span>
+        <span className="text-muted">Find &amp; remove near-duplicate frames →</span>
+      </Link>
+
+      {/* Per-category progress — unselected categories dimmed. Skeleton cards
+          hold the layout until progress lands. */}
+      <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {progress
+          ? progress.map((p) => (
+              <div key={p.id} className={catSet.has(p.id) ? "" : "opacity-40 transition-opacity"}>
                 <ProgressCard progress={p} />
               </div>
-            ))}
-          </div>
+            ))
+          : CATEGORIES.map((c) => <ProgressCardSkeleton key={c.id} />)}
+      </div>
 
-          {/* Label leaderboard */}
-          {labelStats && <LabelLeaderboard stats={labelStats} cats={cats} />}
-        </>
-      )}
+      {/* Label leaderboard — renders its own skeleton until stats arrive. */}
+      <LabelLeaderboard stats={labelStats} cats={cats} />
     </main>
   );
 }
 
-function LabelLeaderboard({ stats, cats }: { stats: LabelStat[]; cats: CatId[] }) {
-  const max = stats.reduce((m, s) => Math.max(m, s.count), 0);
+function LabelLeaderboard({ stats, cats }: { stats: LabelStat[] | null; cats: CatId[] }) {
+  const max = stats ? stats.reduce((m, s) => Math.max(m, s.count), 0) : 0;
   return (
     <section className="mt-12">
       <div className="mb-4 flex items-baseline justify-between">
@@ -326,32 +325,76 @@ function LabelLeaderboard({ stats, cats }: { stats: LabelStat[]; cats: CatId[] }
         <span className="font-mono text-xs text-faint">ranked by labeled count</span>
       </div>
       <div className="rounded-2xl border border-border bg-surface p-5">
-        <ol className="space-y-2.5">
-          {stats.map((s, i) => (
-            <li key={s.label} className="group flex items-center gap-3">
-              <span className="w-6 text-right font-mono text-xs text-faint">{i + 1}</span>
-              <span className="w-28 shrink-0 truncate text-sm text-fg">{s.label}</span>
-              <div className="h-2 flex-1 overflow-hidden rounded-full bg-elevated">
-                <div
-                  className="h-full rounded-full bg-box transition-[width]"
-                  style={{ width: max > 0 ? `${(s.count / max) * 100}%` : "0%" }}
-                />
-              </div>
-              <span className="w-12 shrink-0 text-right font-mono text-sm text-muted">{s.count}</span>
-              {s.count > 0 ? (
-                <Link
-                  href={reviewHref(s.label, cats)}
-                  className="shrink-0 rounded-pill border border-border px-2.5 py-1 text-xs text-muted opacity-0 transition-all hover:border-border-strong hover:text-fg focus:opacity-100 group-hover:opacity-100"
-                >
-                  Review
-                </Link>
-              ) : (
-                <span className="w-[4.25rem] shrink-0" aria-hidden />
-              )}
-            </li>
-          ))}
-        </ol>
+        {stats === null ? (
+          <LeaderboardSkeleton />
+        ) : (
+          <ol className="space-y-2.5">
+            {stats.map((s, i) => (
+              <li key={s.label} className="group flex items-center gap-3">
+                <span className="w-6 text-right font-mono text-xs text-faint">{i + 1}</span>
+                <span className="w-28 shrink-0 truncate text-sm text-fg">{s.label}</span>
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-elevated">
+                  <div
+                    className="h-full rounded-full bg-box transition-[width]"
+                    style={{ width: max > 0 ? `${(s.count / max) * 100}%` : "0%" }}
+                  />
+                </div>
+                <span className="w-12 shrink-0 text-right font-mono text-sm text-muted">{s.count}</span>
+                {s.count > 0 ? (
+                  <Link
+                    href={reviewHref(s.label, cats)}
+                    className="shrink-0 rounded-pill border border-border px-2.5 py-1 text-xs text-muted opacity-0 transition-all hover:border-border-strong hover:text-fg focus:opacity-100 group-hover:opacity-100"
+                  >
+                    Review
+                  </Link>
+                ) : (
+                  <span className="w-[4.25rem] shrink-0" aria-hidden />
+                )}
+              </li>
+            ))}
+          </ol>
+        )}
       </div>
     </section>
+  );
+}
+
+/** Placeholder mirroring {@link ProgressCard}'s layout while progress loads. */
+function ProgressCardSkeleton() {
+  return (
+    <div className="rounded-2xl border border-border bg-surface p-5">
+      <div className="flex items-baseline justify-between">
+        <div className="h-5 w-24 animate-pulse rounded bg-elevated" />
+        <div className="h-4 w-10 animate-pulse rounded bg-elevated" />
+      </div>
+      <div className="mt-1.5 h-3 w-36 animate-pulse rounded bg-elevated" />
+      <div className="mt-5 space-y-4">
+        {[0, 1].map((i) => (
+          <div key={i}>
+            <div className="mb-1.5 flex justify-between">
+              <div className="h-3 w-12 animate-pulse rounded bg-elevated" />
+              <div className="h-3 w-20 animate-pulse rounded bg-elevated" />
+            </div>
+            <div className="h-1.5 w-full animate-pulse rounded-full bg-elevated" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Placeholder rows for the leaderboard while label stats load. */
+function LeaderboardSkeleton() {
+  return (
+    <ol className="space-y-2.5">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <li key={i} className="flex items-center gap-3">
+          <span className="w-6 text-right font-mono text-xs text-faint">{i + 1}</span>
+          <div className="h-4 w-28 shrink-0 animate-pulse rounded bg-elevated" />
+          <div className="h-2 flex-1 animate-pulse rounded-full bg-elevated" />
+          <div className="h-4 w-12 shrink-0 animate-pulse rounded bg-elevated" />
+        </li>
+      ))}
+    </ol>
   );
 }

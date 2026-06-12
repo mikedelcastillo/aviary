@@ -6,9 +6,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Stage } from "@/components/Stage";
 import { Spotlight } from "@/components/Spotlight";
 import { BoxLayer } from "@/components/BoxLayer";
+import { DeleteToast } from "@/components/DeleteToast";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { Spinner } from "@/components/Spinner";
 import { useAnnotation } from "@/lib/use-annotation";
+import { useImageDelete } from "@/lib/use-image-delete";
 import {
   categoryById,
   filterByCats,
@@ -38,39 +40,42 @@ export default function ReviewPage() {
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [queue, setQueue] = useState<number[] | null>(null);
 
-  useEffect(() => {
+  // Load (or refresh) the manifest + review queue together, returning both so a
+  // post-delete handler can navigate against the freshly-renumbered indices.
+  const loadManifestQueue = useCallback(async (): Promise<{
+    manifest: ManifestEntry[];
+    queue: number[];
+  }> => {
     if (!label) {
       setManifest([]);
       setQueue([]);
-      return;
+      return { manifest: [], queue: [] };
     }
-    let cancelled = false;
     const cparam = searchParams.get("cats");
     const qs = new URLSearchParams({ label });
     if (cparam) qs.set("cats", cparam);
-    (async () => {
-      try {
-        const [mRes, qRes] = await Promise.all([
-          fetch("/api/manifest"),
-          fetch(`/api/review-queue?${qs.toString()}`),
-        ]);
-        const [m, q] = await Promise.all([
-          mRes.json() as Promise<ManifestEntry[]>,
-          qRes.json() as Promise<number[]>,
-        ]);
-        if (cancelled) return;
-        setManifest(m);
-        setQueue(q);
-      } catch {
-        if (cancelled) return;
-        setManifest([]);
-        setQueue([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const [mRes, qRes] = await Promise.all([
+        fetch("/api/manifest"),
+        fetch(`/api/review-queue?${qs.toString()}`),
+      ]);
+      const [m, q] = await Promise.all([
+        mRes.json() as Promise<ManifestEntry[]>,
+        qRes.json() as Promise<number[]>,
+      ]);
+      setManifest(m);
+      setQueue(q);
+      return { manifest: m, queue: q };
+    } catch {
+      setManifest([]);
+      setQueue([]);
+      return { manifest: [], queue: [] };
+    }
   }, [label, searchParams]);
+
+  useEffect(() => {
+    void loadManifestQueue();
+  }, [loadManifestQueue]);
 
   // Position within the review queue.
   const reviewSet = useMemo(() => new Set(queue ?? []), [queue]);
@@ -95,6 +100,10 @@ export default function ReviewPage() {
   const name = entry?.name ?? null;
 
   const { annotation, setLabel, removeBox, undo, redo, loading } = useAnnotation(cat, name);
+
+  // Manual image delete (whole image -> trash tree) with an undo toast.
+  const { pending: pendingDelete, remove: deleteCurrent, undo: undoDelete, dismiss: dismissDelete } =
+    useImageDelete();
 
   const boxes = useMemo(() => annotation?.boxes ?? [], [annotation]);
   const matching = useMemo(() => boxes.filter((b) => b.label === label), [boxes, label]);
@@ -168,6 +177,30 @@ export default function ReviewPage() {
     if (matching.length <= 1) advance();
   }, [activeBox, setLabel, matching.length, advance]);
 
+  // --- Delete the whole image (move to trash), then advance to the next image
+  // in the review queue. Undo restores it and hops back. Navigation is by
+  // identity against a freshly-refetched manifest (delete renumbers indices). ---
+  const handleDelete = useCallback(async () => {
+    if (!cat || !name || !queue || !manifest) return;
+    const nextN = queue.find((idx) => idx > n);
+    const nextId = nextN != null ? { cat: manifest[nextN].cat, name: manifest[nextN].name } : null;
+    await deleteCurrent(cat, name, async () => {
+      const fresh = await loadManifestQueue();
+      const t = nextId
+        ? fresh.manifest.find((e) => e.cat === nextId.cat && e.name === nextId.name)
+        : undefined;
+      router.push(t ? linkFor(t.n) : "/");
+    });
+  }, [cat, name, queue, manifest, n, deleteCurrent, loadManifestQueue, linkFor, router]);
+
+  const handleDeleteUndo = useCallback(() => {
+    void undoDelete(async (p) => {
+      const fresh = await loadManifestQueue();
+      const t = fresh.manifest.find((e) => e.cat === p.cat && e.name === p.name);
+      if (t) router.push(linkFor(t.n));
+    });
+  }, [undoDelete, loadManifestQueue, linkFor, router]);
+
   // --- Keyboard. ------------------------------------------------------------
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -189,6 +222,11 @@ export default function ReviewPage() {
       if (mod && e.key.toLowerCase() === "y") {
         e.preventDefault();
         redo();
+        return;
+      }
+      if (mod && e.key === "Backspace") {
+        e.preventDefault();
+        void handleDelete();
         return;
       }
       if (mod) return;
@@ -221,7 +259,7 @@ export default function ReviewPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, advance, goPrev, goNext, unbox, unlabel, undo, redo, router]);
+  }, [activeBox, advance, goPrev, goNext, unbox, unlabel, undo, redo, handleDelete, router]);
 
   // --- Render guards. -------------------------------------------------------
   if (!label) {
@@ -339,8 +377,28 @@ export default function ReviewPage() {
             </kbd>
             <span className="font-medium">Unbox</span>
           </button>
+          <span className="mx-0.5 h-6 w-px shrink-0 bg-border" aria-hidden />
+          <button
+            type="button"
+            onClick={() => void handleDelete()}
+            title="Delete this image (⌘/Ctrl + Backspace)"
+            className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
+          >
+            <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] text-danger">
+              ⌘⌫
+            </kbd>
+            <span className="font-medium">Delete</span>
+          </button>
         </div>
       </div>
+
+      {pendingDelete && (
+        <DeleteToast
+          name={pendingDelete.name}
+          onUndo={handleDeleteUndo}
+          onDismiss={dismissDelete}
+        />
+      )}
     </main>
   );
 }

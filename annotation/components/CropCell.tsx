@@ -9,6 +9,7 @@ interface CropCellProps {
   onOpen: (cell: ReviewBox) => void;
   onUnbox: (cell: ReviewBox) => void;
   onUnlabel: (cell: ReviewBox) => void;
+  onDelete?: (cell: ReviewBox) => void;
 }
 
 /**
@@ -16,7 +17,7 @@ interface CropCellProps {
  * Click the cell body to open Focus Review; hover to reveal inline Unbox /
  * Unlabel actions (those stop propagation so they don't also navigate).
  */
-export function CropCell({ cell, size = 160, onOpen, onUnbox, onUnlabel }: CropCellProps) {
+export function CropCell({ cell, size = 160, onOpen, onUnbox, onUnlabel, onDelete }: CropCellProps) {
   const src =
     `/api/crop/${cell.cat}/${encodeURIComponent(cell.name)}/${encodeURIComponent(cell.box.id)}` +
     `?size=${size}`;
@@ -59,6 +60,18 @@ export function CropCell({ cell, size = 160, onOpen, onUnbox, onUnlabel }: CropC
         >
           Unlabel
         </button>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(cell);
+            }}
+            className="cursor-pointer rounded border border-danger/60 bg-danger/30 py-1 text-center text-[11px] font-medium text-danger transition-colors hover:border-danger hover:bg-danger/45"
+          >
+            Delete
+          </button>
+        )}
       </div>
     </div>
   );

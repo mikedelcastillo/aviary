@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { CatToggle } from "@/components/CatToggle";
@@ -42,6 +50,7 @@ export default function DedupePage() {
   const [history, setHistory] = useState<Committed[]>([]);
   const [removedCount, setRemovedCount] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Restore the saved category selection after mount (shared with Box/Label).
   useEffect(() => {
@@ -129,6 +138,55 @@ export default function DedupePage() {
     },
     [group],
   );
+
+  // Force a frame into a specific keep/remove state (used by drag-paint, which sets
+  // an explicit target rather than toggling). Honors the same last-keeper guard.
+  const setRemoving = useCallback(
+    (name: string, shouldRemove: boolean) => {
+      setRemoveSet((prev) => {
+        if (shouldRemove === prev.has(name)) return prev; // already in target state
+        const next = new Set(prev);
+        if (shouldRemove) {
+          if (group && group.members.length - next.size <= 1) return prev;
+          next.add(name);
+        } else {
+          next.delete(name);
+        }
+        return next;
+      });
+    },
+    [group],
+  );
+
+  // Click-and-drag "paint" selection: pressing a card picks a direction from its
+  // current state (a kept frame paints "remove", a removed frame paints "keep"),
+  // then dragging across other cards applies that same direction. A drag that
+  // never moves is just a single toggle. The mode lives in a ref so card hover
+  // handlers read it without re-rendering the grid mid-drag.
+  const paintModeRef = useRef<null | "remove" | "keep">(null);
+  const startPaint = useCallback(
+    (name: string, removing: boolean) => {
+      const mode = removing ? "keep" : "remove";
+      paintModeRef.current = mode;
+      setRemoving(name, mode === "remove");
+    },
+    [setRemoving],
+  );
+  const continuePaint = useCallback(
+    (name: string) => {
+      const mode = paintModeRef.current;
+      if (!mode) return;
+      setRemoving(name, mode === "remove");
+    },
+    [setRemoving],
+  );
+  useEffect(() => {
+    const end = () => {
+      paintModeRef.current = null;
+    };
+    window.addEventListener("mouseup", end);
+    return () => window.removeEventListener("mouseup", end);
+  }, []);
 
   // Whether every frame except the suggested keeper is currently marked for removal.
   const allButKeeperSelected =
@@ -223,11 +281,22 @@ export default function DedupePage() {
   // Keyboard map — consistent with Box/Label modes.
   const groupRef = useRef(group);
   groupRef.current = group;
+  const confirmOpenRef = useRef(confirmOpen);
+  confirmOpenRef.current = confirmOpen;
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const t = e.target as HTMLElement | null;
       const tag = t?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || t?.isContentEditable) return;
+      // While the bulk-confirm modal is open, swallow group/threshold keys so the
+      // user can't act on the underlying review UI; Escape just closes the modal.
+      if (confirmOpenRef.current) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setConfirmOpen(false);
+        }
+        return;
+      }
       switch (e.key) {
         case "Escape":
           router.push("/");
@@ -293,6 +362,61 @@ export default function DedupePage() {
     [coldRun],
   );
 
+  // Bulk plan: keep the suggested best frame in every cluster and remove ALL the
+  // other near-duplicates (matching the per-group "select all" action), across
+  // every loaded cluster, grouped by category. We intentionally do NOT use the
+  // per-group safety default (non-keepers *without* labels): `hasLabels` is just
+  // "a non-empty .txt exists", which is true for nearly every auto-collected
+  // frame, so that rule would exclude almost everything. `byCat` drives the
+  // commit; the counts drive the button label + the confirmation modal.
+  const bulkPlan = useMemo(() => {
+    const byCat = new Map<CatId, string[]>();
+    let totalRemove = 0;
+    let groupsAffected = 0;
+    for (const c of clusters ?? []) {
+      // Respect the day/ir/phone selection. Clusters are fetched cat-scoped, but
+      // `serializeCats` sends no filter when all (or none) are selected, so clamp
+      // here too — guards the none-selected case and any stale-fetch window.
+      if (!cats.includes(c.cat)) continue;
+      const losers = c.members.filter((m) => m.name !== c.keepName);
+      if (losers.length === 0) continue;
+      groupsAffected += 1;
+      totalRemove += losers.length;
+      const names = losers.map((m) => m.name);
+      const existing = byCat.get(c.cat);
+      if (existing) existing.push(...names);
+      else byCat.set(c.cat, names);
+    }
+    return { byCat, totalRemove, groupsAffected };
+  }, [clusters, cats]);
+
+  const dedupeAll = useCallback(async () => {
+    if (busy || !clusters || bulkPlan.totalRemove === 0) return;
+    setConfirmOpen(false);
+    setBusy(true);
+    setSaveStatus("saving");
+    try {
+      // One POST per affected category — the endpoint takes a single cat and
+      // invalidates the manifest after each call, so run them sequentially.
+      for (const [cat, names] of bulkPlan.byCat) {
+        const res = await fetch("/api/dedupe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cat, remove: names }),
+        });
+        if (!res.ok) throw new Error(`commit: ${res.status}`);
+      }
+      setRemovedCount((n) => n + bulkPlan.totalRemove);
+      setSaveStatus("saved");
+      setGroupIdx(clusters.length); // jump to the "all groups reviewed" screen
+    } catch (e) {
+      setError((e as Error).message);
+      setSaveStatus("idle");
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, clusters, bulkPlan, setSaveStatus]);
+
   return (
     <main className="mx-auto max-w-5xl px-6 py-10">
       <LoadingOverlay show={loading} label={loadingLabel} />
@@ -307,10 +431,22 @@ export default function DedupePage() {
           </div>
           <p className="mt-1 text-sm text-muted">
             Review near-duplicate frames and remove redundant ones. Removed files move to{" "}
-            <span className="font-mono text-faint">_dedup_removed/</span> (reversible).
+            <span className="font-mono text-faint">dedup/</span> (reversible).
           </p>
         </div>
-        <ThresholdControl value={threshold} onBump={bumpThreshold} />
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(true)}
+            disabled={busy || loading || !clusters || bulkPlan.totalRemove === 0}
+            className="cursor-pointer rounded-pill border border-box/40 bg-box/10 px-4 py-2 text-sm font-medium text-box transition-colors hover:bg-box/20 disabled:opacity-50"
+          >
+            {bulkPlan.totalRemove > 0
+              ? `Dedupe all groups (${bulkPlan.totalRemove})`
+              : "Dedupe all groups"}
+          </button>
+          <ThresholdControl value={threshold} onBump={bumpThreshold} />
+        </div>
       </header>
 
       <div className="mt-6">
@@ -340,7 +476,7 @@ export default function DedupePage() {
         <section className="mt-6">
           <GroupProgress idx={groupIdx} total={total} cat={group.cat} removed={removedCount} />
 
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+          <div className="mt-4 grid select-none grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
             {group.members.map((m, i) => {
               const removing = removeSet.has(m.name);
               const isKeepSuggestion = m.name === group.keepName;
@@ -352,7 +488,13 @@ export default function DedupePage() {
                   index={i}
                   removing={removing}
                   isKeepSuggestion={isKeepSuggestion}
-                  onClick={() => toggle(m.name)}
+                  onMouseDown={() => startPaint(m.name, removing)}
+                  onMouseEnter={() => continuePaint(m.name)}
+                  // Keyboard activation only (detail === 0); mouse clicks are handled
+                  // by the drag-paint mousedown above to avoid double-toggling.
+                  onActivate={(e) => {
+                    if (e.detail === 0) toggle(m.name);
+                  }}
                 />
               );
             })}
@@ -399,9 +541,49 @@ export default function DedupePage() {
           </div>
 
           <p className="mt-3 text-xs text-faint">
-            → / Space delete selected &amp; next · ← back/undo · A select all but the keeper · S skip · 1–9 toggle a frame · green = keep, red = remove
+            → / Space delete selected &amp; next · ← back/undo · A select all but the keeper · S skip · 1–9 toggle a frame · click &amp; drag to paint select/deselect · green = keep, red = remove
           </p>
         </section>
+      )}
+
+      {confirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={() => setConfirmOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 text-left shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-base font-semibold text-fg">
+              Remove {bulkPlan.totalRemove} image{bulkPlan.totalRemove === 1 ? "" : "s"} across{" "}
+              {bulkPlan.groupsAffected} group{bulkPlan.groupsAffected === 1 ? "" : "s"}?
+            </p>
+            <p className="mt-2 text-sm text-muted">
+              Keeps the suggested best frame in each group and removes the rest, across every group
+              at the current similarity distance (<span className="font-mono text-fg">{threshold}</span>
+              ). Removed files move to <span className="font-mono text-faint">dedup/</span> and are
+              reversible.
+            </p>
+            <div className="mt-6 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmOpen(false)}
+                className="cursor-pointer rounded-pill border border-border bg-surface px-4 py-2 text-sm text-muted transition-colors hover:border-border-strong hover:text-fg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={dedupeAll}
+                disabled={busy}
+                className="cursor-pointer rounded-pill border border-box/40 bg-box/10 px-4 py-2 text-sm font-medium text-box transition-colors hover:bg-box/20 disabled:opacity-50"
+              >
+                Remove {bulkPlan.totalRemove} image{bulkPlan.totalRemove === 1 ? "" : "s"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </main>
   );
@@ -468,19 +650,25 @@ function ThumbCard({
   index,
   removing,
   isKeepSuggestion,
-  onClick,
+  onMouseDown,
+  onMouseEnter,
+  onActivate,
 }: {
   cat: CatId;
   member: { name: string; hasLabels: boolean; sizeBytes: number; dist: number };
   index: number;
   removing: boolean;
   isKeepSuggestion: boolean;
-  onClick: () => void;
+  onMouseDown: () => void;
+  onMouseEnter: () => void;
+  onActivate: (e: ReactMouseEvent) => void;
 }) {
   return (
     <button
       type="button"
-      onClick={onClick}
+      onMouseDown={onMouseDown}
+      onMouseEnter={onMouseEnter}
+      onClick={onActivate}
       className={
         "group relative flex cursor-pointer flex-col overflow-hidden rounded-xl border-2 bg-surface text-left transition-colors " +
         (removing ? "border-danger" : "border-box")
@@ -545,7 +733,7 @@ function DoneState({
       <p className="text-base font-semibold text-fg">All {groups} groups reviewed</p>
       <GroupNote>
         Removed <span className="font-mono text-fg">{removed}</span> image
-        {removed === 1 ? "" : "s"} to <span className="font-mono text-faint">_dedup_removed/</span>.
+        {removed === 1 ? "" : "s"} to <span className="font-mono text-faint">dedup/</span>.
       </GroupNote>
       <div className="mt-5 flex items-center justify-center gap-2">
         {canUndo && (
