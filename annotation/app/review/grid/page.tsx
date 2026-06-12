@@ -8,7 +8,15 @@ import { DeleteToast } from "@/components/DeleteToast";
 import { Spinner } from "@/components/Spinner";
 import { useImageDelete } from "@/lib/use-image-delete";
 import { useSaveStore } from "@/lib/save-store";
-import { parseCats, reviewHref, withCats, type Box, type CatId, type ReviewBox } from "@/lib/types";
+import {
+  parseCats,
+  reviewHref,
+  UNKNOWN_LABEL,
+  withCats,
+  type Box,
+  type CatId,
+  type ReviewBox,
+} from "@/lib/types";
 
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -201,6 +209,18 @@ function GridReview() {
       ),
     [act],
   );
+  // Relabel the box as the catch-all "unknown" kind (undo restores the prior
+  // label). Hidden when we're already reviewing unknown_bird (no-op there).
+  const canUnknown = label !== UNKNOWN_LABEL;
+  const labelUnknown = useCallback(
+    (cell: ReviewBox) =>
+      act(
+        cell,
+        { op: "setLabel", id: cell.box.id, label: UNKNOWN_LABEL },
+        { op: "setLabel", id: cell.box.id, label: cell.box.label },
+      ),
+    [act],
+  );
 
   // --- Whole-image delete (hides every cell owned by the image). -------------
   // Hiding runs inside the onDeleted callback, which the hook only fires after a
@@ -383,6 +403,7 @@ function GridReview() {
               onOpen={openFocus}
               onUnbox={unbox}
               onUnlabel={unlabel}
+              onUnknown={canUnknown ? labelUnknown : undefined}
               onDelete={handleDelete}
             />
           ))}

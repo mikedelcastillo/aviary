@@ -9,15 +9,18 @@ interface CropCellProps {
   onOpen: (cell: ReviewBox) => void;
   onUnbox: (cell: ReviewBox) => void;
   onUnlabel: (cell: ReviewBox) => void;
+  /** Relabel the box as the catch-all "unknown" kind. Omitted when reviewing it. */
+  onUnknown?: (cell: ReviewBox) => void;
   onDelete?: (cell: ReviewBox) => void;
 }
 
 /**
- * One grid-review cell: the box cropped tight and scaled to fill the square.
- * Click the cell body to open Focus Review; hover to reveal inline Unbox /
- * Unlabel actions (those stop propagation so they don't also navigate).
+ * One grid-review cell: the box shown whole (contained, never cropped) with a
+ * thin context margin and the green box drawn on it. Click the cell body to open
+ * Focus Review; hover to reveal inline Unbox / Unlabel actions (those stop
+ * propagation so they don't also navigate).
  */
-export function CropCell({ cell, size = 160, onOpen, onUnbox, onUnlabel, onDelete }: CropCellProps) {
+export function CropCell({ cell, size = 160, onOpen, onUnbox, onUnlabel, onUnknown, onDelete }: CropCellProps) {
   const src =
     `/api/crop/${cell.cat}/${encodeURIComponent(cell.name)}/${encodeURIComponent(cell.box.id)}` +
     `?size=${size}`;
@@ -60,6 +63,18 @@ export function CropCell({ cell, size = 160, onOpen, onUnbox, onUnlabel, onDelet
         >
           Unlabel
         </button>
+        {onUnknown && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onUnknown(cell);
+            }}
+            className="cursor-pointer rounded border border-border-strong bg-white/10 py-1 text-center text-[11px] font-medium text-fg transition-colors hover:bg-white/20"
+          >
+            Unknown
+          </button>
+        )}
         {onDelete && (
           <button
             type="button"

@@ -17,6 +17,7 @@ import {
   gridReviewHref,
   parseCats,
   withCats,
+  UNKNOWN_LABEL,
   type ManifestEntry,
   type NormRect,
   type StageHandle,
@@ -177,6 +178,16 @@ export default function ReviewPage() {
     if (matching.length <= 1) advance();
   }, [activeBox, setLabel, matching.length, advance]);
 
+  // Relabel the active box as the catch-all "unknown" kind. Pointless when we're
+  // already reviewing that label, so it's a no-op there. Like (un)label, the box
+  // leaves this queue, so advance once it was the last match on this image.
+  const canUnknown = label !== UNKNOWN_LABEL;
+  const labelUnknown = useCallback(() => {
+    if (!activeBox || !canUnknown) return;
+    setLabel(activeBox.id, UNKNOWN_LABEL);
+    if (matching.length <= 1) advance();
+  }, [activeBox, canUnknown, setLabel, matching.length, advance]);
+
   // --- Delete the whole image (move to trash), then advance to the next image
   // in the review queue. Undo restores it and hops back. Navigation is by
   // identity against a freshly-refetched manifest (delete renumbers indices). ---
@@ -256,10 +267,15 @@ export default function ReviewPage() {
         unlabel();
         return;
       }
+      if (e.key.toLowerCase() === "u" && activeBox && canUnknown) {
+        e.preventDefault();
+        labelUnknown();
+        return;
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, advance, goPrev, goNext, unbox, unlabel, undo, redo, handleDelete, router]);
+  }, [activeBox, canUnknown, advance, goPrev, goNext, unbox, unlabel, labelUnknown, undo, redo, handleDelete, router]);
 
   // --- Render guards. -------------------------------------------------------
   if (!label) {
@@ -366,6 +382,20 @@ export default function ReviewPage() {
             </kbd>
             <span className="font-medium">Unlabel</span>
           </button>
+          {canUnknown && (
+            <button
+              type="button"
+              onClick={labelUnknown}
+              disabled={!hasMatch}
+              title={`Relabel as ${UNKNOWN_LABEL} (U)`}
+              className="flex cursor-pointer items-center gap-2 rounded-pill border border-border bg-surface-2 px-3 py-1.5 text-sm text-muted transition-colors hover:border-border-strong hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+            >
+              <kbd className="grid h-5 min-w-5 place-items-center rounded border border-border-strong px-1 font-mono text-[11px] uppercase text-faint">
+                U
+              </kbd>
+              <span className="font-medium">Unknown</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={unbox}

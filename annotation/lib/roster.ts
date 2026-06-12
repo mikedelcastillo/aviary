@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { ROSTER_PATH } from "./paths";
-import type { Pill, PillRule } from "./types";
+import { UNKNOWN_LABEL, type Pill, type PillRule } from "./types";
 
 export interface RosterEntry {
   name: string;
@@ -46,7 +46,7 @@ export function nameToIndex(): Map<string, number> {
   return m;
 }
 
-const UNKNOWN = "unknown_bird";
+const UNKNOWN = UNKNOWN_LABEL;
 
 /**
  * Pills for a category, in roster file order, with unknown_bird always last.

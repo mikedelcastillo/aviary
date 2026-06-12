@@ -87,21 +87,19 @@ export default function LabelPage() {
     };
   }, [loadManifestQueue]);
 
-  // Selected-category subset, plus the work queue (boxed-but-unlabeled images)
-  // as manifest entries in global order.
+  // Selected-category subset. `queueSet` (boxed-but-unlabeled image indices) is a
+  // membership Set only — it drives Space's "jump to next unlabeled", NOT the
+  // navigation order.
   const filtered = useMemo(() => (manifest ? filterByCats(manifest, cats) : []), [manifest, cats]);
-  const queueEntries = useMemo(() => {
-    const set = new Set(queue ?? []);
-    return filtered.filter((e) => set.has(e.n));
-  }, [filtered, queue]);
+  const queueSet = useMemo(() => new Set(queue ?? []), [queue]);
 
-  // The navigation sequence (counter + prev/next). Both modes walk ONLY the work
-  // queue (boxed-but-unlabeled images) so an un-boxed image is never presented
-  // for labeling. Sequential keeps global order; random applies a stable seeded
-  // shuffle. Already-labeled / un-boxed images are skipped entirely.
+  // The navigation sequence walked by prev/next: EVERY in-scope image, in global
+  // order (sequential) or one fixed seeded shuffle (random). Shuffling the full
+  // manifest — whose contents never change as you label — keeps the order stable
+  // across renders/navigation, so Left always returns to the image you just saw.
   const ordered = useMemo(
-    () => (seed == null ? queueEntries : orderBySeed(queueEntries, seed)),
-    [seed, queueEntries],
+    () => (seed == null ? filtered : orderBySeed(filtered, seed)),
+    [seed, filtered],
   );
   const total = ordered.length;
   const globalInRange = manifest != null && Number.isInteger(n) && n >= 0 && n < manifest.length;
@@ -109,13 +107,13 @@ export default function LabelPage() {
   const inCats = baseEntry != null && cats.includes(baseEntry.cat);
   const pos = baseEntry && inCats ? ordered.findIndex((e) => e.n === n) : -1;
 
-  // Deep-link guard: if `n` isn't a valid stop in the nav sequence (un-boxed,
-  // wrong category, or already labeled), snap to the first queued image at/after
-  // it (else the first in the sequence). With the queue loaded but empty there's
-  // nothing to label — go home rather than render an un-boxed image's seed boxes.
+  // Deep-link guard. Nothing left to label (or no in-scope images) → home rather
+  // than strand the user. Otherwise any in-scope image is a valid stop (arrows
+  // browse the whole set), so only snap when `n` is out of range / wrong category
+  // — to the nearest in-scope image at/after it (else the first in the sequence).
   useEffect(() => {
     if (manifest == null || queue == null) return; // still loading
-    if (ordered.length === 0) {
+    if (queue.length === 0 || ordered.length === 0) {
       router.replace("/");
       return;
     }
@@ -187,21 +185,20 @@ export default function LabelPage() {
     if (next) router.push(withNav(`/label/${next.n}`, cats, seed));
   }, [ordered, n, router, cats, seed]);
 
+  // Space / image-completion: jump to the next image that still NEEDS labeling,
+  // in the fixed order. Scan starts at idx+1 so the just-completed current image
+  // is never re-shown. Home when nothing's left to label.
   const advance = useCallback(() => {
-    if (seed == null) {
-      // Sequential: the next queued image after this one (unchanged behavior).
-      const next = (queue ?? []).find(
-        (idx) => idx > n && (manifest == null || cats.includes(manifest[idx].cat)),
-      );
-      router.push(next != null ? withNav(`/label/${next}`, cats, seed) : "/");
-      return;
-    }
-    // Random: the next image in the shuffled work queue (`ordered`). Wraps to
-    // the start if `n` isn't itself queued, e.g. arrived here via prev/next.
     const idx = ordered.findIndex((e) => e.n === n);
-    const next = idx >= 0 ? ordered[idx + 1] : ordered[0];
-    router.push(next ? withNav(`/label/${next.n}`, cats, seed) : "/");
-  }, [seed, queue, n, manifest, cats, ordered, router]);
+    let target: ManifestEntry | undefined;
+    for (let i = idx + 1; i < ordered.length; i++) {
+      if (queueSet.has(ordered[i].n)) {
+        target = ordered[i];
+        break;
+      }
+    }
+    router.push(target ? withNav(`/label/${target.n}`, cats, seed) : "/");
+  }, [ordered, n, queueSet, cats, seed, router]);
 
   // --- Assign a label to the active box, then advance if image is done. -----
   const pick = useCallback(
@@ -412,7 +409,8 @@ export default function LabelPage() {
         </button>
       </div>
 
-      {/* Top-right counter. */}
+      {/* Top-right counter — position within ALL in-scope images (the full
+          seeded order), not the remaining-to-label count. */}
       {total > 0 && (
         <div className="pointer-events-none fixed right-4 top-4 z-30 font-mono text-xs text-faint">
           {pos + 1} / {total}

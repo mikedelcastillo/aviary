@@ -8,6 +8,7 @@ import { CatToggle } from "@/components/CatToggle";
 import {
   ALL_CATS,
   CATEGORIES,
+  filterByCats,
   newSeed,
   orderBySeed,
   parseCats,
@@ -17,6 +18,7 @@ import {
   withNav,
   type CatId,
   type CategoryProgress,
+  type ManifestEntry,
 } from "@/lib/types";
 import { useHistoryStore } from "@/lib/history-store";
 
@@ -52,6 +54,10 @@ function sumTotals(progress: CategoryProgress[]): Totals {
 export default function Home() {
   const router = useRouter();
   const [progress, setProgress] = useState<CategoryProgress[] | null>(null);
+  // Full global manifest — lets the entry buttons compute the FIRST to-do image
+  // in the same seeded order the Box/Label pages walk, so entry lands exactly
+  // where the page would (no deep-link-guard flash). Static per session.
+  const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [queue, setQueue] = useState<number[] | null>(null);
   const [boxQueue, setBoxQueue] = useState<number[] | null>(null);
   const [entry, setEntry] = useState<{ box: number; label: number } | null>(null);
@@ -91,6 +97,25 @@ export default function Home() {
       /* ignore */
     }
   }, [random]);
+
+  // Full manifest is selection-independent (ignores cats) — fetch once.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/manifest")
+      .then((res) => {
+        if (!res.ok) throw new Error(`manifest: ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setManifest(data as ManifestEntry[]);
+      })
+      .catch((e) => {
+        if (!cancelled) setError((e as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Per-category progress is selection-independent — fetch once.
   useEffect(() => {
@@ -172,21 +197,30 @@ export default function Home() {
   const labelTarget = entry?.label ?? (queue && queue.length > 0 ? queue[0] : 0);
   const labelEmpty = queue !== null && queue.length === 0;
 
-  // Enter a mode. In random mode, start at the FIRST image of the seeded shuffle
-  // (not the global-first one) so the forward-only walk covers the whole worklist
-  // and only finishes when everything is actually done. The same seed drives the
-  // URL and the target, so the entry matches the page's computed sequence.
+  // Enter a mode. Land on the FIRST image still needing work in the seeded order
+  // — computed exactly as the Box/Label page does (shuffle the full in-scope
+  // manifest with the same seed, then pick the first to-do), so entry matches the
+  // page's sequence and the deep-link guard never has to snap. Falls back to the
+  // server entry point until the manifest lands.
+  const filteredHome = useMemo(
+    () => (manifest ? filterByCats(manifest, cats) : []),
+    [manifest, cats],
+  );
   const enterBox = () => {
     const seed = random ? newSeed() : null;
-    const target =
-      seed != null && boxQueue && boxQueue.length > 0 ? orderBySeed([...boxQueue], seed)[0] : boxTarget;
+    const orderedHome = orderBySeed(filteredHome, seed);
+    const set = new Set(boxQueue ?? []);
+    const first = orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
+    const target = first?.n ?? boxTarget;
     router.push(withNav(`/box/${target}`, cats, seed));
   };
   const enterLabel = () => {
     if (labelEmpty) return;
     const seed = random ? newSeed() : null;
-    const target =
-      seed != null && queue && queue.length > 0 ? orderBySeed([...queue], seed)[0] : labelTarget;
+    const orderedHome = orderBySeed(filteredHome, seed);
+    const set = new Set(queue ?? []);
+    const first = orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
+    const target = first?.n ?? labelTarget;
     router.push(withNav(`/label/${target}`, cats, seed));
   };
 

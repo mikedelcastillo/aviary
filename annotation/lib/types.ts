@@ -167,6 +167,12 @@ export function gridReviewHref(label: string, cats: CatId[]): string {
   return `/review/grid?${params.toString()}`;
 }
 
+/**
+ * The catch-all roster label for birds that can't be confidently identified.
+ * Shared between server (roster ordering) and client (review "mark unknown").
+ */
+export const UNKNOWN_LABEL = "unknown_bird";
+
 /** A single bounding box in normalized YOLO geometry (center + size, 0..1). */
 export interface Box {
   /** Stable client key — used for hover/queue/undo. NOT written to the YOLO .txt. */

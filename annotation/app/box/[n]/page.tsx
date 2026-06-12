@@ -55,7 +55,9 @@ export default function BoxPage() {
 
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [draft, setDraft] = useState<NormRect | null>(null);
-  // In random mode, restrict navigation to images that still need boxing.
+  // The set of still-unboxed images. Used ONLY as a membership Set so Space
+  // jumps to the next image that still needs boxing — it does NOT drive the
+  // navigation order, so it can refetch freely without disturbing prev/next.
   const [boxQueue, setBoxQueue] = useState<number[] | null>(null);
 
   const stageRef = useRef<StageHandle>(null);
@@ -81,26 +83,12 @@ export default function BoxPage() {
     void loadManifest();
   }, [loadManifest]);
 
-  // In random mode, fetch the set of still-unboxed images so the shuffle skips
-  // ones already done. Sequential mode shows everything, so no fetch needed.
-  //
-  // This snapshot is captured ONCE per (seed, category-scope) and deliberately
-  // not refreshed on navigation. Depending on the `cats` array would re-run the
-  // effect on every route change — it's a fresh array reference each render — and
-  // since boxing an image drops it from the queue, the refetched list shrinks.
-  // `orderBySeed` is a function of the list's contents, so a shorter list yields a
-  // wholly different permutation: prev/next would jump to seemingly random images.
-  // A stable string key (value-compared in the deps) freezes the worklist so the
-  // seeded order stays put and prev/next walk a coherent sequence.
+  // Fetch the still-unboxed worklist for the current category scope. This only
+  // feeds Space's "jump to next unboxed" — navigation order is a pure function of
+  // the full manifest + seed, so a stale/shrinking queue can no longer scramble
+  // prev/next. Fetched on scope change and after a delete/undo.
   const catsKey = serializeCats(cats);
-  // Load (or refresh) the still-unboxed worklist for random mode. Called on
-  // seed/scope change and after a delete/undo (a deletion legitimately changes
-  // the worklist; the reshuffle that implies is acceptable for that rare action).
-  const loadBoxQueue = useCallback(async (): Promise<number[] | null> => {
-    if (seed == null) {
-      setBoxQueue(null);
-      return null;
-    }
+  const loadBoxQueue = useCallback(async (): Promise<number[]> => {
     const qs = catsKey ? `?cats=${catsKey}` : "";
     try {
       const res = await fetch(`/api/box-queue${qs}`);
@@ -111,22 +99,24 @@ export default function BoxPage() {
       setBoxQueue([]);
       return [];
     }
-  }, [seed, catsKey]);
+  }, [catsKey]);
 
   useEffect(() => {
     void loadBoxQueue();
   }, [loadBoxQueue]);
 
-  // The navigation sequence. Sequential: every in-scope image in global order.
-  // Random: only still-unboxed images, in a stable seeded shuffle. The counter
-  // + prev/next walk `ordered`; the path index `n` stays global.
+  // The navigation sequence walked by prev/next: EVERY in-scope image, in global
+  // order (sequential) or one fixed seeded shuffle (random). Because it shuffles
+  // the full manifest — whose contents never change as you box — the order is
+  // identical on every render/navigation, so Left always returns to the image you
+  // just saw. The path index `n` stays global.
   const filtered = useMemo(() => (manifest ? filterByCats(manifest, cats) : []), [manifest, cats]);
-  const ordered = useMemo(() => {
-    if (seed == null) return filtered;
-    if (boxQueue == null) return []; // queue still loading
-    const set = new Set(boxQueue);
-    return orderBySeed(filtered.filter((e) => set.has(e.n)), seed);
-  }, [filtered, seed, boxQueue]);
+  const ordered = useMemo(
+    () => (seed == null ? filtered : orderBySeed(filtered, seed)),
+    [filtered, seed],
+  );
+  // Membership Set of still-unboxed images — drives Space's "jump to next unboxed".
+  const boxSet = useMemo(() => (boxQueue ? new Set(boxQueue) : null), [boxQueue]);
   const total = ordered.length;
   const globalInRange = manifest != null && Number.isInteger(n) && n >= 0 && n < manifest.length;
   const entry = globalInRange ? manifest![n] : null;
@@ -160,17 +150,21 @@ export default function BoxPage() {
   }, [cat, name]);
 
   // --- Navigation (within the selected categories) --------------------------
-  const goNext = useCallback(() => {
-    // Advancing confirms the image — but `boxed` must always mean "the user
-    // placed boxes here", so only mark it boxed when boxes actually exist
-    // (and revert a stale flag if they were all removed). On the last image
-    // there's nothing to advance to, so head home.
+  // Confirm the current image on the way out — `boxed` must always mean "the user
+  // placed boxes here", so set it iff boxes actually exist (reverting a stale flag).
+  const confirmCurrent = useCallback(() => {
     const hasBoxes = (annotation?.boxes.length ?? 0) > 0;
     if ((annotation?.boxed ?? false) !== hasBoxes) setBoxed(hasBoxes);
+  }, [annotation?.boxes.length, annotation?.boxed, setBoxed]);
+
+  // Right arrow: step one image forward in the fixed order (clamp at the end —
+  // finishing the worklist is Space's job now). Still confirms the current image.
+  const goNext = useCallback(() => {
+    confirmCurrent();
     const idx = ordered.findIndex((e) => e.n === n);
     const next = idx >= 0 ? ordered[idx + 1] : undefined;
-    router.push(next ? withNav(`/box/${next.n}`, cats, seed) : "/");
-  }, [ordered, n, annotation?.boxes.length, annotation?.boxed, setBoxed, router, cats, seed]);
+    if (next) router.push(withNav(`/box/${next.n}`, cats, seed));
+  }, [confirmCurrent, ordered, n, router, cats, seed]);
 
   const goPrev = useCallback(() => {
     const idx = ordered.findIndex((e) => e.n === n);
@@ -178,6 +172,22 @@ export default function BoxPage() {
     if (!prev) return;
     router.push(withNav(`/box/${prev.n}`, cats, seed));
   }, [ordered, n, router, cats, seed]);
+
+  // Space: jump to the next image that still NEEDS boxing, in the fixed order.
+  // Scan starts at idx+1 so the just-confirmed current image is never re-shown.
+  // Home when nothing's left. Without a loaded queue, fall back to plain next.
+  const advance = useCallback(() => {
+    confirmCurrent();
+    const idx = ordered.findIndex((e) => e.n === n);
+    let target: ManifestEntry | undefined;
+    for (let i = idx + 1; i < ordered.length; i++) {
+      if (!boxSet || boxSet.has(ordered[i].n)) {
+        target = ordered[i];
+        break;
+      }
+    }
+    router.push(target ? withNav(`/box/${target.n}`, cats, seed) : "/");
+  }, [confirmCurrent, ordered, n, boxSet, router, cats, seed]);
 
   // --- Undo/redo: history is session-global, so an edit made before advancing
   // is undone by hopping back to the image it happened on. ------------------
@@ -305,7 +315,12 @@ export default function BoxPage() {
         void handleDelete();
         return;
       }
-      if (e.key === "ArrowRight" || e.key === " " || e.code === "Space") {
+      if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        advance();
+        return;
+      }
+      if (e.key === "ArrowRight") {
         e.preventDefault();
         goNext();
         return;
@@ -331,12 +346,13 @@ export default function BoxPage() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleUndo, handleRedo, handleDelete, goNext, goPrev, toggleRandom, clearBoxes, router]);
+  }, [handleUndo, handleRedo, handleDelete, advance, goNext, goPrev, toggleRandom, clearBoxes, router]);
 
   // --- Render guards --------------------------------------------------------
+  // Render once the manifest is in — navigation/order don't need the box queue
+  // (it only feeds Space, which tolerates a late-arriving Set).
   if (
     manifest == null ||
-    (seed != null && boxQueue == null) ||
     (entry != null && !inCats && filtered.length > 0)
   ) {
     // Loading, or briefly mid-redirect to an in-scope image.
@@ -449,14 +465,16 @@ export default function BoxPage() {
           >
             ‹
           </button>
+          {/* Position within ALL in-scope images (the full seeded order), not the
+              remaining-to-box count. */}
           <span className="px-2 font-mono text-xs tabular-nums text-fg">
             {pos + 1} / {total}
           </span>
           <button
             type="button"
             onClick={goNext}
-            disabled={pos < 0}
-            aria-label={pos === total - 1 ? "Confirm & finish" : "Next image (confirm)"}
+            disabled={pos < 0 || pos === total - 1}
+            aria-label="Next image (confirm)"
             className="flex h-7 w-7 items-center justify-center rounded-full text-muted transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-30"
           >
             ›

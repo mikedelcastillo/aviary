@@ -55,7 +55,20 @@ export const Stage = forwardRef<StageHandle, StageProps>(function Stage(
 ) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [natural, setNatural] = useState({ width: 0, height: 0 });
+  const [fitKey, setFitKey] = useState<string | null>(null);
   const pz = usePanZoom(viewportRef, natural);
+
+  // Reset the measured size whenever the source changes. onReady fires from the
+  // effect below only when natural.width/height change; without this reset, loading
+  // an image with the SAME dimensions as the previous one changes no dep, so onReady
+  // never fires and the parent's `ready` flag stays false (spinner spins forever —
+  // seen after Ctrl+Backspace delete, which swaps the image in place).
+  const prevSrc = useRef(src);
+  if (prevSrc.current !== src) {
+    prevSrc.current = src;
+    setNatural({ width: 0, height: 0 });
+    setFitKey(null);
+  }
 
   const handle = useMemo<StageHandle>(
     () => ({
@@ -76,7 +89,6 @@ export const Stage = forwardRef<StageHandle, StageProps>(function Stage(
   // source changes. Kept in an effect (not an onLoad rAF) so it always runs
   // AFTER `natural` is committed to state — otherwise fit() reads a stale 0x0
   // size and the image sticks to the top-left corner.
-  const [fitKey, setFitKey] = useState<string | null>(null);
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
   useEffect(() => {

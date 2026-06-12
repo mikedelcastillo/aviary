@@ -265,14 +265,26 @@ async function moveFile(src: string, dest: string): Promise<void> {
 }
 
 /**
- * Move a bundle of files, refusing to clobber any existing destination. If a
- * move fails partway, roll back the moves already made (LIFO, best effort) so a
- * bundle is never left split across the raw and removed trees. EXDEV-safe.
+ * Move a bundle of files. If a move fails partway, roll back the moves already
+ * made (LIFO, best effort) so a bundle is never left split across the raw and
+ * removed trees. EXDEV-safe.
+ *
+ * `overwrite` controls collision handling:
+ *  - false (restore, side -> raw): refuse to clobber an existing destination. A
+ *    live raw file at the destination is a genuine conflict, never data to lose.
+ *  - true (remove/delete, raw -> side): a destination that already exists is a
+ *    STALE trash copy of the same name — the image was soft-deleted before and
+ *    re-appeared in the raw tree (e.g. an Immich re-import). The current raw copy
+ *    supersedes it, so let the move overwrite. Without this, a single recurring
+ *    name collision would 500 the whole dedupe/delete batch.
  */
-async function moveBundle(pairs: Transfer[]): Promise<string[]> {
+async function moveBundle(pairs: Transfer[], overwrite = false): Promise<string[]> {
   // Precheck all destinations first so a clobber aborts before anything moves.
-  for (const p of pairs) {
-    if (existsSync(p.dest)) throw new Error(`refusing to overwrite existing file: ${p.dest}`);
+  // Skipped when overwriting: fs.rename / copyFile already replace the dest.
+  if (!overwrite) {
+    for (const p of pairs) {
+      if (existsSync(p.dest)) throw new Error(`refusing to overwrite existing file: ${p.dest}`);
+    }
   }
   const moved: string[] = [];
   const done: Transfer[] = [];
@@ -304,7 +316,7 @@ async function moveBundle(pairs: Transfer[]): Promise<string[]> {
  */
 export async function removeImage(cat: CatId, name: string): Promise<{ moved: string[] }> {
   return withFileLock(sidecarFsPath(cat, name, ".json"), async () => {
-    const moved = await moveBundle(transferPairs(cat, name, REMOVED_TREE, "out"));
+    const moved = await moveBundle(transferPairs(cat, name, REMOVED_TREE, "out"), true);
     if (moved.length) {
       invalidateManifest();
       dropFromCache(cat, [name]);
@@ -331,7 +343,7 @@ export async function restoreImage(cat: CatId, name: string): Promise<{ moved: s
  */
 export async function deleteImage(cat: CatId, name: string): Promise<{ moved: string[] }> {
   return withFileLock(sidecarFsPath(cat, name, ".json"), async () => {
-    const moved = await moveBundle(transferPairs(cat, name, DELETED_TREE, "out"));
+    const moved = await moveBundle(transferPairs(cat, name, DELETED_TREE, "out"), true);
     if (moved.length) {
       invalidateManifest();
       dropFromCache(cat, [name]);
