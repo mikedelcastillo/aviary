@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Build the live (real-time CCTV) bird detector end-to-end:
-# prepare dataset from labeled raw data -> train -> export training/models/live.pt
+# prepare dataset from labeled raw data -> train -> export data/models/live-NNN.pt
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+MODEL=live
 
 uv sync
 ./scripts/install-gpu.sh
@@ -15,17 +17,32 @@ uv sync
 export PYTHONPATH="$PWD/training${PYTHONPATH:+:$PYTHONPATH}"
 
 SOURCE="${AVIARY_LABEL_SOURCE:-data/annotation/raw}"
-DATASET="data/training/datasets/live"
+DATASET="data/training/datasets/$MODEL"
 
 rm -rf "$DATASET"
 uv run --no-sync python training/scripts/prepare_dataset.py \
   --source "$SOURCE" \
   --output "$DATASET" \
-  --model live
+  --model "$MODEL"
 
-mkdir -p training/models
+# Export to data/models/<model>-NNN.pt, where NNN is the next zero-padded
+# sequence number after the highest existing one (so each run is preserved and
+# never clobbers the model the server may currently be loading).
+MODELS_DIR="data/models"
+mkdir -p "$MODELS_DIR"
+last=0
+for f in "$MODELS_DIR/$MODEL"-[0-9][0-9][0-9].pt; do
+  [ -e "$f" ] || continue
+  n=${f##*-}; n=${n%.pt}
+  n=$((10#$n))
+  ((n > last)) && last=$n
+done
+EXPORT="$MODELS_DIR/$MODEL-$(printf '%03d' "$((last + 1))").pt"
+
 uv run --no-sync python training/scripts/train.py \
   --data "$DATASET/dataset.yaml" \
-  --name live \
-  --export-to training/models/live.pt \
+  --name "$MODEL" \
+  --export-to "$EXPORT" \
   "$@"
+
+echo "Exported $MODEL model to $EXPORT"
