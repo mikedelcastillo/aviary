@@ -6,8 +6,9 @@ import { listImages } from "./annotation-io";
 import { ensureHashes, countCached, type HashInfo } from "./hash-cache";
 import type { CatId } from "./types";
 
-// Gentle background concurrency so warming doesn't starve Box/Label work.
-const WARM_CONCURRENCY = 4;
+// Gentle background concurrency so warming doesn't starve other requests (the
+// homepage's label-stats/progress scans share CPU and the libuv thread pool).
+const WARM_CONCURRENCY = 2;
 // Foreground (dedupe page) may hash faster.
 const DEDUPE_CONCURRENCY = 8;
 

@@ -186,6 +186,12 @@ export default function Home() {
   // Warm the dedupe hash index for the selected categories and poll coverage so
   // the Dedupe card shows how much has been traversed. The GET both warms (side
   // effect) and reports {done,total,running}. Stop once fully indexed and idle.
+  //
+  // The first poll is DEFERRED: warming decodes every image through sharp, which
+  // pegs CPU and the libuv thread pool. Firing it at mount would collide with the
+  // homepage's own data fetches (notably /api/label-stats, which reads thousands
+  // of sidecars) and stall them. Letting the page load first, then warming in the
+  // background, keeps both healthy. Warm is idempotent so the small delay is free.
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -210,7 +216,7 @@ export default function Home() {
       }
       if (!cancelled) timer = setTimeout(poll, 2000);
     };
-    poll();
+    timer = setTimeout(poll, 2500);
     return () => {
       cancelled = true;
       clearTimeout(timer);
