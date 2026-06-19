@@ -66,12 +66,18 @@ Run from the repo root so the scripts' default relative paths resolve.
    --device cuda:0`. To run the prepare/train/evaluate steps by hand instead, see
    [`training/README.md`](training/README.md).
 
-5. Set `TAPO_RSTP` in `.env` (cameras are defined in
-   `server/lib/config.py`), then run the server:
+5. Set `TAPO_CREDENTIALS=user:password` in `.env` (only the Tapo camera-account
+   credentials), then run the server:
 
    ```bash
    ./scripts/server.sh
    ```
+
+   Cameras are auto-discovered: the server scans the local subnet for hosts with
+   RTSP `:554` open and a working `/stream1`, then consumes each one. Set
+   `TAPO_DISCOVERY_CIDR` if auto-detect picks the wrong subnet (e.g. in Docker).
+   Send the bot `/discover` to re-run the scan and pick up cameras at runtime. The
+   scan port and stream path live in `DiscoveryConfig` in `server/lib/config.py`.
 
 ## Practical Dataset Targets
 

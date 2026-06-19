@@ -1,17 +1,17 @@
 // Server-only dedupe orchestration: hash -> cluster -> keep-best metadata.
 // Delegates hashing to lib/hash-cache.ts (which uses lib/phash.ts); no sharp here.
-import { promises as fs } from "node:fs";
 import { sidecarFsPath } from "./paths";
 import { CATEGORIES, type CatId, type DedupeCluster, type DedupeMember } from "./types";
 import { listImages } from "./annotation-io";
 import { type HashInfo } from "./hash-cache";
 import { ensureCatHashesForeground } from "./hash-indexer";
 import { hamming } from "./phash";
+import { statLimited } from "./fs-limit";
 
 /** True when a non-empty YOLO .txt sidecar exists (real labels; empty = negative). */
 async function hasLabels(cat: CatId, name: string): Promise<boolean> {
   try {
-    const st = await fs.stat(sidecarFsPath(cat, name, ".txt"));
+    const st = await statLimited(sidecarFsPath(cat, name, ".txt"));
     return st.size > 0;
   } catch {
     return false;
@@ -49,7 +49,12 @@ export async function clusterCategory(cat: CatId, threshold: number): Promise<De
 
   // Greedy anchor clustering: attach each image to the existing cluster whose
   // anchor is closest, if within threshold; otherwise start a new cluster.
+  // This is an O(images × clusters) synchronous scan — on large sets it would
+  // hog the single Node event loop for seconds, stalling concurrent requests
+  // (the homepage's /api/manifest, progress polls). Yield to the event loop
+  // every few hundred images so those requests still get serviced.
   const clusters: Cluster[] = [];
+  let scanned = 0;
   for (const name of names) {
     const info = hashes.get(name);
     if (!info) continue; // unreadable image — skip
@@ -67,6 +72,7 @@ export async function clusterCategory(cat: CatId, threshold: number): Promise<De
     } else {
       clusters.push({ anchor: info.hash, members: [{ name, dist: 0 }] });
     }
+    if ((++scanned & 511) === 0) await new Promise<void>((r) => setImmediate(r));
   }
 
   // Decorate with metadata + pick the keeper per cluster.

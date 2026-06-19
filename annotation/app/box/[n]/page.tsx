@@ -5,9 +5,13 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Stage } from "@/components/Stage";
 import { BoxLayer } from "@/components/BoxLayer";
+import { SuggestionLayer } from "@/components/SuggestionLayer";
 import { DeleteToast } from "@/components/DeleteToast";
+import { NavCluster } from "@/components/NavCluster";
 import { useAnnotation } from "@/lib/use-annotation";
+import { useSuggestions } from "@/lib/use-suggestions";
 import { useImageDelete } from "@/lib/use-image-delete";
+import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { Spinner } from "@/components/Spinner";
 import {
@@ -52,6 +56,7 @@ export default function BoxPage() {
   const searchParams = useSearchParams();
   const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
   const seed = useMemo(() => parseSeed(searchParams.get("random")), [searchParams]);
+  const coarse = useCoarsePointer();
 
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [draft, setDraft] = useState<NormRect | null>(null);
@@ -137,6 +142,53 @@ export default function BoxPage() {
   const name: string | null = entry && inCats ? entry.name : null;
 
   const { annotation, addBox, removeBox, replaceBoxes, setBoxed, undo, redo, loading } = useAnnotation(cat, name);
+
+  // --- Model box proposals (suggest_boxes output) -> yellow approve/reject. ---
+  const { boxes: suggBoxes, acceptBox, rejectBox } = useSuggestions(cat, name);
+  // Index of the keyboard-selected proposal; clamped to the (shrinking) list.
+  const [activeSugg, setActiveSugg] = useState(0);
+  useEffect(() => {
+    setActiveSugg(0);
+  }, [cat, name]);
+  const activeSuggId = suggBoxes.length
+    ? suggBoxes[Math.min(activeSugg, suggBoxes.length - 1)]?.id ?? null
+    : null;
+
+  // Accept a proposal: add it as a real box (carrying any suggested label so an
+  // accepted box can arrive already identified), mark the image boxed, and drop
+  // the proposal from the sidecar.
+  const acceptSuggestion = useCallback(
+    (id: string) => {
+      const s = suggBoxes.find((b) => b.id === id);
+      if (!s) return;
+      addBox({ cx: s.cx, cy: s.cy, w: s.w, h: s.h, label: s.label ?? null });
+      if (!annotation?.boxed) setBoxed(true);
+      acceptBox(id);
+    },
+    [suggBoxes, addBox, annotation?.boxed, setBoxed, acceptBox],
+  );
+
+  const acceptActiveSuggestion = useCallback(() => {
+    if (activeSuggId) acceptSuggestion(activeSuggId);
+  }, [activeSuggId, acceptSuggestion]);
+
+  const rejectActiveSuggestion = useCallback(() => {
+    if (activeSuggId) rejectBox(activeSuggId);
+  }, [activeSuggId, rejectBox]);
+
+  const acceptAllSuggestions = useCallback(() => {
+    if (suggBoxes.length === 0) return;
+    for (const s of suggBoxes) {
+      addBox({ cx: s.cx, cy: s.cy, w: s.w, h: s.h, label: s.label ?? null });
+      acceptBox(s.id);
+    }
+    setBoxed(true);
+  }, [suggBoxes, addBox, acceptBox, setBoxed]);
+
+  const cycleSuggestion = useCallback(() => {
+    if (suggBoxes.length === 0) return;
+    setActiveSugg((i) => (i + 1) % suggBoxes.length);
+  }, [suggBoxes.length]);
 
   // Manual image delete (whole image -> trash tree) with an undo toast.
   const { pending: pendingDelete, remove: deleteCurrent, undo: undoDelete, dismiss: dismissDelete } =
@@ -315,6 +367,30 @@ export default function BoxPage() {
         void handleDelete();
         return;
       }
+      // --- Box-proposal review (only when proposals exist). ------------------
+      if (suggBoxes.length > 0) {
+        if (e.key === "Tab") {
+          e.preventDefault();
+          cycleSuggestion();
+          return;
+        }
+        if (e.key === "Enter" || e.key === "y" || e.key === "Y") {
+          e.preventDefault();
+          acceptActiveSuggestion();
+          return;
+        }
+        if (e.key === "n" || e.key === "N") {
+          e.preventDefault();
+          rejectActiveSuggestion();
+          return;
+        }
+        if (e.key === "a" || e.key === "A") {
+          e.preventDefault();
+          acceptAllSuggestions();
+          return;
+        }
+      }
+
       if (e.key === " " || e.code === "Space") {
         e.preventDefault();
         advance();
@@ -346,7 +422,7 @@ export default function BoxPage() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [handleUndo, handleRedo, handleDelete, advance, goNext, goPrev, toggleRandom, clearBoxes, router]);
+  }, [handleUndo, handleRedo, handleDelete, advance, goNext, goPrev, toggleRandom, clearBoxes, router, suggBoxes.length, cycleSuggestion, acceptActiveSuggestion, rejectActiveSuggestion, acceptAllSuggestions]);
 
   // --- Render guards --------------------------------------------------------
   // Render once the manifest is in — navigation/order don't need the box queue
@@ -390,7 +466,22 @@ export default function BoxPage() {
         onDrawMove={onDrawMove}
         onDrawEnd={onDrawEnd}
       >
-        <BoxLayer boxes={annotation?.boxes ?? []} draft={draft} showDelete onDelete={handleRemoveBox} />
+        <BoxLayer
+          boxes={annotation?.boxes ?? []}
+          draft={draft}
+          showDelete
+          onDelete={handleRemoveBox}
+          alwaysShowControls={coarse}
+        />
+        {suggBoxes.length > 0 && (
+          <SuggestionLayer
+            boxes={suggBoxes}
+            activeId={activeSuggId}
+            onAccept={acceptSuggestion}
+            onReject={rejectBox}
+            alwaysShowControls={coarse}
+          />
+        )}
       </Stage>
 
       <LoadingOverlay show={!ready || loading} label="Loading image…" />
@@ -425,8 +516,26 @@ export default function BoxPage() {
         )}
       </div>
 
-      {/* Bottom-center: nav HUD. */}
-      <div className="fixed bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-2">
+      {/* Box-proposal review hint (only while yellow proposals remain). On touch
+          the ✓/✕ controls are always shown on each proposal, so the keyboard
+          hint is redundant — just show the count. */}
+      {suggBoxes.length > 0 && (
+        <div className="pointer-events-none fixed left-1/2 top-4 -translate-x-1/2 rounded-pill border border-suggest/40 bg-surface/85 px-3 py-1.5 text-xs text-suggest backdrop-blur-md">
+          {suggBoxes.length} suggestion{suggBoxes.length === 1 ? "" : "s"}
+          {!coarse && (
+            <>
+              {" "}·{" "}
+              <span className="font-mono">Tab</span> cycle · <span className="font-mono">Y</span> accept ·{" "}
+              <span className="font-mono">N</span> reject · <span className="font-mono">A</span> all
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Bottom-center: nav HUD. Wraps on narrow/touch widths so the enlarged
+          NavCluster + Clear/Delete cards never overflow off-screen. */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-safe z-20 flex justify-center px-4">
+        <div className="pointer-events-auto flex max-w-[min(96vw,920px)] flex-wrap items-center justify-center gap-2">
         {(annotation?.boxes.length ?? 0) > 0 && (
           <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
             <button
@@ -455,30 +564,18 @@ export default function BoxPage() {
             <span className="font-medium">Delete</span>
           </button>
         </div>
-        <div className="flex items-center gap-1 rounded-full border border-border bg-surface/85 px-2 py-1.5 backdrop-blur">
-          <button
-            type="button"
-            onClick={goPrev}
-            disabled={pos <= 0}
-            aria-label="Previous image"
-            className="flex h-7 w-7 items-center justify-center rounded-full text-muted transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-30"
-          >
-            ‹
-          </button>
-          {/* Position within ALL in-scope images (the full seeded order), not the
-              remaining-to-box count. */}
-          <span className="px-2 font-mono text-xs tabular-nums text-fg">
-            {pos + 1} / {total}
-          </span>
-          <button
-            type="button"
-            onClick={goNext}
-            disabled={pos < 0 || pos === total - 1}
-            aria-label="Next image (confirm)"
-            className="flex h-7 w-7 items-center justify-center rounded-full text-muted transition-colors hover:bg-elevated hover:text-fg disabled:pointer-events-none disabled:opacity-30"
-          >
-            ›
-          </button>
+        {/* Position within ALL in-scope images (the full seeded order), not the
+            remaining-to-box count. On touch, Next → skips to the next unboxed. */}
+        <NavCluster
+          pos={pos}
+          total={total}
+          onPrev={goPrev}
+          onNext={goNext}
+          prevDisabled={pos <= 0}
+          nextDisabled={pos < 0 || pos === total - 1}
+          onAdvance={advance}
+          coarse={coarse}
+        />
         </div>
       </div>
 

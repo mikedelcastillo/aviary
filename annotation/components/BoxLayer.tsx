@@ -18,19 +18,28 @@ export interface BoxLayerProps {
   deletableFor?: (box: Box) => boolean;
   /** Optionally highlight one box (e.g. the active box in label mode). */
   activeId?: string | null;
+  /**
+   * Touch/Pencil devices have no hover, so render every box's ✕ permanently
+   * (and with larger tap targets) instead of revealing it on hover.
+   */
+  alwaysShowControls?: boolean;
 }
 
 const GREEN = "#00e676";
 
 /** Renders bounding boxes inside the Stage SVG (image-pixel coordinate space). */
-export function BoxLayer({ boxes, draft, showDelete = false, onDelete, deletableFor, activeId }: BoxLayerProps) {
+export function BoxLayer({ boxes, draft, showDelete = false, onDelete, deletableFor, activeId, alwaysShowControls = false }: BoxLayerProps) {
   const { scale, natural } = useStage();
   const [hovered, setHovered] = useState<string | null>(null);
 
-  // Screen-constant sizes expressed in image units.
+  // Screen-constant sizes expressed in image units. Touch devices get a wider
+  // tap band and a larger ✕ glyph (no mouse precision).
   const stroke = 2 / scale;
-  const hit = 10 / scale;
-  const xR = 11 / scale;
+  const hit = (alwaysShowControls ? 22 : 10) / scale;
+  const xR = (alwaysShowControls ? 16 : 11) / scale;
+  // Transparent tap pad so the touch hit area is ~44px even though the glyph is
+  // ~32px (Apple's 44pt minimum). 0 on desktop (hover + precise cursor).
+  const tapR = alwaysShowControls ? 22 / scale : 0;
 
   const toPx = (b: { cx: number; cy: number; w: number; h: number }) => ({
     x: (b.cx - b.w / 2) * natural.width,
@@ -91,7 +100,7 @@ export function BoxLayer({ boxes, draft, showDelete = false, onDelete, deletable
                 onPointerLeave={() => setHovered((h) => (h === b.id ? null : h))}
               />
             )}
-            {canDelete && isHover && (
+            {canDelete && (isHover || alwaysShowControls) && (
               <g
                 transform={`translate(${r.x + r.w}, ${r.y})`}
                 style={{ pointerEvents: "auto", cursor: "pointer" }}
@@ -103,6 +112,7 @@ export function BoxLayer({ boxes, draft, showDelete = false, onDelete, deletable
                   setHovered(null);
                 }}
               >
+                {tapR > 0 && <circle r={tapR} fill="transparent" style={{ pointerEvents: "all" }} />}
                 <circle r={xR} fill="#0a0a0a" stroke={GREEN} strokeWidth={stroke} vectorEffect="non-scaling-stroke" />
                 <line x1={-xR * 0.45} y1={-xR * 0.45} x2={xR * 0.45} y2={xR * 0.45} stroke={GREEN} strokeWidth={stroke * 1.4} vectorEffect="non-scaling-stroke" />
                 <line x1={-xR * 0.45} y1={xR * 0.45} x2={xR * 0.45} y2={-xR * 0.45} stroke={GREEN} strokeWidth={stroke * 1.4} vectorEffect="non-scaling-stroke" />

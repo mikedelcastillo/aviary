@@ -9,7 +9,7 @@ export function SaveIndicator() {
 
   const saving = status === "saving";
   return (
-    <div className="pointer-events-none fixed bottom-5 right-5 z-50">
+    <div className="pointer-events-none fixed bottom-safe-sm right-5 z-50">
       <div
         className={`flex items-center gap-2 rounded-pill border px-3 py-1.5 text-xs backdrop-blur-md transition-colors ${
           saving ? "border-border bg-surface/90 text-muted" : "border-box/40 bg-surface/90 text-box"

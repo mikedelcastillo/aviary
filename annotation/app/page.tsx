@@ -21,6 +21,7 @@ import {
   type ManifestEntry,
 } from "@/lib/types";
 import { useHistoryStore } from "@/lib/history-store";
+import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 
 const CATS_STORAGE_KEY = "aviary.cats";
 const RANDOM_STORAGE_KEY = "aviary.random";
@@ -74,6 +75,14 @@ export default function Home() {
     total: number;
     running: boolean;
   } | null>(null);
+  // Drives the reload button's spin: stays true through the reload navigation so
+  // the icon keeps spinning until the fresh page paints over it.
+  const [reloading, setReloading] = useState(false);
+
+  const reloadPage = () => {
+    setReloading(true);
+    window.location.reload();
+  };
 
   // Restore the saved selection after mount (avoids SSR hydration mismatch).
   useEffect(() => {
@@ -276,12 +285,48 @@ export default function Home() {
   return (
     <main className="mx-auto max-w-5xl px-6 py-16">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-fg sm:text-3xl">
-          Aviary Annotation
-        </h1>
-        <p className="mt-1 text-sm text-muted">
-          Box and label bird detections — filesystem is the source of truth.
-        </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-fg sm:text-3xl">
+              Aviary Annotation
+            </h1>
+            <p className="mt-1 text-sm text-muted">
+              Box and label bird detections — filesystem is the source of truth.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={reloadPage}
+            disabled={reloading}
+            aria-label="Reload page"
+            title="Reload page"
+            className={
+              "group flex h-11 w-11 shrink-0 cursor-pointer touch-manipulation select-none items-center " +
+              "justify-center rounded-pill border border-border bg-surface text-muted outline-none " +
+              "transition-[transform,background-color,border-color,color] duration-150 " +
+              "hover:border-border-strong hover:bg-surface-2 hover:text-fg " +
+              "focus-visible:border-border-strong focus-visible:text-fg " +
+              "active:scale-90 active:bg-elevated disabled:cursor-default disabled:active:scale-100"
+            }
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+              className={
+                "h-5 w-5 transition-transform duration-300 ease-out " +
+                (reloading ? "animate-spin" : "group-hover:rotate-180 group-active:rotate-90")
+              }
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+        </div>
         {totals ? (
           <p className="mt-3 font-mono text-xs text-faint">
             {totals.total.toLocaleString()} images · {totals.boxed.toLocaleString()} boxed (
@@ -428,6 +473,9 @@ export default function Home() {
 
 function LabelLeaderboard({ stats, cats }: { stats: LabelStat[] | null; cats: CatId[] }) {
   const max = stats ? stats.reduce((m, s) => Math.max(m, s.count), 0) : 0;
+  // Touch has no hover, so the per-label Review link can't rely on a hover
+  // reveal — show it permanently on coarse pointers.
+  const coarse = useCoarsePointer();
   return (
     <section className="mt-12">
       <div className="mb-4 flex items-baseline justify-between">
@@ -453,7 +501,9 @@ function LabelLeaderboard({ stats, cats }: { stats: LabelStat[] | null; cats: Ca
                 {s.count > 0 ? (
                   <Link
                     href={reviewHref(s.label, cats)}
-                    className="shrink-0 rounded-pill border border-border px-2.5 py-1 text-xs text-muted opacity-0 transition-all hover:border-border-strong hover:text-fg focus:opacity-100 group-hover:opacity-100"
+                    className={`shrink-0 rounded-pill border border-border px-2.5 py-1 text-xs text-muted transition-all hover:border-border-strong hover:text-fg ${
+                      coarse ? "opacity-100" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
+                    }`}
                   >
                     Review
                   </Link>

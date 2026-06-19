@@ -73,6 +73,11 @@ def build_status_message(
     movement_alert_ratio: float,
 ) -> str:
     """Build a plain-text status message from dashboard data, excluding logs."""
+    # Copy the mapping up front: the live ``stats`` dict is shared with the
+    # camera supervisor, which adds entries from another thread. Iterating a
+    # local copy makes this safe no matter how the caller obtained the dict
+    # (the CameraStats values are themselves internally locked).
+    stats = dict(stats)
     snapshots = [stats[name].snapshot() for name in stats]
     object_rows = registry.snapshot() if registry is not None else []
 
@@ -157,12 +162,24 @@ def run_command_bot(
     status_provider: StatusProvider | None = None,
     stop_event: Event | None = None,
     poll_timeout_seconds: int = 30,
+    discover_provider: Callable[[], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
     allowed = {str(user_id) for user_id in allowed_user_ids}
     offset: int | None = None
     LOGGER.info("Started Telegram command bot")
+
+    def send(chat_id: int, text: str) -> None:
+        """Best-effort sendMessage; a transient API failure must not kill polling."""
+        try:
+            requests.post(
+                f"{base_url}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=15,
+            ).raise_for_status()
+        except requests.RequestException as exc:
+            LOGGER.warning("Failed to send message: %s", exc)
 
     while stop_event is None or not stop_event.is_set():
         try:
@@ -199,6 +216,24 @@ def run_command_bot(
             if chat_id is None or user_id is None:
                 continue
 
+            if command == "/discover":
+                # Discovery sweeps the whole subnet and can take a few seconds,
+                # so this is a two-message command: an immediate ack, then the
+                # report once the scan returns. Handled inline (not via the
+                # single shared send below) because of that two-step flow.
+                if str(user_id) not in allowed or discover_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    send(chat_id, "Scanning the local network for cameras...")
+                    try:
+                        report = discover_provider()
+                    except Exception as exc:  # never let a scan error kill polling
+                        LOGGER.exception("Discovery failed")
+                        report = f"Discovery failed: {exc}"
+                    send(chat_id, report)
+                LOGGER.info("Handled /discover for user %s", user_id)
+                continue
+
             if command == "/userinfo":
                 text = (
                     f"Your Telegram user ID is: {user_id}\n"
@@ -212,12 +247,5 @@ def run_command_bot(
             else:
                 continue
 
-            try:
-                requests.post(
-                    f"{base_url}/sendMessage",
-                    json={"chat_id": chat_id, "text": text},
-                    timeout=15,
-                ).raise_for_status()
-                LOGGER.info("Replied %s for user %s", command, user_id)
-            except requests.RequestException as exc:
-                LOGGER.warning("Failed to reply to %s: %s", command, exc)
+            send(chat_id, text)
+            LOGGER.info("Replied %s for user %s", command, user_id)

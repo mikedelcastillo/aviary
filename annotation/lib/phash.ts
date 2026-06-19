@@ -102,7 +102,23 @@ export function popcount64(x: bigint): number {
   return count;
 }
 
-/** Hamming distance between two pHashes. */
+/** SWAR population count of a 32-bit value — O(1), no per-set-bit loop. */
+function popcount32(v: number): number {
+  v = v - ((v >>> 1) & 0x55555555);
+  v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+  return (((v + (v >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+}
+
+/**
+ * Hamming distance between two 64-bit pHashes. Splits the XOR into two 32-bit
+ * halves and uses a constant-time SWAR popcount — this is the inner loop of
+ * dedupe clustering (called O(images × clusters) times), so it must be fast.
+ * The old BigInt clear-lowest-bit loop iterated once per set bit and dominated
+ * clustering time on large sets.
+ */
 export function hamming(a: bigint, b: bigint): number {
-  return popcount64(a ^ b);
+  const x = a ^ b;
+  const lo = Number(x & 0xffffffffn);
+  const hi = Number((x >> 32n) & 0xffffffffn);
+  return popcount32(lo) + popcount32(hi);
 }

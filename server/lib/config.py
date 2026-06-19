@@ -1,8 +1,18 @@
 """Application configuration.
 
-Camera definitions are hardcoded below. Secrets and host-specific paths come
-from the environment; RTSP URLs come from ``TAPO_RSTP`` (comma-separated, ordered
-to match ``CAMERA_SPECS``).
+Cameras are no longer hardcoded or supplied as full RTSP URLs. Instead we store
+ONLY the Tapo camera-account ``user:password`` (in ``TAPO_CREDENTIALS``) and let
+the discovery module sweep the local subnet for cameras whose :554 port is open
+and whose ``/stream1`` RTSP path authenticates. This keeps secrets minimal (no
+embedded URLs/IPs that drift as DHCP reassigns leases) and makes the camera set
+dynamic: the supervisor can add cameras at runtime via the ``/discover`` command.
+
+The RTSP port and stream path are deliberately PURE Python configuration on
+``DiscoveryConfig`` (not env vars): they are stable properties of the camera
+firmware, not deployment secrets, so baking them in keeps the env surface small.
+The only discovery knob exposed to the environment is ``TAPO_DISCOVERY_CIDR``,
+which overrides the auto-detected /24 subnet for awkward setups (Docker bridges,
+multi-subnet LANs) where the host's primary IP is not on the camera network.
 """
 
 from __future__ import annotations
@@ -17,6 +27,10 @@ class CameraConfig:
     name: str
     enabled: bool
     rtsp_url: str
+    # The camera's IP address. Discovery fills this in so the supervisor can use
+    # it as a stable identity (dedup across rediscovery, since DHCP usually keeps
+    # leases) and so the dashboard can show the host instead of a generic name.
+    host: str = ""
     sample_fps: float = 1.0
     # Base reconnect delay; grows exponentially up to ``max_reconnect_seconds``
     # while a camera stays unreachable, then resets once frames flow again.
@@ -69,13 +83,47 @@ class FilterConfig:
 
 
 @dataclass(frozen=True)
+class CameraCredentials:
+    # The Tapo camera-account user/password. The same credentials work for every
+    # camera on the LAN, so we store them once and reuse them for each
+    # discovered host when building its RTSP URL.
+    username: str
+    password: str
+
+
+@dataclass(frozen=True)
+class DiscoveryConfig:
+    # The RTSP port and stream path are firmware constants, not secrets, so they
+    # live here as pure .py config rather than as env vars.
+    rtsp_port: int = 554
+    stream_path: str = "/stream1"
+    # When None, discovery auto-detects the host's primary IPv4 and scans its
+    # /24. Set ``cidr`` (or the TAPO_DISCOVERY_CIDR env var) to scan a different
+    # subnet, e.g. inside Docker where the host IP is on a bridge network.
+    cidr: str | None = None
+    # An explicit host list. When non-empty it overrides cidr/auto-detect; tests
+    # use this to point the sweep at a localhost fake-RTSP server.
+    hosts: tuple[str, ...] = ()
+    # Concurrency of the TCP sweep. A /24 has 254 hosts, so a wide pool lets the
+    # whole subnet finish in roughly one connect-timeout instead of serially.
+    max_workers: int = 256
+    # Per-host TCP probe of :554. Kept short because most addresses are dead and
+    # we don't want the sweep to stall on each unanswered SYN.
+    connect_timeout_seconds: float = 0.5
+    # Per-host RTSP DESCRIBE handshake. Generous relative to the TCP probe since
+    # only the (few) hosts with :554 open reach this stage.
+    rtsp_timeout_seconds: float = 3.0
+
+
+@dataclass(frozen=True)
 class AppConfig:
     snapshot_dir: Path
     model: ModelConfig
     telegram: TelegramConfig
-    cameras: list[CameraConfig]
     collect: CollectConfig
     filter: FilterConfig
+    credentials: CameraCredentials
+    discovery: DiscoveryConfig
 
 
 def _require_env(name: str) -> str:
@@ -93,9 +141,14 @@ def _as_object_names(value: str) -> frozenset[str]:
     return frozenset(item.strip().lower() for item in value.split(",") if item.strip())
 
 
-def _rtsp_urls() -> list[str]:
-    raw = os.environ.get("TAPO_RSTP", "")
-    return [url.strip() for url in raw.split(",") if url.strip()]
+def _credentials() -> CameraCredentials:
+    raw = _require_env("TAPO_CREDENTIALS")  # "user:password"
+    # ``partition`` splits on the FIRST colon only, so any colons in the password
+    # stay in the password (passwords may legitimately contain ':').
+    user, sep, password = raw.partition(":")
+    if not sep or not user:
+        raise ValueError("TAPO_CREDENTIALS must be in 'user:password' form")
+    return CameraCredentials(username=user, password=password)
 
 
 def _model_paths() -> tuple[Path, ...]:
@@ -106,22 +159,7 @@ def _model_paths() -> tuple[Path, ...]:
     return paths
 
 
-def _build_cameras() -> list[CameraConfig]:
-    return [
-        CameraConfig(
-            name=f"camera-{index + 1}",
-            enabled=True,
-            rtsp_url=url,
-        )
-        for index, url in enumerate(_rtsp_urls())
-    ]
-
-
 def build_config() -> AppConfig:
-    cameras = _build_cameras()
-    if not cameras:
-        raise ValueError("No cameras configured; set TAPO_RSTP")
-
     model = ModelConfig(paths=_model_paths())
 
     telegram = TelegramConfig(
@@ -133,11 +171,17 @@ def build_config() -> AppConfig:
     collect = CollectConfig(objects=_as_object_names(os.environ.get("COLLECT_OBJECTS", "")))
     object_filter = FilterConfig(objects=_as_object_names(os.environ.get("FILTER_OBJECTS", "")))
 
+    credentials = _credentials()
+    # Start from the pure-.py defaults, then let an explicit env override the
+    # subnet when auto-detect would pick the wrong interface (Docker, etc.).
+    discovery = DiscoveryConfig(cidr=os.environ.get("TAPO_DISCOVERY_CIDR") or None)
+
     return AppConfig(
         snapshot_dir=Path("./data/server/snapshots"),
         model=model,
         telegram=telegram,
-        cameras=cameras,
         collect=collect,
         filter=object_filter,
+        credentials=credentials,
+        discovery=discovery,
     )

@@ -10,7 +10,9 @@ from lib.alerts import TELEGRAM_QUEUE_MAXSIZE, AlertDispatcher, TelegramJob
 from lib.config import (
     AppConfig,
     CameraConfig,
+    CameraCredentials,
     CollectConfig,
+    DiscoveryConfig,
     FilterConfig,
     ModelConfig,
     TelegramConfig,
@@ -39,9 +41,10 @@ def _app_config(tmp_path: Path) -> AppConfig:
         telegram=TelegramConfig(
             enabled=True, bot_token="token", user_ids=["1"], include_snapshot=True
         ),
-        cameras=[],
         collect=CollectConfig(objects=frozenset({"bird"}), directory=tmp_path / "collect"),
         filter=FilterConfig(objects=frozenset()),
+        credentials=CameraCredentials(username="user", password="pass"),
+        discovery=DiscoveryConfig(),
     )
 
 

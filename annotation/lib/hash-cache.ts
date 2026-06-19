@@ -11,6 +11,7 @@ import { promises as fs } from "node:fs";
 import { DEDUPE_CACHE_PATH, imageFsPath } from "./paths";
 import type { CatId } from "./types";
 import { phashFromFile } from "./phash";
+import { statLimited } from "./fs-limit";
 
 interface MemRec {
   mtimeMs: number;
@@ -83,7 +84,7 @@ export async function getHash(cat: CatId, name: string): Promise<HashInfo | null
   const k = key(cat, name);
   let stat;
   try {
-    stat = await fs.stat(imageFsPath(cat, name));
+    stat = await statLimited(imageFsPath(cat, name));
   } catch {
     mem.delete(k);
     return null;

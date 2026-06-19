@@ -7,10 +7,12 @@ import { Stage } from "@/components/Stage";
 import { Spotlight } from "@/components/Spotlight";
 import { BoxLayer } from "@/components/BoxLayer";
 import { DeleteToast } from "@/components/DeleteToast";
+import { NavCluster } from "@/components/NavCluster";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { Spinner } from "@/components/Spinner";
 import { useAnnotation } from "@/lib/use-annotation";
 import { useImageDelete } from "@/lib/use-image-delete";
+import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 import {
   categoryById,
   filterByCats,
@@ -36,6 +38,7 @@ export default function ReviewPage() {
   const searchParams = useSearchParams();
   const label = searchParams.get("label") ?? "";
   const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
+  const coarse = useCoarsePointer();
 
   // --- Fetch manifest + review queue (images containing `label`). -----------
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
@@ -350,7 +353,9 @@ export default function ReviewPage() {
         <span className="text-muted">
           {hasMatch
             ? `${matching.length} box${matching.length === 1 ? "" : "es"} here`
-            : "Cleared — press → / space"}
+            : coarse
+              ? "Cleared — tap Next →"
+              : "Cleared — press → / space"}
         </span>
       </div>
 
@@ -363,14 +368,29 @@ export default function ReviewPage() {
       {!hasMatch && (
         <div className="pointer-events-none fixed inset-0 z-10 flex items-center justify-center">
           <span className="rounded-pill border border-border bg-surface/80 px-4 py-2 text-sm text-muted backdrop-blur-md">
-            Nothing left to review here — press → or space
+            {coarse ? "Nothing left to review here — tap Next →" : "Nothing left to review here — press → or space"}
           </span>
         </div>
       )}
 
       {/* Bottom action bar: Unlabel [L] + Unbox [B]. */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-6">
-        <div className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-safe">
+        <div className="pointer-events-auto flex max-w-[min(96vw,920px)] flex-wrap items-center justify-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
+          {coarse && total > 0 && (
+            <>
+              <NavCluster
+                pos={pos}
+                total={total}
+                onPrev={goPrev}
+                onNext={goNext}
+                prevDisabled={pos <= 0}
+                nextDisabled={pos < 0 || pos >= total - 1}
+                onAdvance={advance}
+                coarse={coarse}
+              />
+              <span className="mx-0.5 h-6 w-px shrink-0 bg-border" aria-hidden />
+            </>
+          )}
           <button
             type="button"
             onClick={unlabel}

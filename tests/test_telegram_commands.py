@@ -141,3 +141,94 @@ def test_status_command_replies_for_allowed_user(monkeypatch) -> None:
     )
 
     assert sent_messages == ["secret status"]
+
+
+def test_discover_command_requires_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    provider_called = False
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/discover",
+                            "from": {"id": 999},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def discover_provider() -> str:
+        nonlocal provider_called
+        provider_called = True
+        return "discovery report"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        discover_provider=discover_provider,
+    )
+
+    assert sent_messages == ["Unauthorized."]
+    assert provider_called is False
+
+
+def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/discover",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        sent_messages.append(json["text"])
+        # Stop only once both the ack and the report have been sent so the loop
+        # doesn't exit before the second message.
+        if len(sent_messages) >= 2:
+            stop_event.set()
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        discover_provider=lambda: "found 2 cameras",
+    )
+
+    assert sent_messages == [
+        "Scanning the local network for cameras...",
+        "found 2 cameras",
+    ]

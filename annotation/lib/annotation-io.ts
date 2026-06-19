@@ -27,6 +27,7 @@ import {
 import { loadRoster, nameToIndex } from "./roster";
 import { withFileLock } from "./file-lock";
 import { dropFromCache } from "./hash-cache";
+import { readTextLimited } from "./fs-limit";
 
 const IMG_RE = /\.(jpe?g|png)$/i;
 
@@ -137,7 +138,7 @@ function normalizeBoxes(boxes: Box[] | undefined): Box[] {
 export async function readAnnotation(cat: CatId, name: string): Promise<Annotation> {
   const jsonPath = sidecarFsPath(cat, name, ".json");
   try {
-    const raw = await fs.readFile(jsonPath, "utf8");
+    const raw = await readTextLimited(jsonPath);
     const data = JSON.parse(raw) as Annotation;
     return { boxed: Boolean(data.boxed), boxes: normalizeBoxes(data.boxes) };
   } catch {
@@ -208,7 +209,7 @@ export async function mutateAnnotation(
 // side trees share this machinery: the dedupe loser tree (REMOVED_ROOT) and the
 // manual-delete trash (DELETED_ROOT). An undo (or manual mv) brings files back.
 
-const SIDECAR_EXTS = [".json", ".txt"] as const;
+const SIDECAR_EXTS = [".json", ".txt", ".suggest.json"] as const;
 
 interface Transfer {
   src: string;
@@ -366,7 +367,7 @@ export async function restoreDeletedImage(cat: CatId, name: string): Promise<{ m
 async function quickState(cat: CatId, name: string): Promise<{ boxed: boolean; labeled: boolean; hasUnlabeled: boolean }> {
   const jsonPath = sidecarFsPath(cat, name, ".json");
   try {
-    const raw = await fs.readFile(jsonPath, "utf8");
+    const raw = await readTextLimited(jsonPath);
     const data = JSON.parse(raw) as Annotation;
     const boxed = Boolean(data.boxed);
     const boxes = data.boxes ?? [];
@@ -378,6 +379,18 @@ async function quickState(cat: CatId, name: string): Promise<{ boxed: boolean; l
   }
 }
 
+/** Count an image's pending (yellow) box proposals from its .suggest.json. 0 when
+ * the sidecar is absent/garbled — suggestions are an optional, additive layer. */
+async function pendingSuggestionCount(cat: CatId, name: string): Promise<number> {
+  try {
+    const raw = await readTextLimited(sidecarFsPath(cat, name, ".suggest.json"));
+    const data = JSON.parse(raw) as { boxes?: unknown[] };
+    return Array.isArray(data.boxes) ? data.boxes.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function getProgress(): Promise<CategoryProgress[]> {
   const manifest = getManifest();
   const out: CategoryProgress[] = [];
@@ -385,11 +398,20 @@ export async function getProgress(): Promise<CategoryProgress[]> {
     const entries = manifest.filter((e) => e.cat === c.id);
     let boxed = 0;
     let labeled = 0;
+    let suggested = 0;
+    let suggestedBoxes = 0;
     await Promise.all(
       entries.map(async (e) => {
-        const s = await quickState(c.id, e.name);
+        const [s, pending] = await Promise.all([
+          quickState(c.id, e.name),
+          pendingSuggestionCount(c.id, e.name),
+        ]);
         if (s.boxed) boxed++;
         if (s.labeled) labeled++;
+        if (pending > 0) {
+          suggested++;
+          suggestedBoxes += pending;
+        }
       }),
     );
     out.push({
@@ -399,6 +421,8 @@ export async function getProgress(): Promise<CategoryProgress[]> {
       total: entries.length,
       boxed,
       labeled,
+      suggested,
+      suggestedBoxes,
       startN: entries[0]?.n ?? 0,
     });
   }
@@ -417,7 +441,7 @@ export async function getQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
     manifest.map(async (e) => {
       const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
       try {
-        const raw = await fs.readFile(jsonPath, "utf8");
+        const raw = await readTextLimited(jsonPath);
         const data = JSON.parse(raw) as Annotation;
         if (!data.boxed) return false; // not vetted yet -> not labelable
         return (data.boxes ?? []).some((b) => b.label == null);
@@ -467,7 +491,7 @@ export async function getReviewQueue(label: string, cats: CatId[] = ALL_CATS): P
     manifest.map(async (e) => {
       const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
       try {
-        const raw = await fs.readFile(jsonPath, "utf8");
+        const raw = await readTextLimited(jsonPath);
         const data = JSON.parse(raw) as Annotation;
         return (data.boxes ?? []).some((b) => b.label === label);
       } catch {
@@ -491,7 +515,7 @@ export async function getReviewBoxes(label: string, cats: CatId[] = ALL_CATS): P
     manifest.map(async (e): Promise<ReviewBox[]> => {
       const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
       try {
-        const data = JSON.parse(await fs.readFile(jsonPath, "utf8")) as Annotation;
+        const data = JSON.parse(await readTextLimited(jsonPath)) as Annotation;
         return normalizeBoxes(data.boxes)
           .filter((b) => b.label === label)
           .map((box) => ({ n: e.n, cat: e.cat, name: e.name, box }));
@@ -519,7 +543,7 @@ export async function getLabelStats(cats: CatId[] = ALL_CATS): Promise<LabelStat
     manifest.map(async (e) => {
       const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
       try {
-        const raw = await fs.readFile(jsonPath, "utf8");
+        const raw = await readTextLimited(jsonPath);
         const data = JSON.parse(raw) as Annotation;
         for (const b of data.boxes ?? []) {
           if (b.label) counts.set(b.label, (counts.get(b.label) ?? 0) + 1);

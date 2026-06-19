@@ -12,6 +12,7 @@ import cv2
 from lib.alerts import AlertDispatcher, AlertState
 from lib.config import CameraConfig
 from lib.detector import ObjectDetector
+from lib.discovery import redact_rtsp_url
 from lib.objects import frame_size_from_shape
 from lib.stats import CameraStats
 
@@ -24,18 +25,30 @@ LOGGER = logging.getLogger("lib.camera")
 READ_FAILURE_LIMIT = 3
 
 
-def configure_ffmpeg_capture(cameras: list[CameraConfig]) -> None:
+def configure_ffmpeg_capture(cameras: list[CameraConfig] | None = None) -> None:
     """Pin OpenCV's FFmpeg backend to TCP with a socket timeout.
 
     ``OPENCV_FFMPEG_CAPTURE_OPTIONS`` is read by the FFmpeg backend each time a
     ``VideoCapture`` is constructed, so setting it once before the worker
     threads start covers every camera.
+
+    Cameras are now discovered at runtime, so this may be called before any
+    camera exists (empty/``None`` list). In that case we fall back to the
+    ``CameraConfig`` field DEFAULTS: every discovered camera is built with those
+    same defaults (discovery never customises transport/timeout), so the env
+    option is identical whether or not a camera happens to be known yet.
     """
-    if not cameras:
-        return
-    transport = cameras[0].rtsp_transport
-    # FFmpeg's ``timeout`` is the socket I/O timeout in microseconds.
-    timeout_us = int(max(camera.read_timeout_seconds for camera in cameras) * 1_000_000)
+    if cameras:
+        transport = cameras[0].rtsp_transport
+        # FFmpeg's ``timeout`` is the socket I/O timeout in microseconds.
+        timeout_us = int(max(camera.read_timeout_seconds for camera in cameras) * 1_000_000)
+    else:
+        # No cameras yet: read the shared defaults straight off the dataclass
+        # fields so the FFmpeg backend is configured before the first /discover.
+        defaults = CameraConfig.__dataclass_fields__
+        transport = defaults["rtsp_transport"].default
+        timeout_us = int(defaults["read_timeout_seconds"].default * 1_000_000)
+
     os.environ.setdefault(
         "OPENCV_FFMPEG_CAPTURE_OPTIONS",
         f"rtsp_transport;{transport}|timeout;{timeout_us}",
@@ -77,7 +90,10 @@ def monitor_camera(
     stats: CameraStats,
     stop_event: threading.Event,
 ) -> None:
-    LOGGER.info("Starting camera %s", camera.name)
+    # Log the exact URL (password masked) so a camera stuck on "connecting" can
+    # be diagnosed: if this line appears but "Stream opened" never follows, the
+    # ffmpeg open is blocking on this URL — compare it to a known-good one.
+    LOGGER.info("Starting camera %s -> %s", camera.name, redact_rtsp_url(camera.rtsp_url))
     min_frame_interval = 1.0 / camera.sample_fps
     backoff = camera.reconnect_seconds
 

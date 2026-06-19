@@ -14,6 +14,7 @@
   --color-faint: #5a5a62;
   --color-accent: #ffffff;
   --color-box: #00e676;
+  --color-suggest: #ffd54f;
   --color-danger: #ff4d4f;
 
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
@@ -24,6 +25,20 @@
 
 :root {
   color-scheme: dark;
+}
+
+/* Lift fixed bottom chrome clear of the iPad home indicator when installed
+   (viewport-fit=cover exposes the inset); falls back to the original 1.5rem gap
+   in the browser, where the inset is 0. */
+@utility pb-safe {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+}
+@utility bottom-safe {
+  bottom: calc(env(safe-area-inset-bottom) + 1.5rem);
+}
+/* Same idea, preserving the tighter 1.25rem corner gap (was bottom-5). */
+@utility bottom-safe-sm {
+  bottom: calc(env(safe-area-inset-bottom) + 1.25rem);
 }
 
 * {
@@ -45,12 +60,23 @@ body {
   /* App-wide: no text selection, for a professional tool feel. */
   user-select: none;
   -webkit-user-select: none;
+  /* Installed-PWA feel: kill the grey tap flash and the rubber-band overscroll /
+     pull-to-refresh so it reads like a native iPad app, not a web page. */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
 }
 
 /* Opt back in only where genuinely needed (none today, but future-proof). */
 .selectable {
   user-select: text;
   -webkit-user-select: text;
+}
+
+/* Touch devices have no keyboard, so hide every keyboard-shortcut badge
+   app-wide (set on <html> by PointerModeClass). The buttons that host these
+   <kbd> hints stay fully tappable — only the badge disappears. */
+.coarse-pointer kbd {
+  display: none;
 }
 
 /* Prevent text selection while dragging boxes / panning. */

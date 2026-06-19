@@ -14,6 +14,27 @@ server DB and no authentication.
 Then open **http://0.0.0.0:5000**. First run installs npm dependencies; Node 18+
 is required (the repo is otherwise Python/uv — this is the only JS/TS app).
 
+## Install on iPad (PWA)
+
+The tool ships a web app manifest + Apple home-screen metadata, so it installs as
+a standalone, full-screen app — handy for boxing/labeling on an iPad on the couch.
+
+1. Keep the dev/prod server running on the host (it binds `0.0.0.0`, so it's
+   reachable over the LAN).
+2. On the iPad, open **`http://<host-lan-ip>:5000`** in **Safari** (not
+   `localhost` — that's the iPad itself). Find the host's IP with `ipconfig`
+   (Windows) / `ifconfig` (macOS/Linux).
+3. Tap the **Share** button → **Add to Home Screen**.
+
+It launches full-screen with the bird-in-a-box icon, no Safari chrome. It stays
+**online-only** by design (no service worker): the filesystem is the source of
+truth, so every launch loads fresh annotations from the running server — if the
+host is asleep/off, the app can't load. Bottom toolbars respect the iPad's home
+indicator (safe-area insets).
+
+The icon set lives in `public/` and `public/icons/`; regenerate it from the
+vector source with `npm run gen:icons` (see `scripts/generate-icons.mjs`).
+
 ## How it works
 
 Each raw image moves through two phases:

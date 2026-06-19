@@ -14,7 +14,7 @@ from lib.detector import Detection, ObjectDetector
 
 
 def _base_env(monkeypatch) -> None:
-    monkeypatch.setenv("TAPO_RSTP", "rtsp://example/stream1")
+    monkeypatch.setenv("TAPO_CREDENTIALS", "user:password")
 
 
 def test_multiple_model_paths_parsed(monkeypatch) -> None:

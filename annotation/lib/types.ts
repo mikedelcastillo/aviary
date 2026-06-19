@@ -185,6 +185,48 @@ export interface Box {
   label: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Model-assisted suggestions. The `<image>.suggest.json` sidecar holds model
+// output and is NEVER authoritative — the human approves/rejects it into the
+// canonical `.json`. Written by scripts/suggest_boxes + scripts/suggest_labels;
+// read (and shrunk on accept/reject) by Box/Label mode. Client-safe (no fs).
+// ---------------------------------------------------------------------------
+
+/**
+ * A box proposed by suggest_boxes — normalized YOLO geometry plus the detection
+ * confidence. `label` is filled in by suggest_labels when it matches a detection
+ * (so an accepted proposal can arrive already identified). Rendered yellow.
+ */
+export interface SuggestedBox {
+  id: string;
+  cx: number;
+  cy: number;
+  w: number;
+  h: number;
+  /** Detector confidence for the box proposal (0..1). */
+  conf: number;
+  /** Identity suggested for this proposal, or null until suggest_labels runs. */
+  label: string | null;
+  /** Confidence of the label suggestion, if any. */
+  labelConf?: number | null;
+}
+
+/** A label suggestion for an EXISTING human `.json` box, keyed by that box id. */
+export interface LabelSuggestion {
+  boxId: string;
+  label: string;
+  conf: number;
+}
+
+/** The `<image>.suggest.json` sidecar shape — model output, non-authoritative. */
+export interface Suggestions {
+  boxes: SuggestedBox[];
+  labels: LabelSuggestion[];
+  /** Provenance: the weights suggest_boxes / suggest_labels used. */
+  boxModel?: string;
+  labelModel?: string;
+}
+
 /** Per-image annotation; the JSON sidecar shape on disk. */
 export interface Annotation {
   /**
@@ -220,6 +262,10 @@ export interface CategoryProgress {
   total: number;
   boxed: number;
   labeled: number;
+  /** Images with ≥1 pending (yellow) box proposal awaiting approve/reject. */
+  suggested: number;
+  /** Total pending box proposals across the category (sum over images). */
+  suggestedBoxes: number;
   /** Global index of the first image in this category (for entering modes). */
   startN: number;
 }

@@ -1,0 +1,153 @@
+"""Tests for aviary_training.suggest — the pure logic behind the model-assisted
+annotation suggestion scripts (IoU, detection→box matching, sidecar IO, and the
+latest-model scan). Imports only the helper module, never ultralytics/torch, so
+it stays fast and isolated.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from aviary_training.suggest import (
+    empty_suggestions,
+    iou,
+    is_boxed,
+    latest_model,
+    match_box,
+    read_annotation_boxes,
+    read_suggestions,
+    suggestion_path,
+    write_suggestions,
+)
+
+
+def box(cx, cy, w, h, **extra):
+    return {"cx": cx, "cy": cy, "w": w, "h": h, **extra}
+
+
+# --- IoU --------------------------------------------------------------------
+
+
+def test_iou_identical_boxes_is_one():
+    b = box(0.5, 0.5, 0.2, 0.2)
+    assert iou(b, b) == pytest.approx(1.0)
+
+
+def test_iou_disjoint_boxes_is_zero():
+    assert iou(box(0.1, 0.1, 0.1, 0.1), box(0.9, 0.9, 0.1, 0.1)) == 0.0
+
+
+def test_iou_half_overlap():
+    # Two 0.2-wide, full-height-0.2 boxes offset by half their width along x:
+    # intersection 0.1x0.2, union = 2*0.04 - 0.02 = 0.06 -> 0.02/0.06 = 1/3.
+    a = box(0.4, 0.5, 0.2, 0.2)
+    b = box(0.5, 0.5, 0.2, 0.2)
+    assert iou(a, b) == pytest.approx(1 / 3)
+
+
+# --- match_box --------------------------------------------------------------
+
+
+def test_match_box_picks_highest_overlap():
+    detection = box(0.5, 0.5, 0.2, 0.2)
+    candidates = [
+        box(0.1, 0.1, 0.2, 0.2),   # far away
+        box(0.52, 0.5, 0.2, 0.2),  # strong overlap
+        box(0.5, 0.5, 0.2, 0.2),   # exact -> best
+    ]
+    assert match_box(detection, candidates, threshold=0.5) == 2
+
+
+def test_match_box_below_threshold_returns_none():
+    detection = box(0.5, 0.5, 0.2, 0.2)
+    candidates = [box(0.62, 0.5, 0.2, 0.2)]  # only slight overlap
+    assert match_box(detection, candidates, threshold=0.5) is None
+
+
+def test_match_box_empty_candidates_returns_none():
+    assert match_box(box(0.5, 0.5, 0.2, 0.2), [], threshold=0.5) is None
+
+
+# --- Sidecar IO -------------------------------------------------------------
+
+
+def test_suggestion_path_does_not_clobber_json(tmp_path):
+    img = tmp_path / "camera-1_day_0001.jpg"
+    assert suggestion_path(img).name == "camera-1_day_0001.suggest.json"
+    assert img.with_suffix(".json").name == "camera-1_day_0001.json"
+
+
+def test_read_suggestions_missing_is_empty(tmp_path):
+    assert read_suggestions(tmp_path / "missing.jpg") == empty_suggestions()
+
+
+def test_write_then_read_round_trips(tmp_path):
+    img = tmp_path / "x.jpg"
+    data = {
+        "boxModel": "yolo11n.pt",
+        "boxes": [box(0.5, 0.5, 0.1, 0.1, id="sug-0", conf=0.8)],
+        "labels": [],
+    }
+    write_suggestions(img, data)
+    assert read_suggestions(img) == data
+
+
+def test_box_script_preserves_label_suggestions(tmp_path):
+    """Simulate suggest_boxes overwriting `boxes` while keeping `labels` that
+    suggest_labels wrote earlier — the two scripts must not stomp each other."""
+    img = tmp_path / "x.jpg"
+    write_suggestions(img, {"boxes": [], "labels": [{"boxId": "b1", "label": "percy", "conf": 0.6}]})
+
+    cur = read_suggestions(img)
+    cur["boxes"] = [box(0.5, 0.5, 0.1, 0.1, id="sug-0", conf=0.8)]
+    cur["boxModel"] = "yolo11n.pt"
+    write_suggestions(img, cur)
+
+    after = read_suggestions(img)
+    assert after["labels"] == [{"boxId": "b1", "label": "percy", "conf": 0.6}]
+    assert len(after["boxes"]) == 1
+
+
+# --- Annotation reads -------------------------------------------------------
+
+
+def test_read_annotation_boxes_from_json(tmp_path):
+    img = tmp_path / "x.jpg"
+    (tmp_path / "x.json").write_text(
+        json.dumps(
+            {
+                "boxed": True,
+                "boxes": [
+                    {"id": "b1", "cx": 0.5, "cy": 0.5, "w": 0.2, "h": 0.2, "label": "pizza"},
+                    {"id": "b2", "cx": 0.1, "cy": 0.1, "w": 0.1, "h": 0.1, "label": None},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    boxes = read_annotation_boxes(img)
+    assert [b["id"] for b in boxes] == ["b1", "b2"]
+    assert boxes[0]["label"] == "pizza"
+    assert is_boxed(img) is True
+
+
+def test_read_annotation_boxes_missing_is_empty(tmp_path):
+    img = tmp_path / "x.jpg"
+    assert read_annotation_boxes(img) == []
+    assert is_boxed(img) is False
+
+
+# --- latest_model -----------------------------------------------------------
+
+
+def test_latest_model_picks_highest_sequence(tmp_path):
+    for name in ("live-001.pt", "live-002.pt", "live-010.pt", "archive-005.pt"):
+        (tmp_path / name).write_bytes(b"")
+    picked = latest_model(tmp_path, "live")
+    assert picked is not None and picked.name == "live-010.pt"
+
+
+def test_latest_model_none_when_absent(tmp_path):
+    assert latest_model(tmp_path, "live") is None

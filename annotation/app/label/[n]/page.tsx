@@ -7,10 +7,13 @@ import { Stage } from "@/components/Stage";
 import { Spotlight } from "@/components/Spotlight";
 import { BoxLayer } from "@/components/BoxLayer";
 import { PillBar } from "@/components/PillBar";
+import { NavCluster } from "@/components/NavCluster";
 import { DeleteToast } from "@/components/DeleteToast";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { useAnnotation } from "@/lib/use-annotation";
+import { useSuggestions } from "@/lib/use-suggestions";
 import { useImageDelete } from "@/lib/use-image-delete";
+import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 import {
   categoryById,
   filterByCats,
@@ -41,6 +44,7 @@ export default function LabelPage() {
   const searchParams = useSearchParams();
   const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
   const seed = useMemo(() => parseSeed(searchParams.get("random")), [searchParams]);
+  const coarse = useCoarsePointer();
 
   // --- Fetch manifest / roster / queue once on mount. -----------------------
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
@@ -128,6 +132,9 @@ export default function LabelPage() {
 
   const { annotation, setLabel, removeBox, replaceBoxes, undo, redo, loading } = useAnnotation(cat, name);
 
+  // Model label suggestions (suggest_labels output) — pre-highlight the pill.
+  const { labelFor, dismissLabel } = useSuggestions(cat, name);
+
   // Manual image delete (whole image -> trash tree) with an undo toast.
   const { pending: pendingDelete, remove: deleteCurrent, undo: undoDelete, dismiss: dismissDelete } =
     useImageDelete();
@@ -140,6 +147,12 @@ export default function LabelPage() {
   const boxes = useMemo(() => annotation?.boxes ?? [], [annotation]);
   const unlabeled = useMemo(() => boxes.filter((b) => b.label == null), [boxes]);
   const activeBox = unlabeled[0] ?? null;
+
+  // Model-suggested label for the active box, if one exists AND it's a pill the
+  // current category offers (don't surface a label the user can't pick here).
+  const suggestion = activeBox ? labelFor(activeBox.id) : undefined;
+  const suggestedLabel =
+    suggestion && pills.some((p) => p.label === suggestion.label) ? suggestion.label : null;
 
   const activeRect: NormRect | null = useMemo(() => {
     if (!activeBox) return null;
@@ -205,12 +218,22 @@ export default function LabelPage() {
     (pill: Pill) => {
       if (!activeBox) return;
       setLabel(activeBox.id, pill.label);
+      // Either accepting or overriding a suggestion resolves it — drop it so it
+      // doesn't linger if the box is revisited.
+      dismissLabel(activeBox.id);
       // If this was the last unlabeled box in the image, move on. The label
       // effect handles re-framing the next box within the same image.
       if (unlabeled.length <= 1) advance();
     },
-    [activeBox, setLabel, unlabeled.length, advance],
+    [activeBox, setLabel, dismissLabel, unlabeled.length, advance],
   );
+
+  // Accept the model's suggested identity for the active box with one key.
+  const acceptSuggestion = useCallback(() => {
+    if (!activeBox || !suggestedLabel) return;
+    const pill = pills.find((p) => p.label === suggestedLabel);
+    if (pill) pick(pill);
+  }, [activeBox, suggestedLabel, pills, pick]);
 
   // --- Unbox: delete an accidental box that reached labeling. ----------------
   const unbox = useCallback(() => {
@@ -303,6 +326,23 @@ export default function LabelPage() {
       }
       if (mod) return; // leave other shortcuts (copy/paste/etc.) alone
 
+      // Accept the model's suggested label: Enter always, Y when no pill claims it.
+      if (suggestedLabel && activeBox) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          acceptSuggestion();
+          return;
+        }
+        if (
+          (e.key === "y" || e.key === "Y") &&
+          !pills.some((p) => p.shortcut.toLowerCase() === "y")
+        ) {
+          e.preventDefault();
+          acceptSuggestion();
+          return;
+        }
+      }
+
       // Space skips to the next image needing labels (home after the last).
       if (e.key === " " || e.code === "Space") {
         e.preventDefault();
@@ -360,7 +400,7 @@ export default function LabelPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeBox, boxes.length, pills, pick, unbox, clearBoxes, advance, goPrev, goNext, handleUndo, handleRedo, handleDelete, toggleRandom, router]);
+  }, [activeBox, boxes.length, pills, pick, unbox, clearBoxes, advance, goPrev, goNext, handleUndo, handleRedo, handleDelete, toggleRandom, router, suggestedLabel, acceptSuggestion]);
 
   // --- Render. --------------------------------------------------------------
   const category = cat ? categoryById(cat) : undefined;
@@ -378,6 +418,7 @@ export default function LabelPage() {
             showDelete
             deletableFor={(b) => b.label != null}
             onDelete={(id) => setLabel(id, null)}
+            alwaysShowControls={coarse}
           />
         </Stage>
       )}
@@ -397,8 +438,16 @@ export default function LabelPage() {
         <span className="text-muted">
           {hasUnlabeled
             ? `${unlabeled.length} box${unlabeled.length === 1 ? "" : "es"} left`
-            : "No boxes to label here — →"}
+            : coarse
+              ? "No boxes to label here"
+              : "No boxes to label here — →"}
         </span>
+        {suggestedLabel && (
+          <span className="text-suggest">
+            suggested: {suggestedLabel}
+            {!coarse && <span className="font-mono"> ⏎</span>}
+          </span>
+        )}
         <button
           type="button"
           onClick={toggleRandom}
@@ -421,7 +470,7 @@ export default function LabelPage() {
       {imageSrc && !hasUnlabeled && (
         <div className="pointer-events-none fixed inset-0 z-10 flex items-center justify-center">
           <span className="rounded-pill border border-border bg-surface/80 px-4 py-2 text-sm text-muted backdrop-blur-md">
-            No boxes to label here — press → to continue
+            {coarse ? "No boxes to label here — tap Next →" : "No boxes to label here — press → to continue"}
           </span>
         </div>
       )}
@@ -430,9 +479,24 @@ export default function LabelPage() {
         pills={pills}
         onPick={pick}
         activeLabel={activeBox?.label ?? null}
+        suggestedLabel={suggestedLabel}
         onUnbox={activeBox ? unbox : undefined}
         onClear={boxes.length > 0 ? clearBoxes : undefined}
         onDelete={name ? () => void handleDelete() : undefined}
+        nav={
+          coarse && total > 0 ? (
+            <NavCluster
+              pos={pos}
+              total={total}
+              onPrev={goPrev}
+              onNext={goNext}
+              prevDisabled={pos <= 0}
+              nextDisabled={pos < 0 || pos === total - 1}
+              onAdvance={advance}
+              coarse={coarse}
+            />
+          ) : undefined
+        }
       />
 
       {pendingDelete && (

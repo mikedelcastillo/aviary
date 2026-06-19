@@ -9,6 +9,10 @@
 # data/training/runs (e.g. val/predict/export without an explicit project).
 /runs/
 
+# Immich import working dir (thumbnail cache, manifests, scan state). Local
+# runtime output only — large and machine-specific.
+/models/
+
 # Server logfile (native FFmpeg/h264 noise + full log; AVIARY_LOG_FILE).
 aviary.log
 
@@ -27,3 +31,5 @@ venv/
 *.onnx
 *.engine
 *.tflite
+
+.claude

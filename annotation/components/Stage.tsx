@@ -2,7 +2,6 @@
 import {
   createContext,
   forwardRef,
-  useCallback,
   useContext,
   useEffect,
   useImperativeHandle,
@@ -12,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { usePanZoom } from "@/hooks/usePanZoom";
+import { useStageGestures } from "@/hooks/useStageGestures";
 import type { Pt, StageHandle } from "@/lib/types";
 
 interface StageCtxValue {
@@ -100,87 +100,16 @@ export const Stage = forwardRef<StageHandle, StageProps>(function Stage(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src, natural.width, natural.height]);
 
-  // --- Wheel: pinch/ctrl => zoom anchored at cursor; else pan. ---------------
-  useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      if (e.ctrlKey || e.metaKey) {
-        const factor = Math.exp(-e.deltaY * 0.01);
-        pz.zoomAt(factor, e.clientX, e.clientY);
-      } else {
-        // Trackpad two-finger / wheel scroll pans (natural-scroll sign as reported).
-        pz.panBy(-e.deltaX, -e.deltaY);
-      }
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-  }, [pz]);
-
-  // --- Pointer: space/middle-drag pans; left-drag draws (if enabled). --------
-  const spaceRef = useRef(false);
-  const panRef = useRef<{ x: number; y: number } | null>(null);
-  const drawRef = useRef(false);
-
-  useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (e.code === "Space") spaceRef.current = true;
-    };
-    const up = (e: KeyboardEvent) => {
-      if (e.code === "Space") spaceRef.current = false;
-    };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => {
-      window.removeEventListener("keydown", down);
-      window.removeEventListener("keyup", up);
-    };
-  }, []);
-
-  const onPointerDown = useCallback(
-    (e: React.PointerEvent) => {
-      const panning = e.button === 1 || (e.button === 0 && spaceRef.current);
-      if (panning) {
-        panRef.current = { x: e.clientX, y: e.clientY };
-        (e.target as Element).setPointerCapture?.(e.pointerId);
-        e.preventDefault();
-        return;
-      }
-      if (drawingEnabled && e.button === 0) {
-        drawRef.current = true;
-        (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
-        onDrawStart?.(pz.screenToImage(e.clientX, e.clientY), e);
-      }
-    },
-    [drawingEnabled, onDrawStart, pz],
-  );
-
-  const onPointerMove = useCallback(
-    (e: React.PointerEvent) => {
-      if (panRef.current) {
-        pz.panBy(e.clientX - panRef.current.x, e.clientY - panRef.current.y);
-        panRef.current = { x: e.clientX, y: e.clientY };
-        return;
-      }
-      if (drawRef.current) onDrawMove?.(pz.screenToImage(e.clientX, e.clientY), e);
-    },
-    [onDrawMove, pz],
-  );
-
-  const endPointer = useCallback(
-    (e: React.PointerEvent) => {
-      if (panRef.current) {
-        panRef.current = null;
-        return;
-      }
-      if (drawRef.current) {
-        drawRef.current = false;
-        onDrawEnd?.(pz.screenToImage(e.clientX, e.clientY), e);
-      }
-    },
-    [onDrawEnd, pz],
-  );
+  // All viewport input (pointer / wheel / space) lives in one hook: pen draws,
+  // one finger pans, two fingers pinch-zoom, mouse keeps its space/middle-pan +
+  // left-draw + wheel-zoom behavior. Stage just renders.
+  const gestures = useStageGestures(viewportRef, {
+    pz,
+    drawingEnabled,
+    onDrawStart,
+    onDrawMove,
+    onDrawEnd,
+  });
 
   const ctx = useMemo<StageCtxValue>(
     () => ({ scale: pz.transform.scale, natural, handle }),
@@ -192,10 +121,7 @@ export const Stage = forwardRef<StageHandle, StageProps>(function Stage(
       ref={viewportRef}
       className={`absolute inset-0 overflow-hidden no-select ${className ?? ""}`}
       style={{ touchAction: "none", cursor: drawingEnabled ? "crosshair" : "grab" }}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={endPointer}
-      onPointerCancel={endPointer}
+      {...gestures}
     >
       <div
         className="absolute left-0 top-0 will-change-transform"

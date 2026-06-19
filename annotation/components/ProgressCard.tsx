@@ -13,7 +13,7 @@ function Bar({ value, total, color }: { value: number; total: number; color: str
 }
 
 export function ProgressCard({ progress }: { progress: CategoryProgress }) {
-  const { title, subtitle, total, boxed, labeled } = progress;
+  const { title, subtitle, total, boxed, labeled, suggested, suggestedBoxes } = progress;
   return (
     <div className="rounded-2xl border border-border bg-surface p-5">
       <div className="flex items-baseline justify-between">
@@ -41,6 +41,20 @@ export function ProgressCard({ progress }: { progress: CategoryProgress }) {
           </div>
           <Bar value={labeled} total={boxed} color="#00e676" />
         </div>
+        {/* Yellow box proposals awaiting review — only shown once suggest_boxes
+            has produced any, so the card stays clean when unused. */}
+        {suggestedBoxes > 0 && (
+          <div>
+            <div className="mb-1.5 flex justify-between text-xs">
+              <span className="text-muted">Suggested</span>
+              <span className="font-mono text-fg">
+                {suggested}/{total} · {pct(suggested, total)}%
+                <span className="text-faint"> · {suggestedBoxes} box{suggestedBoxes === 1 ? "" : "es"}</span>
+              </span>
+            </div>
+            <Bar value={suggested} total={total} color="#ffd54f" />
+          </div>
+        )}
       </div>
     </div>
   );
