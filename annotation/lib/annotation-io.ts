@@ -2,7 +2,7 @@
 //  - <image>.json  : source-of-truth annotation (boxed flag + boxes w/ labels)
 //  - <image>.txt   : YOLO export (labeled boxes only, at global roster indices)
 import { promises as fs } from "node:fs";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import {
   ALL_CATS,
@@ -28,6 +28,7 @@ import { loadRoster, nameToIndex } from "./roster";
 import { withFileLock } from "./file-lock";
 import { dropFromCache } from "./hash-cache";
 import { readTextLimited } from "./fs-limit";
+import { getJsonState, getSuggestCount, invalidateState } from "./state-cache";
 
 const IMG_RE = /\.(jpe?g|png)$/i;
 
@@ -43,9 +44,55 @@ export function listImages(cat: CatId): string[] {
 
 // Global manifest cached per server run (indices stable for a session).
 let manifestCache: ManifestEntry[] | null = null;
+let manifestDirSig = ""; // category-dir mtimes when the cache was built
+let generation = 0; // bumped on every (re)build — a change token for clients
+
+/**
+ * Signature of the category directories' mtimes. A parent dir's mtime changes
+ * when a child file is added or removed (NTFS and most POSIX filesystems), so
+ * this cheaply detects external imports/deletions (immich, training scripts)
+ * that the in-process invalidateManifest() can't know about.
+ */
+function categoryDirSignature(): string {
+  const parts: string[] = [];
+  for (const c of CATEGORIES) {
+    try {
+      parts.push(`${c.id}:${statSync(categoryDir(c.id)).mtimeMs}`);
+    } catch {
+      parts.push(`${c.id}:x`);
+    }
+  }
+  return parts.join("|");
+}
+
+// One-time sweep of leftover `*.tmp-<pid>` files from a crash mid-write.
+let tempCleaned = false;
+function ensureTempCleanup(): void {
+  if (tempCleaned) return;
+  tempCleaned = true;
+  for (const c of CATEGORIES) {
+    let files: string[];
+    try {
+      files = readdirSync(categoryDir(c.id));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (f.includes(".tmp-")) {
+        try {
+          unlinkSync(path.join(categoryDir(c.id), f));
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+  }
+}
 
 export function getManifest(): ManifestEntry[] {
-  if (manifestCache) return manifestCache;
+  const sig = categoryDirSignature();
+  if (manifestCache && sig === manifestDirSig) return manifestCache;
+  ensureTempCleanup();
   const out: ManifestEntry[] = [];
   let n = 0;
   for (const c of CATEGORIES) {
@@ -55,17 +102,26 @@ export function getManifest(): ManifestEntry[] {
     }
   }
   manifestCache = out;
+  manifestDirSig = sig;
+  generation++;
   return out;
 }
 
+/** Monotonic token that increments whenever the manifest is (re)built — lets a
+ *  client poll cheaply and refetch after an external import/delete. */
+export function getGeneration(): number {
+  getManifest(); // refresh the signature so the token reflects current state
+  return generation;
+}
+
 /**
- * Drop the cached manifest. MUST be called whenever images are added or removed
- * from the raw tree (e.g. dedupe soft-delete/restore) — global indices `n` are
- * assigned by scanning the directories, so a stale cache would point Box/Label
- * mode at the wrong files.
+ * Force the manifest to rebuild on next access. Still called on in-process
+ * add/remove (dedupe soft-delete/restore) for immediate effect; external changes
+ * are now also caught automatically via {@link categoryDirSignature}.
  */
 export function invalidateManifest(): void {
   manifestCache = null;
+  manifestDirSig = "";
 }
 
 export function getManifestEntry(n: number): ManifestEntry | undefined {
@@ -131,17 +187,27 @@ function normalizeBoxes(boxes: Box[] | undefined): Box[] {
 
 // --- Read / write -----------------------------------------------------------
 
+/** On-disk sidecar schema version, stamped into every `.json` we write. */
+const SCHEMA_VERSION = 1;
+
+function isErrno(e: unknown): e is NodeJS.ErrnoException {
+  return typeof e === "object" && e !== null && "code" in e;
+}
+
 /**
- * Read an image's annotation. If no JSON sidecar exists yet, seed boxes from the
- * auto-detection .txt (all unlabeled) with boxed=false. NEVER writes on read.
+ * Read an image's annotation. If no JSON sidecar exists yet (ENOENT), seed boxes
+ * from the auto-detection .txt (all unlabeled) with boxed=false. NEVER writes on
+ * read. A sidecar that EXISTS but fails to parse is corruption — we throw rather
+ * than silently returning an empty annotation, which would let the editor
+ * overwrite a recoverable file and lose work.
  */
 export async function readAnnotation(cat: CatId, name: string): Promise<Annotation> {
   const jsonPath = sidecarFsPath(cat, name, ".json");
+  let raw: string;
   try {
-    const raw = await readTextLimited(jsonPath);
-    const data = JSON.parse(raw) as Annotation;
-    return { boxed: Boolean(data.boxed), boxes: normalizeBoxes(data.boxes) };
-  } catch {
+    raw = await readTextLimited(jsonPath);
+  } catch (e) {
+    if (isErrno(e) && e.code !== "ENOENT") throw e; // real I/O error -> surface
     // No JSON yet: seed from the auto-detection .txt if present.
     const txtPath = sidecarFsPath(cat, name, ".txt");
     try {
@@ -150,6 +216,12 @@ export async function readAnnotation(cat: CatId, name: string): Promise<Annotati
     } catch {
       return { boxed: false, boxes: [] };
     }
+  }
+  try {
+    const data = JSON.parse(raw) as Annotation;
+    return { boxed: Boolean(data.boxed), boxes: normalizeBoxes(data.boxes) };
+  } catch (e) {
+    throw new Error(`corrupt annotation ${cat}/${name}.json: ${(e as Error).message}`);
   }
 }
 
@@ -163,6 +235,7 @@ export async function writeAnnotation(cat: CatId, name: string, ann: Annotation)
   const txtPath = sidecarFsPath(cat, name, ".txt");
   const clean: Annotation = { boxed: Boolean(ann.boxed), boxes: normalizeBoxes(ann.boxes) };
   await withFileLock(jsonPath, () => persistAnnotationFiles(jsonPath, txtPath, clean));
+  invalidateState(cat, name);
 }
 
 /**
@@ -175,10 +248,15 @@ async function persistAnnotationFiles(
   txtPath: string,
   clean: Annotation,
 ): Promise<void> {
-  const tmp = `${jsonPath}.tmp-${process.pid}`;
-  await fs.writeFile(tmp, JSON.stringify(clean, null, 2), "utf8");
-  await fs.rename(tmp, jsonPath);
-  await fs.writeFile(txtPath, toYolo(clean.boxes), "utf8");
+  // Both files written atomically (temp + rename): a crash mid-write can't leave a
+  // torn .json or .txt — the rename either fully replaces the target or doesn't.
+  const payload = { v: SCHEMA_VERSION, boxed: clean.boxed, boxes: clean.boxes };
+  const jtmp = `${jsonPath}.tmp-${process.pid}`;
+  await fs.writeFile(jtmp, JSON.stringify(payload, null, 2), "utf8");
+  await fs.rename(jtmp, jsonPath);
+  const ttmp = `${txtPath}.tmp-${process.pid}`;
+  await fs.writeFile(ttmp, toYolo(clean.boxes), "utf8");
+  await fs.rename(ttmp, txtPath);
 }
 
 /**
@@ -200,6 +278,7 @@ export async function mutateAnnotation(
     // Persist inline: the caller already holds this file's lock, so calling
     // writeAnnotation (which re-acquires the same lock) would just queue behind us.
     await persistAnnotationFiles(jsonPath, txtPath, clean);
+    invalidateState(cat, name);
     return clean;
   });
 }
@@ -364,31 +443,20 @@ export async function restoreDeletedImage(cat: CatId, name: string): Promise<{ m
 
 // --- Progress + queue -------------------------------------------------------
 
-async function quickState(cat: CatId, name: string): Promise<{ boxed: boolean; labeled: boolean; hasUnlabeled: boolean }> {
-  const jsonPath = sidecarFsPath(cat, name, ".json");
-  try {
-    const raw = await readTextLimited(jsonPath);
-    const data = JSON.parse(raw) as Annotation;
-    const boxed = Boolean(data.boxed);
-    const boxes = data.boxes ?? [];
-    const hasUnlabeled = boxes.some((b) => b.label == null);
-    const labeled = boxed && !hasUnlabeled;
-    return { boxed, labeled, hasUnlabeled };
-  } catch {
-    return { boxed: false, labeled: false, hasUnlabeled: false };
-  }
+// Thin adapters over the shared, mtime-validated state cache. Every full-manifest
+// scan below reads each sidecar at most once per change instead of re-parsing it
+// on every request.
+async function quickState(
+  cat: CatId,
+  name: string,
+): Promise<{ boxed: boolean; labeled: boolean; hasUnlabeled: boolean }> {
+  const s = await getJsonState(cat, name);
+  return { boxed: s.boxed, labeled: s.labeled, hasUnlabeled: s.hasUnlabeled };
 }
 
-/** Count an image's pending (yellow) box proposals from its .suggest.json. 0 when
- * the sidecar is absent/garbled — suggestions are an optional, additive layer. */
+/** Count an image's pending (yellow) box proposals from its .suggest.json. */
 async function pendingSuggestionCount(cat: CatId, name: string): Promise<number> {
-  try {
-    const raw = await readTextLimited(sidecarFsPath(cat, name, ".suggest.json"));
-    const data = JSON.parse(raw) as { boxes?: unknown[] };
-    return Array.isArray(data.boxes) ? data.boxes.length : 0;
-  } catch {
-    return 0;
-  }
+  return getSuggestCount(cat, name);
 }
 
 export async function getProgress(): Promise<CategoryProgress[]> {
@@ -439,15 +507,8 @@ export async function getQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
   const manifest = filterByCats(getManifest(), cats);
   const flags = await Promise.all(
     manifest.map(async (e) => {
-      const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
-      try {
-        const raw = await readTextLimited(jsonPath);
-        const data = JSON.parse(raw) as Annotation;
-        if (!data.boxed) return false; // not vetted yet -> not labelable
-        return (data.boxes ?? []).some((b) => b.label == null);
-      } catch {
-        return false; // no JSON -> not boxed -> not in queue
-      }
+      const s = await getJsonState(e.cat, e.name); // boxed + still-unlabeled -> labelable
+      return s.boxed && s.hasUnlabeled;
     }),
   );
   return manifest.filter((_, i) => flags[i]).map((e) => e.n);
@@ -489,14 +550,8 @@ export async function getReviewQueue(label: string, cats: CatId[] = ALL_CATS): P
   const manifest = filterByCats(getManifest(), cats);
   const flags = await Promise.all(
     manifest.map(async (e) => {
-      const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
-      try {
-        const raw = await readTextLimited(jsonPath);
-        const data = JSON.parse(raw) as Annotation;
-        return (data.boxes ?? []).some((b) => b.label === label);
-      } catch {
-        return false;
-      }
+      const s = await getJsonState(e.cat, e.name);
+      return s.boxLabels.includes(label);
     }),
   );
   return manifest.filter((_, i) => flags[i]).map((e) => e.n);
@@ -541,16 +596,8 @@ export async function getLabelStats(cats: CatId[] = ALL_CATS): Promise<LabelStat
   const counts = new Map<string, number>();
   await Promise.all(
     manifest.map(async (e) => {
-      const jsonPath = sidecarFsPath(e.cat, e.name, ".json");
-      try {
-        const raw = await readTextLimited(jsonPath);
-        const data = JSON.parse(raw) as Annotation;
-        for (const b of data.boxes ?? []) {
-          if (b.label) counts.set(b.label, (counts.get(b.label) ?? 0) + 1);
-        }
-      } catch {
-        // no annotation yet
-      }
+      const s = await getJsonState(e.cat, e.name);
+      for (const label of s.boxLabels) counts.set(label, (counts.get(label) ?? 0) + 1);
     }),
   );
   const stats = loadRoster().map((r) => ({ label: r.name, count: counts.get(r.name) ?? 0 }));

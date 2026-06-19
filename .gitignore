@@ -33,3 +33,6 @@ venv/
 *.tflite
 
 .claude
+
+# Superpowers brainstorming visual-companion mockups (local, ephemeral).
+.superpowers/

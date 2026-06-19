@@ -229,6 +229,8 @@ export interface Suggestions {
 
 /** Per-image annotation; the JSON sidecar shape on disk. */
 export interface Annotation {
+  /** On-disk schema version (absent on pre-versioning files; readers tolerate it). */
+  v?: number;
   /**
    * True only once a human has reviewed/confirmed this image's boxes in Box mode.
    * Auto-detection seed boxes do NOT make an image boxed.
