@@ -38,6 +38,8 @@ interface Totals {
   total: number;
   boxed: number;
   labeled: number;
+  suggested: number;
+  suggestedBoxes: number;
 }
 
 function sumTotals(progress: CategoryProgress[]): Totals {
@@ -46,8 +48,10 @@ function sumTotals(progress: CategoryProgress[]): Totals {
       total: acc.total + p.total,
       boxed: acc.boxed + p.boxed,
       labeled: acc.labeled + p.labeled,
+      suggested: acc.suggested + p.suggested,
+      suggestedBoxes: acc.suggestedBoxes + p.suggestedBoxes,
     }),
-    { total: 0, boxed: 0, labeled: 0 },
+    { total: 0, boxed: 0, labeled: 0, suggested: 0, suggestedBoxes: 0 },
   );
 }
 
@@ -65,6 +69,11 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [cats, setCats] = useState<CatId[]>(ALL_CATS);
   const [random, setRandom] = useState(false);
+  const [dedupeProgress, setDedupeProgress] = useState<{
+    done: number;
+    total: number;
+    running: boolean;
+  } | null>(null);
 
   // Restore the saved selection after mount (avoids SSR hydration mismatch).
   useEffect(() => {
@@ -174,6 +183,40 @@ export default function Home() {
     };
   }, [cats]);
 
+  // Warm the dedupe hash index for the selected categories and poll coverage so
+  // the Dedupe card shows how much has been traversed. The GET both warms (side
+  // effect) and reports {done,total,running}. Stop once fully indexed and idle.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const param = serializeCats(cats);
+    const qs = param ? `?cats=${param}` : "";
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/dedupe/progress${qs}`);
+        if (res.ok) {
+          const snap = (await res.json()) as {
+            done: number;
+            total: number;
+            running: boolean;
+          };
+          if (!cancelled) {
+            setDedupeProgress(snap);
+            if (snap.total > 0 && snap.done >= snap.total && !snap.running) return;
+          }
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+      if (!cancelled) timer = setTimeout(poll, 2000);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [cats]);
+
   const catSet = useMemo(() => new Set(cats), [cats]);
   const selectedProgress = useMemo(
     () => (progress ? progress.filter((p) => catSet.has(p.id)) : []),
@@ -238,6 +281,14 @@ export default function Home() {
             {totals.total.toLocaleString()} images · {totals.boxed.toLocaleString()} boxed (
             {pct(totals.boxed, totals.total)}%) · {totals.labeled.toLocaleString()} labeled (
             {pct(totals.labeled, totals.boxed)}%)
+            {totals.suggestedBoxes > 0 && (
+              <>
+                {" "}·{" "}
+                <span className="text-suggest">
+                  {totals.suggested.toLocaleString()} suggested ({pct(totals.suggested, totals.total)}%)
+                </span>
+              </>
+            )}
           </p>
         ) : (
           <div className="mt-3 h-4 w-72 max-w-full animate-pulse rounded bg-elevated" />
@@ -326,10 +377,29 @@ export default function Home() {
       {/* Auxiliary mode — understated, below the primary entry points. */}
       <Link
         href={withCats("/dedupe", cats)}
-        className="mt-3 flex items-center justify-between rounded-xl border border-border bg-surface px-5 py-3 text-sm transition-colors hover:border-border-strong hover:bg-surface-2"
+        className="mt-3 flex flex-col gap-2 rounded-xl border border-border bg-surface px-5 py-3 text-sm transition-colors hover:border-border-strong hover:bg-surface-2"
       >
-        <span className="font-medium text-fg">Dedupe</span>
-        <span className="text-muted">Find &amp; remove near-duplicate frames →</span>
+        <div className="flex items-center justify-between">
+          <span className="font-medium text-fg">Dedupe</span>
+          <span className="text-muted">Find &amp; remove near-duplicate frames →</span>
+        </div>
+        {dedupeProgress && dedupeProgress.total > 0 && (
+          <div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-elevated">
+              <div
+                className="h-full rounded-full bg-box transition-[width]"
+                style={{
+                  width: `${Math.round((dedupeProgress.done / dedupeProgress.total) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="mt-1 font-mono text-[11px] text-faint">
+              {dedupeProgress.done.toLocaleString()} / {dedupeProgress.total.toLocaleString()} indexed
+              ({Math.round((dedupeProgress.done / dedupeProgress.total) * 100)}%)
+              {dedupeProgress.running && " · indexing…"}
+            </div>
+          </div>
+        )}
       </Link>
 
       {/* Per-category progress — unselected categories dimmed. Skeleton cards
