@@ -1,12 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Stage } from "@/components/Stage";
 import { BoxLayer } from "@/components/BoxLayer";
 import { SuggestionLayer } from "@/components/SuggestionLayer";
 import { DeleteToast } from "@/components/DeleteToast";
+import { BottomBar } from "@/components/BottomBar";
+import { ActionButton } from "@/components/ActionButton";
+import { UndoIcon, RedoIcon } from "@/components/icons";
 import { NavCluster } from "@/components/NavCluster";
 import { useAnnotation } from "@/lib/use-annotation";
 import { useSuggestions } from "@/lib/use-suggestions";
@@ -141,7 +144,7 @@ export default function BoxPage() {
   const cat: CatId | null = entry && inCats ? entry.cat : null;
   const name: string | null = entry && inCats ? entry.name : null;
 
-  const { annotation, addBox, removeBox, replaceBoxes, setBoxed, undo, redo, loading } = useAnnotation(cat, name);
+  const { annotation, addBox, removeBox, replaceBoxes, setBoxed, undo, redo, canUndo, canRedo, loading } = useAnnotation(cat, name);
 
   // --- Model box proposals (suggest_boxes output) -> yellow approve/reject. ---
   const { boxes: suggBoxes, acceptBox, rejectBox } = useSuggestions(cat, name);
@@ -264,13 +267,16 @@ export default function BoxPage() {
     router.replace(withNav(`/box/${n}`, cats, seed != null ? null : newSeed()));
   }, [router, n, cats, seed]);
 
-  // Wipe every box on the current image. Emptying it reverts `boxed` so the
-  // flag keeps meaning "has user boxes".
+  // Clear the current image: wipe every placed box (reverting `boxed`, so the
+  // flag keeps meaning "has user boxes") AND reject every pending yellow
+  // suggestion still on screen. No-op when there's nothing of either to clear.
   const clearBoxes = useCallback(() => {
-    if (!annotation?.boxes.length) return;
-    replaceBoxes([]);
-    if (annotation.boxed) setBoxed(false);
-  }, [annotation?.boxes.length, annotation?.boxed, replaceBoxes, setBoxed]);
+    const hasBoxes = (annotation?.boxes.length ?? 0) > 0;
+    if (!hasBoxes && suggBoxes.length === 0) return;
+    if (hasBoxes) replaceBoxes([]);
+    if (annotation?.boxed) setBoxed(false);
+    for (const s of suggBoxes) rejectBox(s.id);
+  }, [annotation?.boxes.length, annotation?.boxed, replaceBoxes, setBoxed, suggBoxes, rejectBox]);
 
   // Delete a single box; if it was the last one, the image is no longer boxed.
   const handleRemoveBox = useCallback(
@@ -455,6 +461,42 @@ export default function BoxPage() {
   const src = `/api/image/${cat}/${encodeURIComponent(name)}`;
   const title = categoryById(cat)?.title ?? cat;
 
+  // Box/suggestion actions: Accept-all (while proposals exist) + Clear (whenever
+  // there are placed boxes OR suggestions to wipe). Clear rejects suggestions too.
+  const hasBoxes = (annotation?.boxes.length ?? 0) > 0;
+  const hasSuggestions = suggBoxes.length > 0;
+  const boxActions: ReactNode[] = [];
+  if (hasSuggestions) boxActions.push(<ActionButton key="accept-all" label="Accept all" shortcut="A" variant="suggest" title="Accept all suggestions (A)" onClick={acceptAllSuggestions} />);
+  if (hasBoxes || hasSuggestions) boxActions.push(<ActionButton key="clear" label="Clear" shortcut="C" variant="danger" title="Clear all boxes and suggestions (C)" onClick={clearBoxes} />);
+
+  const bottomBarSegments: Array<ReactNode | null> = [
+    total > 0 ? (
+      <NavCluster
+        pos={pos}
+        total={total}
+        onPrev={goPrev}
+        onNext={goNext}
+        prevDisabled={pos <= 0}
+        nextDisabled={pos < 0 || pos === total - 1}
+        onAdvance={advance}
+        coarse={coarse}
+      />
+    ) : null,
+    <>
+      <ActionButton key="undo" label="Undo" icon={<UndoIcon />} onClick={handleUndo} disabled={!canUndo} />
+      <ActionButton key="redo" label="Redo" icon={<RedoIcon />} onClick={handleRedo} disabled={!canRedo} />
+    </>,
+    boxActions.length > 0 ? <>{boxActions}</> : null,
+    <ActionButton
+      key="delete"
+      label="Delete"
+      shortcut="⌘⌫"
+      variant="danger"
+      title="Delete this image (⌘/Ctrl + Backspace)"
+      onClick={() => void handleDelete()}
+    />,
+  ];
+
   return (
     <main className="fixed inset-0 bg-bg">
       <Stage
@@ -532,52 +574,10 @@ export default function BoxPage() {
         </div>
       )}
 
-      {/* Bottom-center: nav HUD. Wraps on narrow/touch widths so the enlarged
-          NavCluster + Clear/Delete cards never overflow off-screen. */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-safe z-20 flex justify-center px-4">
-        <div className="pointer-events-auto flex max-w-[min(96vw,920px)] flex-wrap items-center justify-center gap-2">
-        {(annotation?.boxes.length ?? 0) > 0 && (
-          <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
-            <button
-              type="button"
-              onClick={clearBoxes}
-              title="Clear all boxes (C)"
-              className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
-            >
-              <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] uppercase text-danger">
-                C
-              </kbd>
-              <span className="font-medium">Clear</span>
-            </button>
-          </div>
-        )}
-        <div className="flex items-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
-          <button
-            type="button"
-            onClick={() => void handleDelete()}
-            title="Delete this image (⌘/Ctrl + Backspace)"
-            className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
-          >
-            <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] text-danger">
-              ⌘⌫
-            </kbd>
-            <span className="font-medium">Delete</span>
-          </button>
-        </div>
-        {/* Position within ALL in-scope images (the full seeded order), not the
-            remaining-to-box count. On touch, Next → skips to the next unboxed. */}
-        <NavCluster
-          pos={pos}
-          total={total}
-          onPrev={goPrev}
-          onNext={goNext}
-          prevDisabled={pos <= 0}
-          nextDisabled={pos < 0 || pos === total - 1}
-          onAdvance={advance}
-          coarse={coarse}
-        />
-        </div>
-      </div>
+      {/* Bottom-center: one unified bar — stepper, box/suggestion actions, and
+          the whole-image Delete. On touch, NavCluster also shows a primary Next →
+          that skips to the next unboxed image. */}
+      <BottomBar segments={bottomBarSegments} />
 
       {pendingDelete && (
         <DeleteToast

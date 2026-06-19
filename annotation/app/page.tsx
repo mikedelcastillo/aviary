@@ -11,8 +11,8 @@ import {
   filterByCats,
   newSeed,
   orderBySeed,
+  gridReviewHref,
   parseCats,
-  reviewHref,
   serializeCats,
   withCats,
   withNav,
@@ -29,6 +29,41 @@ const RANDOM_STORAGE_KEY = "aviary.random";
 interface LabelStat {
   label: string;
   count: number;
+}
+
+/** Mirror of the server's `/api/home` payload (lib/annotation-io.ts HomeData). */
+interface HomeData {
+  progress: CategoryProgress[];
+  queue: number[];
+  boxQueue: number[];
+  entry: { box: number; label: number };
+  labelStats: LabelStat[];
+}
+
+// Client-side stale-while-revalidate cache for the home payload, keyed per
+// category selection and persisted across reloads. Lets a reload paint the last
+// results instantly (in a "refreshing" state) instead of flashing skeletons.
+const HOME_CACHE_KEY = "aviary.home";
+
+function readHomeCache(catsKey: string): HomeData | null {
+  try {
+    const raw = window.localStorage.getItem(HOME_CACHE_KEY);
+    if (!raw) return null;
+    return (JSON.parse(raw) as Record<string, HomeData>)[catsKey] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeHomeCache(catsKey: string, data: HomeData): void {
+  try {
+    const raw = window.localStorage.getItem(HOME_CACHE_KEY);
+    const all = raw ? (JSON.parse(raw) as Record<string, HomeData>) : {};
+    all[catsKey] = data;
+    window.localStorage.setItem(HOME_CACHE_KEY, JSON.stringify(all));
+  } catch {
+    /* quota/unavailable — caching is best-effort */
+  }
 }
 
 function pct(n: number, total: number): number {
@@ -78,6 +113,8 @@ export default function Home() {
   // Drives the reload button's spin: stays true through the reload navigation so
   // the icon keeps spinning until the fresh page paints over it.
   const [reloading, setReloading] = useState(false);
+  // True when we're showing cached (stale) home data while a fresh fetch is in flight.
+  const [revalidating, setRevalidating] = useState(false);
 
   const reloadPage = () => {
     setReloading(true);
@@ -135,57 +172,55 @@ export default function Home() {
     };
   }, []);
 
-  // Per-category progress is selection-independent — fetch once.
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/progress")
-      .then((res) => {
-        if (!res.ok) throw new Error(`progress: ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        if (!cancelled) setProgress(data as CategoryProgress[]);
-      })
-      .catch((e) => {
-        if (!cancelled) setError((e as Error).message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Entry points, queue, and the leaderboard are scoped to the selection. Each
-  // endpoint loads on its own so a slow one never blocks the others — every
-  // module renders a skeleton until its own data lands. Resetting to null on
-  // selection change snaps the affected modules back to their skeleton state.
+  // Progress (global) + the selection-scoped queue/entry/leaderboard arrive from
+  // ONE server-side pass via /api/home. Stale-while-revalidate: if we have a
+  // cached payload for this selection (persisted across reloads), paint it
+  // immediately and flag "revalidating" while the fresh fetch runs — no skeleton
+  // flash. Only on a true cache miss do the scoped modules fall back to skeletons
+  // (progress is global, so it's left in place to avoid flashing the cards).
   useEffect(() => {
     let cancelled = false;
     const param = serializeCats(cats);
     const qs = param ? `?cats=${param}` : "";
+    const catsKey = param ?? "all";
 
-    setQueue(null);
-    setBoxQueue(null);
-    setEntry(null);
-    setLabelStats(null);
-
-    function load<T>(url: string, set: (v: T) => void): void {
-      fetch(url)
-        .then((res) => {
-          if (!res.ok) throw new Error(`${url}: ${res.status}`);
-          return res.json();
-        })
-        .then((data) => {
-          if (!cancelled) set(data as T);
-        })
-        .catch((e) => {
-          if (!cancelled) setError((e as Error).message);
-        });
+    const cached = readHomeCache(catsKey);
+    if (cached) {
+      setProgress(cached.progress);
+      setQueue(cached.queue);
+      setBoxQueue(cached.boxQueue);
+      setEntry(cached.entry);
+      setLabelStats(cached.labelStats);
+      setRevalidating(true);
+    } else {
+      setQueue(null);
+      setBoxQueue(null);
+      setEntry(null);
+      setLabelStats(null);
+      setRevalidating(false);
     }
 
-    load<number[]>(`/api/queue${qs}`, setQueue);
-    load<number[]>(`/api/box-queue${qs}`, setBoxQueue);
-    load<{ box: number; label: number }>(`/api/entry${qs}`, setEntry);
-    load<LabelStat[]>(`/api/label-stats${qs}`, setLabelStats);
+    fetch(`/api/home${qs}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`home: ${res.status}`);
+        return res.json();
+      })
+      .then((data: HomeData) => {
+        if (cancelled) return;
+        setProgress(data.progress);
+        setQueue(data.queue);
+        setBoxQueue(data.boxQueue);
+        setEntry(data.entry);
+        setLabelStats(data.labelStats);
+        writeHomeCache(catsKey, data);
+        setRevalidating(false);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError((e as Error).message);
+          setRevalidating(false);
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -340,6 +375,7 @@ export default function Home() {
                 </span>
               </>
             )}
+            {revalidating && <span className="ml-2 animate-pulse text-faint">· refreshing…</span>}
           </p>
         ) : (
           <div className="mt-3 h-4 w-72 max-w-full animate-pulse rounded bg-elevated" />
@@ -500,7 +536,7 @@ function LabelLeaderboard({ stats, cats }: { stats: LabelStat[] | null; cats: Ca
                 <span className="w-12 shrink-0 text-right font-mono text-sm text-muted">{s.count}</span>
                 {s.count > 0 ? (
                   <Link
-                    href={reviewHref(s.label, cats)}
+                    href={gridReviewHref(s.label, cats)}
                     className={`shrink-0 rounded-pill border border-border px-2.5 py-1 text-xs text-muted transition-all hover:border-border-strong hover:text-fg ${
                       coarse ? "opacity-100" : "opacity-0 focus:opacity-100 group-hover:opacity-100"
                     }`}

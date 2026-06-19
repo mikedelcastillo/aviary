@@ -2,11 +2,14 @@
 
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Stage } from "@/components/Stage";
 import { Spotlight } from "@/components/Spotlight";
 import { BoxLayer } from "@/components/BoxLayer";
 import { DeleteToast } from "@/components/DeleteToast";
+import { BottomBar } from "@/components/BottomBar";
+import { ActionButton } from "@/components/ActionButton";
+import { UndoIcon, RedoIcon } from "@/components/icons";
 import { NavCluster } from "@/components/NavCluster";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 import { Spinner } from "@/components/Spinner";
@@ -103,7 +106,7 @@ export default function ReviewPage() {
   const cat = entry?.cat ?? null;
   const name = entry?.name ?? null;
 
-  const { annotation, setLabel, removeBox, undo, redo, loading } = useAnnotation(cat, name);
+  const { annotation, setLabel, removeBox, undo, redo, canUndo, canRedo, loading } = useAnnotation(cat, name);
 
   // Manual image delete (whole image -> trash tree) with an undo toast.
   const { pending: pendingDelete, remove: deleteCurrent, undo: undoDelete, dismiss: dismissDelete } =
@@ -318,6 +321,48 @@ export default function ReviewPage() {
   const category = categoryById(cat);
   const hasMatch = matching.length > 0;
 
+  // Box actions: Unlabel + (Unknown) are neutral (reversible relabels); Unbox is
+  // destructive. All disabled when this image has no remaining match.
+  const reviewActions: ReactNode[] = [
+    <ActionButton key="unlabel" label="Unlabel" shortcut="L" onClick={unlabel} disabled={!hasMatch} />,
+  ];
+  if (canUnknown) {
+    reviewActions.push(
+      <ActionButton key="unknown" label="Unknown" shortcut="U" title={`Relabel as ${UNKNOWN_LABEL} (U)`} onClick={labelUnknown} disabled={!hasMatch} />,
+    );
+  }
+  reviewActions.push(
+    <ActionButton key="unbox" label="Unbox" shortcut="B" variant="danger" onClick={unbox} disabled={!hasMatch} />,
+  );
+
+  const bottomBarSegments: Array<ReactNode | null> = [
+    total > 0 ? (
+      <NavCluster
+        pos={pos}
+        total={total}
+        onPrev={goPrev}
+        onNext={goNext}
+        prevDisabled={pos <= 0}
+        nextDisabled={pos < 0 || pos >= total - 1}
+        onAdvance={advance}
+        coarse={coarse}
+      />
+    ) : null,
+    <>
+      <ActionButton key="undo" label="Undo" icon={<UndoIcon />} onClick={() => undo()} disabled={!canUndo} />
+      <ActionButton key="redo" label="Redo" icon={<RedoIcon />} onClick={() => redo()} disabled={!canRedo} />
+    </>,
+    <>{reviewActions}</>,
+    <ActionButton
+      key="delete"
+      label="Delete"
+      shortcut="⌘⌫"
+      variant="danger"
+      title="Delete this image (⌘/Ctrl + Backspace)"
+      onClick={() => void handleDelete()}
+    />,
+  ];
+
   return (
     <main className="fixed inset-0 bg-bg text-fg">
       <Stage ref={stageRef} src={imageSrc} drawingEnabled={false} onReady={onReady}>
@@ -359,11 +404,6 @@ export default function ReviewPage() {
         </span>
       </div>
 
-      {/* Top-right counter. */}
-      <div className="pointer-events-none fixed right-4 top-4 z-30 font-mono text-xs text-faint">
-        {pos + 1} / {total}
-      </div>
-
       {/* Centered hint when this image has no more matches. */}
       {!hasMatch && (
         <div className="pointer-events-none fixed inset-0 z-10 flex items-center justify-center">
@@ -373,74 +413,8 @@ export default function ReviewPage() {
         </div>
       )}
 
-      {/* Bottom action bar: Unlabel [L] + Unbox [B]. */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-safe">
-        <div className="pointer-events-auto flex max-w-[min(96vw,920px)] flex-wrap items-center justify-center gap-2 rounded-2xl border border-border bg-surface/85 px-3 py-3 backdrop-blur-md">
-          {coarse && total > 0 && (
-            <>
-              <NavCluster
-                pos={pos}
-                total={total}
-                onPrev={goPrev}
-                onNext={goNext}
-                prevDisabled={pos <= 0}
-                nextDisabled={pos < 0 || pos >= total - 1}
-                onAdvance={advance}
-                coarse={coarse}
-              />
-              <span className="mx-0.5 h-6 w-px shrink-0 bg-border" aria-hidden />
-            </>
-          )}
-          <button
-            type="button"
-            onClick={unlabel}
-            disabled={!hasMatch}
-            className="flex cursor-pointer items-center gap-2 rounded-pill border border-border bg-surface-2 px-3 py-1.5 text-sm text-muted transition-colors hover:border-border-strong hover:text-fg disabled:pointer-events-none disabled:opacity-40"
-          >
-            <kbd className="grid h-5 min-w-5 place-items-center rounded border border-border-strong px-1 font-mono text-[11px] uppercase text-faint">
-              L
-            </kbd>
-            <span className="font-medium">Unlabel</span>
-          </button>
-          {canUnknown && (
-            <button
-              type="button"
-              onClick={labelUnknown}
-              disabled={!hasMatch}
-              title={`Relabel as ${UNKNOWN_LABEL} (U)`}
-              className="flex cursor-pointer items-center gap-2 rounded-pill border border-border bg-surface-2 px-3 py-1.5 text-sm text-muted transition-colors hover:border-border-strong hover:text-fg disabled:pointer-events-none disabled:opacity-40"
-            >
-              <kbd className="grid h-5 min-w-5 place-items-center rounded border border-border-strong px-1 font-mono text-[11px] uppercase text-faint">
-                U
-              </kbd>
-              <span className="font-medium">Unknown</span>
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={unbox}
-            disabled={!hasMatch}
-            className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70 disabled:pointer-events-none disabled:opacity-40"
-          >
-            <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] uppercase text-danger">
-              B
-            </kbd>
-            <span className="font-medium">Unbox</span>
-          </button>
-          <span className="mx-0.5 h-6 w-px shrink-0 bg-border" aria-hidden />
-          <button
-            type="button"
-            onClick={() => void handleDelete()}
-            title="Delete this image (⌘/Ctrl + Backspace)"
-            className="flex cursor-pointer items-center gap-2 rounded-pill border border-danger/40 bg-danger/10 px-3 py-1.5 text-sm text-danger transition-colors hover:border-danger/70"
-          >
-            <kbd className="grid h-5 min-w-5 place-items-center rounded border border-danger/50 px-1 font-mono text-[11px] text-danger">
-              ⌘⌫
-            </kbd>
-            <span className="font-medium">Delete</span>
-          </button>
-        </div>
-      </div>
+      {/* Bottom action bar: stepper · Unlabel/Unknown/Unbox · Delete. */}
+      <BottomBar segments={bottomBarSegments} />
 
       {pendingDelete && (
         <DeleteToast

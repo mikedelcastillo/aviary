@@ -2,11 +2,14 @@
 
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Stage } from "@/components/Stage";
 import { Spotlight } from "@/components/Spotlight";
 import { BoxLayer } from "@/components/BoxLayer";
-import { PillBar } from "@/components/PillBar";
+import { BottomBar } from "@/components/BottomBar";
+import { PillGroup } from "@/components/PillGroup";
+import { ActionButton } from "@/components/ActionButton";
+import { UndoIcon, RedoIcon } from "@/components/icons";
 import { NavCluster } from "@/components/NavCluster";
 import { DeleteToast } from "@/components/DeleteToast";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
@@ -130,7 +133,7 @@ export default function LabelPage() {
   const cat = entry?.cat ?? null;
   const name = entry?.name ?? null;
 
-  const { annotation, setLabel, removeBox, replaceBoxes, undo, redo, loading } = useAnnotation(cat, name);
+  const { annotation, setLabel, removeBox, replaceBoxes, undo, redo, canUndo, canRedo, loading } = useAnnotation(cat, name);
 
   // Model label suggestions (suggest_labels output) — pre-highlight the pill.
   const { labelFor, dismissLabel } = useSuggestions(cat, name);
@@ -407,6 +410,43 @@ export default function LabelPage() {
   const imageSrc = cat && name ? `/api/image/${cat}/${encodeURIComponent(name)}` : null;
   const hasUnlabeled = unlabeled.length > 0;
 
+  // Box-level destructive actions (omit a button when its target is absent).
+  const boxActions: ReactNode[] = [];
+  if (activeBox) boxActions.push(<ActionButton key="unbox" label="Unbox" shortcut="B" variant="danger" onClick={unbox} />);
+  if (boxes.length > 0) boxActions.push(<ActionButton key="clear" label="Clear" shortcut="C" variant="danger" onClick={clearBoxes} />);
+
+  const bottomBarSegments: Array<ReactNode | null> = [
+    total > 0 ? (
+      <NavCluster
+        pos={pos}
+        total={total}
+        onPrev={goPrev}
+        onNext={goNext}
+        prevDisabled={pos <= 0}
+        nextDisabled={pos < 0 || pos === total - 1}
+        onAdvance={advance}
+        coarse={coarse}
+      />
+    ) : null,
+    <>
+      <ActionButton key="undo" label="Undo" icon={<UndoIcon />} onClick={handleUndo} disabled={!canUndo} />
+      <ActionButton key="redo" label="Redo" icon={<RedoIcon />} onClick={handleRedo} disabled={!canRedo} />
+    </>,
+    pills.length > 0 ? (
+      <PillGroup pills={pills} onPick={pick} activeLabel={activeBox?.label ?? null} suggestedLabel={suggestedLabel} />
+    ) : null,
+    boxActions.length > 0 ? <>{boxActions}</> : null,
+    name ? (
+      <ActionButton
+        label="Delete"
+        shortcut="⌘⌫"
+        variant="danger"
+        title="Delete this image (⌘/Ctrl + Backspace)"
+        onClick={() => void handleDelete()}
+      />
+    ) : null,
+  ];
+
   return (
     <main className="fixed inset-0 bg-bg text-fg">
       {imageSrc && (
@@ -458,14 +498,6 @@ export default function LabelPage() {
         </button>
       </div>
 
-      {/* Top-right counter — position within ALL in-scope images (the full
-          seeded order), not the remaining-to-label count. */}
-      {total > 0 && (
-        <div className="pointer-events-none fixed right-4 top-4 z-30 font-mono text-xs text-faint">
-          {pos + 1} / {total}
-        </div>
-      )}
-
       {/* Centered hint when nothing to label on this image. */}
       {imageSrc && !hasUnlabeled && (
         <div className="pointer-events-none fixed inset-0 z-10 flex items-center justify-center">
@@ -475,29 +507,7 @@ export default function LabelPage() {
         </div>
       )}
 
-      <PillBar
-        pills={pills}
-        onPick={pick}
-        activeLabel={activeBox?.label ?? null}
-        suggestedLabel={suggestedLabel}
-        onUnbox={activeBox ? unbox : undefined}
-        onClear={boxes.length > 0 ? clearBoxes : undefined}
-        onDelete={name ? () => void handleDelete() : undefined}
-        nav={
-          coarse && total > 0 ? (
-            <NavCluster
-              pos={pos}
-              total={total}
-              onPrev={goPrev}
-              onNext={goNext}
-              prevDisabled={pos <= 0}
-              nextDisabled={pos < 0 || pos === total - 1}
-              onAdvance={advance}
-              coarse={coarse}
-            />
-          ) : undefined
-        }
-      />
+      <BottomBar segments={bottomBarSegments} />
 
       {pendingDelete && (
         <DeleteToast

@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CropCell } from "@/components/CropCell";
 import { DeleteToast } from "@/components/DeleteToast";
 import { Spinner } from "@/components/Spinner";
-import { useImageDelete } from "@/lib/use-image-delete";
+import { BottomBar } from "@/components/BottomBar";
+import { ActionButton } from "@/components/ActionButton";
+import { useImageBatchDelete } from "@/lib/use-image-batch-delete";
 import { useSaveStore } from "@/lib/save-store";
 import {
   parseCats,
@@ -25,6 +27,7 @@ function isTypingTarget(target: EventTarget | null): boolean {
 }
 
 const cellKey = (c: ReviewBox) => `${c.cat}/${c.name}/${c.box.id}`;
+const imageKey = (c: { cat: CatId; name: string }) => `${c.cat}/${c.name}`;
 
 // Grid cell sizing: min column width in px. Persisted so the chosen density
 // survives reloads. Bounds keep cells legible without overflowing the viewport.
@@ -42,11 +45,34 @@ type BoxOp =
   | { op: "setLabel"; id: string; label: string | null }
   | { op: "add"; box: Box };
 
-interface UndoEntry {
+/** A forward box-op on one cell paired with the op that reverts it. */
+interface CellOp {
   cell: ReviewBox;
-  /** Op that reverts the forward action (re-adds the box / restores the label). */
+  forward: BoxOp;
   inverse: BoxOp;
 }
+
+interface UndoEntry {
+  /** Every (cell, inverse-op) pair from one bulk action; undone together. */
+  items: { cell: ReviewBox; inverse: BoxOp }[];
+}
+
+// Forward/inverse op builders for the three box edits (pure — no component state).
+const buildUnbox = (cell: ReviewBox): CellOp => ({
+  cell,
+  forward: { op: "remove", id: cell.box.id },
+  inverse: { op: "add", box: cell.box },
+});
+const buildUnlabel = (cell: ReviewBox): CellOp => ({
+  cell,
+  forward: { op: "setLabel", id: cell.box.id, label: null },
+  inverse: { op: "setLabel", id: cell.box.id, label: cell.box.label },
+});
+const buildUnknown = (cell: ReviewBox): CellOp => ({
+  cell,
+  forward: { op: "setLabel", id: cell.box.id, label: UNKNOWN_LABEL },
+  inverse: { op: "setLabel", id: cell.box.id, label: cell.box.label },
+});
 
 export default function GridReviewPage() {
   // useSearchParams() needs a Suspense boundary on this statically-routed page.
@@ -73,20 +99,22 @@ function GridReview() {
   // action. Rendering off (all − removed) keeps ordering stable across undo.
   const [all, setAll] = useState<ReviewBox[] | null>(null);
   const [removed, setRemoved] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [cellSize, setCellSize] = useState(CELL_SIZE_DEFAULT);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const undoing = useRef(false);
 
-  // Whole-image delete (moves the source image + sidecars to trash) with an
-  // ephemeral undo toast. Separate from the box-op undoStack above.
+  // Whole-image delete (moves the source image + sidecars to trash), batched so
+  // one action can trash several images under a single undo toast. Separate from
+  // the box-op undoStack above.
   const {
-    pending: pendingDelete,
-    remove: deleteImage,
+    pending: pendingDeletes,
+    remove: deleteImages,
     undo: undoDelete,
     dismiss: dismissDelete,
-  } = useImageDelete();
+  } = useImageBatchDelete();
 
   // Load the persisted cell size once on mount (kept out of the initial state to
   // avoid an SSR/CSR hydration mismatch on localStorage).
@@ -115,6 +143,7 @@ function GridReview() {
     if (cparam) qs.set("cats", cparam);
     setAll(null);
     setRemoved(new Set());
+    setSelected(new Set());
     setUndoStack([]);
     (async () => {
       try {
@@ -133,6 +162,32 @@ function GridReview() {
   const visible = useMemo(
     () => (all ?? []).filter((c) => !removed.has(cellKey(c))),
     [all, removed],
+  );
+
+  // Selection resolved against what's actually on screen, so a stale key (e.g. a
+  // cell removed by another action) can never drive a button.
+  const selectedCells = useMemo(
+    () => visible.filter((c) => selected.has(cellKey(c))),
+    [visible, selected],
+  );
+  const selCount = selectedCells.length;
+  const allSelected = visible.length > 0 && selCount === visible.length;
+
+  // --- Selection. ------------------------------------------------------------
+  const toggleSelect = useCallback((cell: ReviewBox) => {
+    const k = cellKey(cell);
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
+  const selectAllVisible = useCallback(
+    () => setSelected(new Set(visible.map(cellKey))),
+    [visible],
   );
 
   // --- Links. ----------------------------------------------------------------
@@ -174,107 +229,135 @@ function GridReview() {
     }
   }, []);
 
-  // --- Forward actions (optimistic hide + revert on failure). ----------------
-  const act = useCallback(
-    async (cell: ReviewBox, forward: BoxOp, inverse: BoxOp) => {
-      const k = cellKey(cell);
+  // --- Bulk box edits (optimistic hide + single grouped undo). ---------------
+  // Ops run sequentially: several selected crops can belong to the same image
+  // sidecar, and concurrent writes to it would race (lost updates).
+  const runBatch = useCallback(
+    async (ops: CellOp[]) => {
+      if (ops.length === 0) return;
       setError(null);
-      setRemoved((s) => new Set(s).add(k));
-      const entry: UndoEntry = { cell, inverse };
-      setUndoStack((s) => [...s, entry]);
-      const ok = await postOp(cell.cat, cell.name, forward);
-      if (!ok) {
-        setRemoved((s) => {
-          const n = new Set(s);
-          n.delete(k);
-          return n;
-        });
-        setUndoStack((s) => s.filter((e) => e !== entry));
-        setError("Couldn't save that change — try again.");
-      }
-    },
-    [postOp],
-  );
-
-  const unbox = useCallback(
-    (cell: ReviewBox) => act(cell, { op: "remove", id: cell.box.id }, { op: "add", box: cell.box }),
-    [act],
-  );
-  const unlabel = useCallback(
-    (cell: ReviewBox) =>
-      act(
-        cell,
-        { op: "setLabel", id: cell.box.id, label: null },
-        { op: "setLabel", id: cell.box.id, label: cell.box.label },
-      ),
-    [act],
-  );
-  // Relabel the box as the catch-all "unknown" kind (undo restores the prior
-  // label). Hidden when we're already reviewing unknown_bird (no-op there).
-  const canUnknown = label !== UNKNOWN_LABEL;
-  const labelUnknown = useCallback(
-    (cell: ReviewBox) =>
-      act(
-        cell,
-        { op: "setLabel", id: cell.box.id, label: UNKNOWN_LABEL },
-        { op: "setLabel", id: cell.box.id, label: cell.box.label },
-      ),
-    [act],
-  );
-
-  // --- Whole-image delete (hides every cell owned by the image). -------------
-  // Hiding runs inside the onDeleted callback, which the hook only fires after a
-  // successful move — so a failed delete leaves the cells visible.
-  const handleDelete = useCallback(
-    async (cell: ReviewBox) => {
-      const keys = (all ?? [])
-        .filter((c) => c.cat === cell.cat && c.name === cell.name)
-        .map(cellKey);
-      await deleteImage(cell.cat, cell.name, () => {
-        setRemoved((s) => {
-          const n = new Set(s);
-          keys.forEach((k) => n.add(k));
-          return n;
-        });
-      });
-    },
-    [all, deleteImage],
-  );
-
-  const handleDeleteUndo = useCallback(() => {
-    void undoDelete((p) => {
+      const keys = ops.map((o) => cellKey(o.cell));
       setRemoved((s) => {
         const n = new Set(s);
-        (all ?? [])
-          .filter((c) => c.cat === p.cat && c.name === p.name)
-          .forEach((c) => n.delete(cellKey(c)));
+        keys.forEach((k) => n.add(k));
+        return n;
+      });
+      clearSelection();
+
+      const succeeded: { cell: ReviewBox; inverse: BoxOp }[] = [];
+      const failedKeys: string[] = [];
+      for (let i = 0; i < ops.length; i++) {
+        const o = ops[i];
+        const ok = await postOp(o.cell.cat, o.cell.name, o.forward);
+        if (ok) succeeded.push({ cell: o.cell, inverse: o.inverse });
+        else failedKeys.push(keys[i]);
+      }
+
+      if (failedKeys.length > 0) {
+        setRemoved((s) => {
+          const n = new Set(s);
+          failedKeys.forEach((k) => n.delete(k));
+          return n;
+        });
+        setError("Couldn't save some changes — try again.");
+      }
+      if (succeeded.length > 0) {
+        setUndoStack((s) => [...s, { items: succeeded }]);
+      }
+    },
+    [postOp, clearSelection],
+  );
+
+  const unboxSelected = useCallback(
+    () => void runBatch(selectedCells.map(buildUnbox)),
+    [runBatch, selectedCells],
+  );
+  const unlabelSelected = useCallback(
+    () => void runBatch(selectedCells.map(buildUnlabel)),
+    [runBatch, selectedCells],
+  );
+  // Relabel each selected box as the catch-all "unknown" kind. Hidden when we're
+  // already reviewing unknown_bird (no-op there).
+  const canUnknown = label !== UNKNOWN_LABEL;
+  const unknownSelected = useCallback(
+    () => void runBatch(selectedCells.map(buildUnknown)),
+    [runBatch, selectedCells],
+  );
+
+  // --- Bulk whole-image delete (dedupe selection by image). ------------------
+  const deleteSelected = useCallback(async () => {
+    const seen = new Set<string>();
+    const images: { cat: CatId; name: string }[] = [];
+    for (const c of selectedCells) {
+      const k = imageKey(c);
+      if (!seen.has(k)) {
+        seen.add(k);
+        images.push({ cat: c.cat, name: c.name });
+      }
+    }
+    if (images.length === 0) return;
+    clearSelection();
+    await deleteImages(images, (deleted) => {
+      const delKeys = new Set(deleted.map(imageKey));
+      setRemoved((s) => {
+        const n = new Set(s);
+        (all ?? []).forEach((c) => {
+          if (delKeys.has(imageKey(c))) n.add(cellKey(c));
+        });
+        return n;
+      });
+    });
+  }, [selectedCells, deleteImages, all, clearSelection]);
+
+  const handleDeleteUndo = useCallback(() => {
+    void undoDelete((restored) => {
+      const keys = new Set(restored.map(imageKey));
+      setRemoved((s) => {
+        const n = new Set(s);
+        (all ?? []).forEach((c) => {
+          if (keys.has(imageKey(c))) n.delete(cellKey(c));
+        });
         return n;
       });
     });
   }, [undoDelete, all]);
 
-  // --- Undo (LIFO; re-show + send the inverse op). ---------------------------
+  // --- Undo (LIFO; re-show + replay the batch's inverse ops). ----------------
   const undo = useCallback(async () => {
     // Re-entrancy guard: two ⌘Z presses within one frame would otherwise both
-    // read the same stale stack top and each pop one entry, stranding the
-    // second-from-top cell hidden forever with its inverse op never sent.
+    // read the same stale stack top and each pop one entry.
     if (undoing.current) return;
     const entry = undoStack[undoStack.length - 1];
     if (!entry) return;
     undoing.current = true;
-    const k = cellKey(entry.cell);
+    const keys = entry.items.map((it) => cellKey(it.cell));
     setUndoStack((s) => s.slice(0, -1));
     setRemoved((s) => {
       const n = new Set(s);
-      n.delete(k);
+      keys.forEach((k) => n.delete(k));
       return n;
     });
     try {
-      const ok = await postOp(entry.cell.cat, entry.cell.name, entry.inverse);
-      if (!ok) {
-        setRemoved((s) => new Set(s).add(k));
-        setUndoStack((s) => [...s, entry]);
-        setError("Couldn't undo — try again.");
+      const failed: { cell: ReviewBox; inverse: BoxOp }[] = [];
+      const failedKeys: string[] = [];
+      for (let i = 0; i < entry.items.length; i++) {
+        const it = entry.items[i];
+        const ok = await postOp(it.cell.cat, it.cell.name, it.inverse);
+        if (!ok) {
+          failed.push(it);
+          failedKeys.push(keys[i]);
+        }
+      }
+      if (failed.length > 0) {
+        // Re-hide only the cells whose revert didn't land, and re-stack just
+        // those so a second undo retries exactly them (no double-apply).
+        setRemoved((s) => {
+          const n = new Set(s);
+          failedKeys.forEach((k) => n.add(k));
+          return n;
+        });
+        setUndoStack((s) => [...s, { items: failed }]);
+        setError("Couldn't undo some changes — try again.");
       }
     } finally {
       undoing.current = false;
@@ -286,18 +369,54 @@ function GridReview() {
       if (isTypingTarget(e.target)) return;
       if (e.key === "Escape") {
         e.preventDefault();
-        router.push("/");
+        if (selCount > 0) clearSelection();
+        else router.push("/");
         return;
       }
       const mod = e.metaKey || e.ctrlKey;
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         void undo();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        selectAllVisible();
+        return;
+      }
+      if (mod && e.key === "Backspace") {
+        e.preventDefault();
+        if (selCount > 0) void deleteSelected();
+        return;
+      }
+      if (mod) return;
+      if (selCount === 0) return;
+      const k = e.key.toLowerCase();
+      if (k === "b") {
+        e.preventDefault();
+        unboxSelected();
+      } else if (k === "l") {
+        e.preventDefault();
+        unlabelSelected();
+      } else if (k === "u" && canUnknown) {
+        e.preventDefault();
+        unknownSelected();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [undo, router]);
+  }, [
+    selCount,
+    canUnknown,
+    clearSelection,
+    selectAllVisible,
+    undo,
+    deleteSelected,
+    unboxSelected,
+    unlabelSelected,
+    unknownSelected,
+    router,
+  ]);
 
   // --- Render guards. --------------------------------------------------------
   if (!label) {
@@ -319,9 +438,42 @@ function GridReview() {
     );
   }
 
+  // Selection action bar (only while something is selected). Open shows for a
+  // single selection; box edits + the trailing Delete act on the whole selection.
+  const selectionSegments: Array<ReactNode | null> = [
+    <div key="count" className="flex items-center gap-2">
+      <span className="whitespace-nowrap px-1 text-sm text-muted">{selCount} selected</span>
+      <ActionButton label="Clear" shortcut="Esc" onClick={clearSelection} />
+    </div>,
+    <>
+      {selCount === 1 && (
+        <ActionButton key="open" label="Open" onClick={() => openFocus(selectedCells[0])} />
+      )}
+      <ActionButton key="unlabel" label="Unlabel" shortcut="L" onClick={unlabelSelected} />
+      {canUnknown && (
+        <ActionButton
+          key="unknown"
+          label="Unknown"
+          shortcut="U"
+          title={`Relabel as ${UNKNOWN_LABEL} (U)`}
+          onClick={unknownSelected}
+        />
+      )}
+      <ActionButton key="unbox" label="Unbox" shortcut="B" variant="danger" onClick={unboxSelected} />
+    </>,
+    <ActionButton
+      key="delete"
+      label="Delete"
+      shortcut="⌘⌫"
+      variant="danger"
+      title="Delete the whole image (⌘/Ctrl + Backspace)"
+      onClick={() => void deleteSelected()}
+    />,
+  ];
+
   return (
     <main className="min-h-screen bg-bg text-fg">
-      {/* Sticky header: home, label + toggle, count + undo. */}
+      {/* Sticky header: home, label + toggle, density · select-all · count · undo. */}
       <header className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 border-b border-border bg-bg/85 px-4 py-3 backdrop-blur-md">
         <div className="flex items-center gap-3">
           <Link href="/" className="text-xs text-muted transition-colors hover:text-fg">
@@ -356,6 +508,14 @@ function GridReview() {
               +
             </button>
           </div>
+          <button
+            type="button"
+            onClick={allSelected ? clearSelection : selectAllVisible}
+            disabled={visible.length === 0}
+            className="rounded-pill border border-border bg-surface px-3 py-1.5 text-xs text-muted transition-colors hover:border-border-strong hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+          >
+            {allSelected ? "Select none" : "Select all"}
+          </button>
           <span className="font-mono text-xs text-faint">
             {visible.length} box{visible.length === 1 ? "" : "es"}
           </span>
@@ -391,7 +551,7 @@ function GridReview() {
         </div>
       ) : (
         <div
-          className="grid gap-2 p-4"
+          className={`grid gap-2 p-4 ${selCount > 0 ? "pb-28" : ""}`}
           style={{
             gridTemplateColumns: `repeat(auto-fill, minmax(${cellSize}px, 1fr))`,
           }}
@@ -400,19 +560,18 @@ function GridReview() {
             <CropCell
               key={cellKey(cell)}
               cell={cell}
-              onOpen={openFocus}
-              onUnbox={unbox}
-              onUnlabel={unlabel}
-              onUnknown={canUnknown ? labelUnknown : undefined}
-              onDelete={handleDelete}
+              selected={selected.has(cellKey(cell))}
+              onToggle={toggleSelect}
             />
           ))}
         </div>
       )}
 
-      {pendingDelete && (
+      {selCount > 0 && <BottomBar segments={selectionSegments} />}
+
+      {pendingDeletes.length > 0 && (
         <DeleteToast
-          name={pendingDelete.name}
+          name={pendingDeletes.length === 1 ? pendingDeletes[0].name : `${pendingDeletes.length} images`}
           onUndo={handleDeleteUndo}
           onDismiss={dismissDelete}
         />
