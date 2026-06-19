@@ -93,6 +93,7 @@ export function useImageBatchDelete() {
       setStatus("saving");
       try {
         const restored: PendingDelete[] = [];
+        const failed: PendingDelete[] = [];
         for (const img of imgs) {
           try {
             const res = await fetch("/api/delete/restore", {
@@ -101,15 +102,24 @@ export function useImageBatchDelete() {
               body: JSON.stringify(img),
             });
             if (res.ok) restored.push(img);
+            else failed.push(img);
           } catch {
-            // Skip; the file remains in trash and can be restored manually.
+            failed.push(img);
           }
         }
         await onRestored(restored);
-        setStatus("saved");
+        setStatus(failed.length > 0 ? "idle" : "saved");
         clearTimer();
-        setPending([]);
-        return true;
+        if (failed.length > 0) {
+          // Keep the images that didn't come back in the toast so they're still
+          // shown as deleted and the user can tap undo again to retry — rather
+          // than silently stranding them hidden with the toast gone.
+          setPending(failed);
+          timer.current = setTimeout(() => setPending([]), TOAST_MS);
+        } else {
+          setPending([]);
+        }
+        return failed.length === 0;
       } finally {
         busy.current = false;
       }

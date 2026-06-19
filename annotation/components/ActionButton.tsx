@@ -51,7 +51,7 @@ export function ActionButton({ label, shortcut, onClick, variant = "neutral", di
         disabled={disabled}
         aria-label={label}
         title={title ?? label}
-        className={`grid h-8 w-8 cursor-pointer place-items-center rounded-pill border transition-colors disabled:pointer-events-none disabled:opacity-40 ${BTN[variant]}`}
+        className={`grid h-8 w-8 cursor-pointer touch-manipulation place-items-center rounded-pill border transition-colors disabled:pointer-events-none disabled:opacity-40 ${BTN[variant]}`}
       >
         {icon}
       </button>
@@ -63,7 +63,7 @@ export function ActionButton({ label, shortcut, onClick, variant = "neutral", di
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`flex cursor-pointer items-center gap-2 rounded-pill border px-3 py-1.5 text-sm transition-colors disabled:pointer-events-none disabled:opacity-40 ${BTN[variant]}`}
+      className={`flex cursor-pointer touch-manipulation items-center gap-2 rounded-pill border px-3 py-1.5 text-sm transition-colors disabled:pointer-events-none disabled:opacity-40 ${BTN[variant]}`}
     >
       {shortcut && (
         <kbd

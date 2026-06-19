@@ -493,7 +493,7 @@ function GridReview() {
               disabled={cellSize <= CELL_SIZE_MIN}
               aria-label="Smaller grid"
               title="Smaller cells"
-              className="grid h-6 w-6 place-items-center rounded-pill text-sm text-muted transition-colors hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+              className="grid h-9 w-9 place-items-center rounded-pill text-base text-muted touch-manipulation transition-colors hover:text-fg disabled:pointer-events-none disabled:opacity-40"
             >
               −
             </button>
@@ -503,7 +503,7 @@ function GridReview() {
               disabled={cellSize >= CELL_SIZE_MAX}
               aria-label="Larger grid"
               title="Larger cells"
-              className="grid h-6 w-6 place-items-center rounded-pill text-sm text-muted transition-colors hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+              className="grid h-9 w-9 place-items-center rounded-pill text-base text-muted touch-manipulation transition-colors hover:text-fg disabled:pointer-events-none disabled:opacity-40"
             >
               +
             </button>
@@ -551,7 +551,7 @@ function GridReview() {
         </div>
       ) : (
         <div
-          className={`grid gap-2 p-4 ${selCount > 0 ? "pb-28" : ""}`}
+          className={`grid touch-manipulation gap-2 p-4 ${selCount > 0 ? "pb-40" : ""}`}
           style={{
             gridTemplateColumns: `repeat(auto-fill, minmax(${cellSize}px, 1fr))`,
           }}

@@ -30,7 +30,7 @@ export function CropCell({ cell, size = 160, selected, onToggle }: CropCellProps
       onClick={() => onToggle(cell)}
       aria-pressed={selected}
       title={`${cell.name} — tap to ${selected ? "deselect" : "select"}`}
-      className={`group relative block aspect-square cursor-pointer select-none overflow-hidden rounded-md border bg-surface transition-colors ${
+      className={`relative block aspect-square cursor-pointer touch-manipulation select-none overflow-hidden rounded-md border bg-surface transition-colors ${
         selected ? "border-box ring-2 ring-box" : "border-border hover:border-border-strong"
       }`}
     >
@@ -51,13 +51,14 @@ export function CropCell({ cell, size = 160, selected, onToggle }: CropCellProps
         }`}
       />
 
-      {/* Selection badge: solid when selected, a faint outline on hover as a hint. */}
+      {/* Selection badge: an empty circle when unselected, filled green when
+          selected — visible on touch and desktop alike (no hover dependency). */}
       <span
         aria-hidden
         className={`pointer-events-none absolute left-1.5 top-1.5 grid h-5 w-5 place-items-center rounded-full border text-[11px] font-bold leading-none transition-all ${
           selected
             ? "border-box bg-box text-bg"
-            : "border-white/70 bg-black/40 text-transparent group-hover:text-white/80"
+            : "border-white/55 bg-black/35 text-transparent"
         }`}
       >
         ✓
