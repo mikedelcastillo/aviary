@@ -502,12 +502,13 @@ export default function Home() {
           : CATEGORIES.map((c) => <ProgressCardSkeleton key={c.id} />)}
       </div>
 
-      {/* Model benchmarks — explore how each model version scores per label.
-          Self-contained: fetches /api/benchmark and renders its own empty state. */}
-      <BenchmarkExplorer />
-
       {/* Label leaderboard — renders its own skeleton until stats arrive. */}
       <LabelLeaderboard stats={labelStats} cats={cats} />
+
+      {/* Model benchmarks — explore how each model version scores per label.
+          Self-contained: fetches /api/benchmark and renders its own empty state.
+          Sits at the bottom of the page. */}
+      <BenchmarkExplorer />
     </main>
   );
 }
