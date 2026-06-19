@@ -44,6 +44,7 @@ export default function DedupePage() {
   const [loading, setLoading] = useState(true);
   const [coldRun, setColdRun] = useState(true); // first fetch hashes everything
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   const [groupIdx, setGroupIdx] = useState(0);
   const [removeSet, setRemoveSet] = useState<Set<string>>(new Set());
@@ -102,6 +103,35 @@ export default function DedupePage() {
       cancelled = true;
     };
   }, [cats, threshold]);
+
+  // While a load is in flight, poll the shared indexer for hashing progress so
+  // the overlay shows a moving bar instead of a static spinner. Reuses the same
+  // endpoint the homepage warms with.
+  useEffect(() => {
+    if (!loading) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const params = new URLSearchParams();
+    const c = serializeCats(cats);
+    if (c) params.set("cats", c);
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/dedupe/progress?${params}`);
+        if (res.ok) {
+          const snap = (await res.json()) as { done: number; total: number };
+          if (!cancelled) setProgress({ done: snap.done, total: snap.total });
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+      if (!cancelled) timer = setTimeout(poll, 750);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [loading, cats]);
 
   const group = clusters && groupIdx < clusters.length ? clusters[groupIdx] : null;
 
@@ -419,7 +449,7 @@ export default function DedupePage() {
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-10">
-      <LoadingOverlay show={loading} label={loadingLabel} />
+      <LoadingOverlay show={loading} label={loadingLabel} progress={progress ?? undefined} />
 
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
