@@ -4,7 +4,8 @@ import { promises as fs } from "node:fs";
 import { sidecarFsPath } from "./paths";
 import { CATEGORIES, type CatId, type DedupeCluster, type DedupeMember } from "./types";
 import { listImages } from "./annotation-io";
-import { ensureHashes, type HashInfo } from "./hash-cache";
+import { type HashInfo } from "./hash-cache";
+import { ensureCatHashesForeground } from "./hash-indexer";
 import { hamming } from "./phash";
 
 /** True when a non-empty YOLO .txt sidecar exists (real labels; empty = negative). */
@@ -44,7 +45,7 @@ export async function clusterCategory(cat: CatId, threshold: number): Promise<De
   const names = listImages(cat);
   if (names.length === 0) return [];
 
-  const hashes = await ensureHashes(cat, names);
+  const hashes = await ensureCatHashesForeground(cat);
 
   // Greedy anchor clustering: attach each image to the existing cluster whose
   // anchor is closest, if within threshold; otherwise start a new cluster.
