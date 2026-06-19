@@ -18,6 +18,7 @@ train = "train:main"
 evaluate = "evaluate:main"
 prepare-dataset = "prepare_dataset:main"
 extract-frames = "extract_frames:main"
+benchmark = "benchmark:main"
 server = "lib.main:main"
 tests = "pytest:console_main"
 
@@ -39,6 +40,7 @@ packages = [
 "training/scripts/evaluate.py" = "evaluate.py"
 "training/scripts/prepare_dataset.py" = "prepare_dataset.py"
 "training/scripts/extract_frames.py" = "extract_frames.py"
+"training/scripts/benchmark.py" = "benchmark.py"
 
 # NOTE: `torch`/`torchvision` come in transitively via ultralytics (a default build that does
 # not match every GPU). The correct per-machine GPU build is installed into the venv by

@@ -15,6 +15,14 @@ export const DATA_ROOT =
 export const ROSTER_PATH =
   process.env.AVIARY_ROSTER ?? path.join(REPO_ROOT, "training", "roster.yaml");
 
+/** Directory of trained model weights (`<series>-NNN.pt`) + benchmark results. */
+export const MODELS_DIR =
+  process.env.AVIARY_MODELS_DIR ?? path.join(REPO_ROOT, "data", "models");
+
+/** Benchmark results file written by `scripts/benchmark.*` (training/scripts/benchmark.py). */
+export const BENCHMARK_PATH =
+  process.env.AVIARY_BENCHMARK ?? path.join(MODELS_DIR, "benchmark.json");
+
 /** Parent of the raw set (…/data/annotation) — home for cache + removed trees. */
 const ANNOTATION_ROOT = path.dirname(DATA_ROOT);
 

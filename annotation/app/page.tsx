@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ProgressCard } from "@/components/ProgressCard";
 import { CatToggle } from "@/components/CatToggle";
+import { BenchmarkExplorer } from "@/components/BenchmarkExplorer";
 import {
   ALL_CATS,
   CATEGORIES,
@@ -500,6 +501,10 @@ export default function Home() {
             ))
           : CATEGORIES.map((c) => <ProgressCardSkeleton key={c.id} />)}
       </div>
+
+      {/* Model benchmarks — explore how each model version scores per label.
+          Self-contained: fetches /api/benchmark and renders its own empty state. */}
+      <BenchmarkExplorer />
 
       {/* Label leaderboard — renders its own skeleton until stats arrive. */}
       <LabelLeaderboard stats={labelStats} cats={cats} />
