@@ -111,6 +111,7 @@ export async function ensureHashes(
   cat: CatId,
   names: string[],
   onProgress?: (done: number, total: number) => void,
+  concurrency = 8,
 ): Promise<Map<string, HashInfo>> {
   await loadDisk();
   const out = new Map<string, HashInfo>();
@@ -118,7 +119,6 @@ export async function ensureHashes(
   let dirty = false;
   let done = 0;
 
-  const CONCURRENCY = 8;
   let cursor = 0;
   async function worker(): Promise<void> {
     while (cursor < names.length) {
@@ -138,7 +138,7 @@ export async function ensureHashes(
       onProgress?.(done, names.length);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, names.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(concurrency, names.length) }, worker));
 
   if (dirty || mem.size !== before) {
     try {
@@ -153,4 +153,16 @@ export async function ensureHashes(
 /** Evict images from the in-memory cache (call after moving files out of raw/). */
 export function dropFromCache(cat: CatId, names: string[]): void {
   for (const name of names) mem.delete(key(cat, name));
+}
+
+/**
+ * Count how many of the given names currently have a cached hash entry — the
+ * cheap progress metric for dedupe (membership only; no stat, no decode). Loads
+ * the on-disk snapshot first so a cold server reports real coverage.
+ */
+export async function countCached(cat: CatId, names: string[]): Promise<number> {
+  await loadDisk();
+  let n = 0;
+  for (const name of names) if (mem.has(key(cat, name))) n++;
+  return n;
 }
