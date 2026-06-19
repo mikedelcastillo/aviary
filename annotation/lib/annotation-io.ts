@@ -124,6 +124,28 @@ export function invalidateManifest(): void {
   manifestDirSig = "";
 }
 
+// --- Aggregate result memoization -------------------------------------------
+// The home-page aggregates (progress / queue / box-queue / entry / label-stats)
+// are pure functions of the sidecar tree. The server is the SOLE writer of the
+// canonical .json, so a result stays valid until something changes: `writeVersion`
+// bumps on every .json write, and the manifest `generation` bumps on add/remove
+// (including external imports, via directory mtime). A warm revisit with no change
+// then does ZERO filesystem work — it returns the cached aggregate directly.
+let writeVersion = 0;
+const memoCache = new Map<string, { key: string; value: unknown }>();
+
+function memoKey(name: string, cats: CatId[]): string {
+  return `${name}|${getGeneration()}:${writeVersion}:${cats.slice().sort().join(",")}`;
+}
+function memoGet(name: string, cats: CatId[]): unknown | undefined {
+  if (process.env.ANNOT_MEMO === "0") return undefined; // kill-switch: always recompute
+  const hit = memoCache.get(name);
+  return hit && hit.key === memoKey(name, cats) ? hit.value : undefined;
+}
+function memoSet(name: string, cats: CatId[], value: unknown): void {
+  memoCache.set(name, { key: memoKey(name, cats), value });
+}
+
 export function getManifestEntry(n: number): ManifestEntry | undefined {
   return getManifest()[n];
 }
@@ -236,6 +258,7 @@ export async function writeAnnotation(cat: CatId, name: string, ann: Annotation)
   const clean: Annotation = { boxed: Boolean(ann.boxed), boxes: normalizeBoxes(ann.boxes) };
   await withFileLock(jsonPath, () => persistAnnotationFiles(jsonPath, txtPath, clean));
   invalidateState(cat, name);
+  writeVersion++;
 }
 
 /**
@@ -279,6 +302,7 @@ export async function mutateAnnotation(
     // writeAnnotation (which re-acquires the same lock) would just queue behind us.
     await persistAnnotationFiles(jsonPath, txtPath, clean);
     invalidateState(cat, name);
+    writeVersion++;
     return clean;
   });
 }
@@ -460,6 +484,8 @@ async function pendingSuggestionCount(cat: CatId, name: string): Promise<number>
 }
 
 export async function getProgress(): Promise<CategoryProgress[]> {
+  const cached = memoGet("progress", ALL_CATS);
+  if (cached) return cached as CategoryProgress[];
   const manifest = getManifest();
   const out: CategoryProgress[] = [];
   for (const c of CATEGORIES) {
@@ -494,6 +520,7 @@ export async function getProgress(): Promise<CategoryProgress[]> {
       startN: entries[0]?.n ?? 0,
     });
   }
+  memoSet("progress", ALL_CATS, out);
   return out;
 }
 
@@ -504,6 +531,8 @@ export async function getProgress(): Promise<CategoryProgress[]> {
  * qualify on their own.
  */
 export async function getQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
+  const cached = memoGet("queue", cats);
+  if (cached) return cached as number[];
   const manifest = filterByCats(getManifest(), cats);
   const flags = await Promise.all(
     manifest.map(async (e) => {
@@ -511,7 +540,9 @@ export async function getQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
       return s.boxed && s.hasUnlabeled;
     }),
   );
-  return manifest.filter((_, i) => flags[i]).map((e) => e.n);
+  const result = manifest.filter((_, i) => flags[i]).map((e) => e.n);
+  memoSet("queue", cats, result);
+  return result;
 }
 
 /**
@@ -520,9 +551,13 @@ export async function getQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
  * "skip finished images" behavior when boxing in random order.
  */
 export async function getBoxQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
+  const cached = memoGet("box-queue", cats);
+  if (cached) return cached as number[];
   const manifest = filterByCats(getManifest(), cats);
   const flags = await Promise.all(manifest.map((e) => quickState(e.cat, e.name).then((s) => !s.boxed)));
-  return manifest.filter((_, i) => flags[i]).map((e) => e.n);
+  const result = manifest.filter((_, i) => flags[i]).map((e) => e.n);
+  memoSet("box-queue", cats, result);
+  return result;
 }
 
 /**
@@ -532,13 +567,17 @@ export async function getBoxQueue(cats: CatId[] = ALL_CATS): Promise<number[]> {
  * Falls back to 0 when everything is already done.
  */
 export async function getEntryPoints(cats: CatId[] = ALL_CATS): Promise<{ box: number; label: number }> {
+  const cached = memoGet("entry", cats);
+  if (cached) return cached as { box: number; label: number };
   // Scope to the selected categories but report GLOBAL manifest indices (the
   // path param), so the box target is the first un-boxed image among `cats`.
   const manifest = filterByCats(getManifest(), cats);
   const boxedFlags = await Promise.all(manifest.map((e) => quickState(e.cat, e.name).then((s) => s.boxed)));
   const firstUnboxed = manifest.find((_, i) => !boxedFlags[i]);
   const queue = await getQueue(cats);
-  return { box: firstUnboxed?.n ?? manifest[0]?.n ?? 0, label: queue[0] ?? manifest[0]?.n ?? 0 };
+  const result = { box: firstUnboxed?.n ?? manifest[0]?.n ?? 0, label: queue[0] ?? manifest[0]?.n ?? 0 };
+  memoSet("entry", cats, result);
+  return result;
 }
 
 /**
@@ -592,6 +631,8 @@ export interface LabelStat {
  * roster label is included (even 0-count) so the home page can list them all.
  */
 export async function getLabelStats(cats: CatId[] = ALL_CATS): Promise<LabelStat[]> {
+  const cached = memoGet("label-stats", cats);
+  if (cached) return cached as LabelStat[];
   const manifest = filterByCats(getManifest(), cats);
   const counts = new Map<string, number>();
   await Promise.all(
@@ -602,7 +643,82 @@ export async function getLabelStats(cats: CatId[] = ALL_CATS): Promise<LabelStat
   );
   const stats = loadRoster().map((r) => ({ label: r.name, count: counts.get(r.name) ?? 0 }));
   stats.sort((a, b) => b.count - a.count);
+  memoSet("label-stats", cats, stats);
   return stats;
+}
+
+/** Everything the home page needs, computed in ONE pass over the manifest. */
+export interface HomeData {
+  progress: CategoryProgress[];
+  queue: number[];
+  boxQueue: number[];
+  entry: { box: number; label: number };
+  labelStats: LabelStat[];
+}
+
+/**
+ * Single-pass home payload. Instead of progress/queue/box-queue/entry/label-stats
+ * each independently iterating the full manifest, walk it ONCE, read each image's
+ * `.json` state + suggestion count a single time, and derive all five views from
+ * that. Memoized like the individual aggregates. `progress` is global (every
+ * category card); the queue/entry/label views are scoped to `cats`.
+ */
+export async function getHomeData(cats: CatId[] = ALL_CATS): Promise<HomeData> {
+  const cached = memoGet("home", cats);
+  if (cached) return cached as HomeData;
+
+  const manifest = getManifest();
+  const rows = await Promise.all(
+    manifest.map(async (e) => {
+      const [j, s] = await Promise.all([getJsonState(e.cat, e.name), getSuggestCount(e.cat, e.name)]);
+      return { e, j, s };
+    }),
+  );
+
+  const progress: CategoryProgress[] = CATEGORIES.map((c) => {
+    const cat = rows.filter((r) => r.e.cat === c.id);
+    let boxed = 0;
+    let labeled = 0;
+    let suggested = 0;
+    let suggestedBoxes = 0;
+    for (const r of cat) {
+      if (r.j.boxed) boxed++;
+      if (r.j.labeled) labeled++;
+      if (r.s > 0) {
+        suggested++;
+        suggestedBoxes += r.s;
+      }
+    }
+    return {
+      id: c.id,
+      title: c.title,
+      subtitle: c.subtitle,
+      total: cat.length,
+      boxed,
+      labeled,
+      suggested,
+      suggestedBoxes,
+      startN: cat[0]?.e.n ?? 0,
+    };
+  });
+
+  const scoped = rows.filter((r) => cats.includes(r.e.cat));
+  const queue = scoped.filter((r) => r.j.boxed && r.j.hasUnlabeled).map((r) => r.e.n);
+  const boxQueue = scoped.filter((r) => !r.j.boxed).map((r) => r.e.n);
+  const firstUnboxed = scoped.find((r) => !r.j.boxed);
+  const entry = {
+    box: firstUnboxed?.e.n ?? scoped[0]?.e.n ?? 0,
+    label: queue[0] ?? scoped[0]?.e.n ?? 0,
+  };
+  const counts = new Map<string, number>();
+  for (const r of scoped) for (const label of r.j.boxLabels) counts.set(label, (counts.get(label) ?? 0) + 1);
+  const labelStats = loadRoster()
+    .map((r) => ({ label: r.name, count: counts.get(r.name) ?? 0 }))
+    .sort((a, b) => b.count - a.count);
+
+  const data: HomeData = { progress, queue, boxQueue, entry, labelStats };
+  memoSet("home", cats, data);
+  return data;
 }
 
 export function imageExists(cat: CatId, name: string): boolean {
