@@ -2,6 +2,7 @@ import { getDedupeClusters } from "@/lib/dedupe";
 import { removeImage } from "@/lib/annotation-io";
 import { isValidCat, isValidName } from "@/lib/paths";
 import { DEDUPE_DEFAULT_THRESHOLD, parseCats, type CatId } from "@/lib/types";
+import { invalidateCat } from "@/lib/hash-indexer";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -53,6 +54,7 @@ export async function POST(req: Request): Promise<Response> {
       const res = await removeImage(cat as CatId, name);
       moved.push({ name, files: res.moved });
     }
+    invalidateCat(cat as CatId);
   } catch (e) {
     return new Response(`remove failed: ${(e as Error).message}`, { status: 500 });
   }
