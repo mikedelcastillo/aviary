@@ -22,7 +22,9 @@ try {
         $env:PYTHONPATH = $trainingPath
     }
 
-    uv run --no-sync python training/scripts/benchmark.py @args
+    # Default to the held-out TEST split so the homepage isn't scoring training
+    # images (pass --split all to score the whole labeled tree).
+    uv run --no-sync python training/scripts/benchmark.py --split test @args
 }
 finally {
     Pop-Location

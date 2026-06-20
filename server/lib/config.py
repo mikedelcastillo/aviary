@@ -50,7 +50,7 @@ class ModelConfig:
     # their detections are merged. A tuple (not a list) so this frozen dataclass
     # stays hashable.
     paths: tuple[Path, ...]
-    confidence: float = 0.25
+    confidence: float = 0.75
     iou: float = 0.5
     image_size: int = 960
     device: str = "auto"

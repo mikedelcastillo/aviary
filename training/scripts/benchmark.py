@@ -25,6 +25,7 @@ annotation homepage can chart how each new model version improved or regressed.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -57,13 +58,30 @@ MODEL_RE = re.compile(r"^([A-Za-z]+)-(\d+)$")
 
 Box = tuple[float, float, float, float]  # x1, y1, x2, y2 (normalized)
 
+# The benchmark scores at the SAME confidence the live server uses, so its numbers
+# reflect what the deployed detector actually does. Single source of truth: the
+# server's ModelConfig (server/lib/config.py). Falls back to the historical default
+# only if the server package isn't importable (e.g. a stripped training env).
+try:
+    from lib.config import ModelConfig as _ServerModelConfig
 
-def parse_args() -> argparse.Namespace:
+    _DEFAULT_CONF = _ServerModelConfig.confidence
+except Exception:
+    _DEFAULT_CONF = 0.25
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--models-dir", type=Path, default=Path("data/models"), help="Directory of <series>-NNN.pt models")
     parser.add_argument("--data-root", type=Path, default=Path("data/annotation/raw"), help="Labeled annotation root")
     parser.add_argument("--output", type=Path, default=Path("data/models/benchmark.json"), help="Results JSON path")
-    parser.add_argument("--conf", type=float, default=0.25, help="Detection confidence threshold")
+    parser.add_argument(
+        "--conf",
+        type=float,
+        default=_DEFAULT_CONF,
+        help="Detection confidence threshold (default mirrors the server: "
+        "server/lib/config.py ModelConfig.confidence)",
+    )
     parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold for matching a detection to a GT box")
     parser.add_argument("--nms-iou", type=float, default=0.7, help="NMS IoU passed to the model's predict()")
     parser.add_argument("--imgsz", type=int, default=960, help="Inference image size")
@@ -71,7 +89,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Max labeled images to score per category (0 = all)")
     parser.add_argument("--series", action="append", choices=sorted(SERIES_CATEGORIES), help="Only this series (repeatable)")
     parser.add_argument("--models", action="append", help="Only these model filenames/stems (repeatable)")
-    return parser.parse_args()
+    parser.add_argument(
+        "--split",
+        default="all",
+        choices=["all", "train", "val", "test"],
+        help="Score only this dataset split (default all). 'test' = the held-out set "
+        "from the manifest, so the score isn't measured on training images.",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=Path("data/training/datasets"),
+        help="Where <series>/manifest.csv lives (used only when --split is not 'all')",
+    )
+    return parser.parse_args(argv)
+
+
+def load_split_sources(dataset_dir: Path, series: str, split: str) -> set[Path] | None:
+    """Resolved source-image paths in a dataset split, or ``None`` if no manifest.
+
+    Lets the benchmark score ONLY a held-out split (e.g. ``test``) instead of the
+    whole labeled tree (which is mostly training data and flatters the score). The
+    manifest is written by ``prepare_dataset.py`` at dataset-build time.
+    """
+    manifest = dataset_dir / series / "manifest.csv"
+    if not manifest.exists():
+        return None
+    allowed: set[Path] = set()
+    with manifest.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("split") == split and row.get("source_image"):
+                allowed.add(Path(row["source_image"]).resolve())
+    return allowed
 
 
 # --- Geometry ---------------------------------------------------------------
@@ -240,12 +289,23 @@ def evaluate_model(model_path: Path, series: str, categories: list[str], args) -
 
     # Gather first (cheap sidecar reads) so we have an accurate progress total and
     # can apply --limit deterministically.
+    allowed: set[Path] | None = None
+    if args.split != "all":
+        allowed = load_split_sources(args.dataset_dir, series, args.split)
+        if allowed is None:
+            print(
+                f"  no manifest at {args.dataset_dir / series}/manifest.csv; scoring ALL "
+                f"{series} images (run prepare-dataset to get a held-out {args.split} split)"
+            )
+
     gathered: dict[str, list[GatheredImage]] = {}
     na_total = 0
     for cat in categories:
         cat_dir = (args.data_root / CATEGORY_DIRS[cat]).resolve()
         items: list[GatheredImage] = []
         for image in list_images(cat_dir):
+            if allowed is not None and image.resolve() not in allowed:
+                continue
             gts = read_gt(image)
             if not gts:
                 continue
@@ -365,7 +425,10 @@ def main() -> None:
     if not models:
         raise SystemExit(f"No benchmarkable models in {args.models_dir} (expected <series>-NNN.pt).")
 
-    print(f"Benchmarking {len(models)} model(s) — conf={args.conf} iou={args.iou} imgsz={args.imgsz} device={args.device}")
+    print(
+        f"Benchmarking {len(models)} model(s) — split={args.split} conf={args.conf} "
+        f"iou={args.iou} imgsz={args.imgsz} device={args.device}"
+    )
 
     series_models: dict[str, list[dict]] = defaultdict(list)
     for series, _version, path in models:
@@ -385,7 +448,7 @@ def main() -> None:
     payload = {
         "schemaVersion": 1,
         "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "config": {"confidence": args.conf, "iou": args.iou, "nmsIou": args.nms_iou, "imgsz": args.imgsz},
+        "config": {"confidence": args.conf, "iou": args.iou, "nmsIou": args.nms_iou, "imgsz": args.imgsz, "split": args.split},
         "series": [
             {"name": name, "categories": SERIES_CATEGORIES[name], "models": series_models[name]}
             for name in SERIES_CATEGORIES

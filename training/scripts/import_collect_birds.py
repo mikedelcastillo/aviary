@@ -133,7 +133,15 @@ def target_stem(source_stem: str, lighting: str, detection: dict | None) -> str:
 
 
 def yolo_line(detection: dict) -> str | None:
-    """Convert a detection's pixel bbox_xyxy to a normalized YOLO line (class 0)."""
+    """Convert a detection's pixel bbox_xyxy to a normalized YOLO line.
+
+    The class is a PLACEHOLDER ``0`` (``draft`` in the roster): these are
+    un-reviewed pre-boxes, not ground truth. The annotation tool ignores the
+    placeholder class (it seeds the box unlabeled), and dataset prep excludes any
+    frame without a human-confirmed ``.json``
+    (``aviary_training.annotations.is_training_ready``), so this ``0`` never
+    reaches training unless ``prepare-dataset --include-unreviewed`` is passed.
+    """
     frame = detection.get("frame", {})
     bbox = detection.get("detection", {}).get("bbox_xyxy")
     width = frame.get("width")

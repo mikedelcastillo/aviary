@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import argparse
 import csv
-import random
 import shutil
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from aviary_training.annotations import review_status
 from aviary_training.roster import classes_for_model, load_roster, remap_label_lines
+from aviary_training.splits import group_key, stratified_group_split
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -23,7 +25,7 @@ class Sample:
     label: Path | None
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, type=Path, help="YOLO label export directory")
     parser.add_argument("--output", required=True, type=Path, help="Output Ultralytics dataset directory")
@@ -44,11 +46,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--group-minutes",
+        type=int,
+        default=10,
+        help="Time-bucket width (minutes) for grouping same-camera CCTV bursts, so "
+        "near-duplicate frames stay together in one split.",
+    )
+    parser.add_argument(
         "--require-labels",
         action="store_true",
         help="Fail if any image is missing a matching YOLO .txt label file",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--include-unreviewed",
+        action="store_true",
+        help="Also include images that are NOT human-reviewed (no boxed .json), "
+        "e.g. auto-collected placeholder labels (class 0 = draft). Default: train "
+        "only on reviewed, fully-labeled frames.",
+    )
+    return parser.parse_args(argv)
 
 
 def iter_images(root: Path) -> Iterable[Path]:
@@ -84,37 +100,49 @@ def choose_label(image: Path, labels_by_stem: dict[str, list[Path]]) -> Path | N
     return candidates[0]
 
 
+def label_classes(label: Path | None) -> list[int]:
+    """The global class indices in a YOLO label file (empty if none/missing)."""
+    if label is None:
+        return []
+    classes: list[int] = []
+    for line in label.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            classes.append(int(line.split()[0]))
+        except (ValueError, IndexError):
+            continue
+    return classes
+
+
 def split_samples(
     samples: list[Sample],
     val_ratio: float,
     test_ratio: float,
     seed: int,
+    group_minutes: int = 10,
 ) -> dict[str, list[Sample]]:
+    """Group-aware, class-stratified split (see ``aviary_training.splits``).
+
+    Near-duplicate CCTV bursts (same camera + time window) stay in ONE split so
+    they can't leak across train/val/test, and each label is spread across the
+    splits so rare classes (e.g. the IR species) are actually represented in val
+    and test instead of landing 0-4 boxes there by luck.
+    """
     if val_ratio < 0 or test_ratio < 0 or val_ratio + test_ratio >= 1:
         raise ValueError("val-ratio and test-ratio must be non-negative and sum to less than 1")
 
-    shuffled = samples[:]
-    random.Random(seed).shuffle(shuffled)
+    keys = [group_key(sample.image.name, group_minutes) for sample in samples]
+    label_sets = [label_classes(sample.label) for sample in samples]
+    assignment = stratified_group_split(
+        keys, label_sets, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed
+    )
 
-    count = len(shuffled)
-    test_count = int(round(count * test_ratio))
-    val_count = int(round(count * val_ratio))
-
-    if count >= 3:
-        test_count = max(1, test_count)
-        val_count = max(1, val_count)
-
-    train_count = count - val_count - test_count
-    if train_count <= 0:
-        train_count = max(1, count)
-        val_count = 0
-        test_count = 0
-
-    return {
-        "train": shuffled[:train_count],
-        "val": shuffled[train_count : train_count + val_count],
-        "test": shuffled[train_count + val_count :],
-    }
+    splits: dict[str, list[Sample]] = {"train": [], "val": [], "test": []}
+    for sample, split in zip(samples, assignment):
+        splits[split].append(sample)
+    return splits
 
 
 def slug_for(path: Path, root: Path) -> str:
@@ -197,8 +225,26 @@ def write_manifest(output: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def main() -> None:
-    args = parse_args()
+def select_reviewed(samples: list[Sample]) -> tuple[list[Sample], Counter[str]]:
+    """Keep only human-reviewed, fully-labeled images; tally why the rest were dropped.
+
+    The annotation tool writes a ``.json`` only when a human confirms an image, so
+    gating on it excludes auto-collected placeholder labels (which would otherwise
+    train as ``draft``) and un-finished frames. See ``aviary_training.annotations``.
+    """
+    kept: list[Sample] = []
+    skipped: Counter[str] = Counter()
+    for sample in samples:
+        status = review_status(sample.image)
+        if status == "ready":
+            kept.append(sample)
+        else:
+            skipped[status] += 1
+    return kept, skipped
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     source = args.source.resolve()
     output = args.output.resolve()
 
@@ -213,6 +259,24 @@ def main() -> None:
     if not samples:
         raise SystemExit(f"No images found under {source}")
 
+    if not args.include_unreviewed:
+        kept, skipped = select_reviewed(samples)
+        total = len(samples)
+        print(
+            f"Reviewed gate: keeping {len(kept)} of {total} images "
+            "(only human-confirmed, fully-labeled frames train)."
+        )
+        for status in ("unreviewed", "unboxed", "incomplete"):
+            if skipped.get(status):
+                print(f"  skipped {skipped[status]} {status}")
+        print("  (pass --include-unreviewed to train on auto/un-reviewed labels too)")
+        samples = kept
+        if not samples:
+            raise SystemExit(
+                "No reviewed images found. Label some in the annotation tool, or pass "
+                "--include-unreviewed to use auto/un-reviewed labels."
+            )
+
     if args.require_labels:
         missing = [sample.image for sample in samples if sample.label is None]
         if missing:
@@ -222,7 +286,7 @@ def main() -> None:
     names = model_classes.names
     remap = model_classes.remap
 
-    splits = split_samples(samples, args.val_ratio, args.test_ratio, args.seed)
+    splits = split_samples(samples, args.val_ratio, args.test_ratio, args.seed, args.group_minutes)
     rows: list[dict[str, str]] = []
     for split, split_samples_ in splits.items():
         rows.extend(copy_split(split, split_samples_, source, output, remap))

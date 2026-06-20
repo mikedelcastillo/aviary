@@ -15,4 +15,6 @@ uv sync
 # PYTHONPATH matches the other wrappers for consistency.
 export PYTHONPATH="$PWD/training${PYTHONPATH:+:$PYTHONPATH}"
 
-uv run --no-sync python training/scripts/benchmark.py "$@"
+# Default to the held-out TEST split so the homepage isn't scoring training
+# images (pass --split all to score the whole labeled tree).
+uv run --no-sync python training/scripts/benchmark.py --split test "$@"
