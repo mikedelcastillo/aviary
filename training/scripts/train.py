@@ -61,6 +61,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Hue augmentation gain (Ultralytics hsv_h; default 0.015). Set 0 to never rotate "
         "hue, preserving the color cues that separate same-shape birds.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="RNG seed (Ultralytics seed). Vary across otherwise-identical runs to "
+        "measure run-to-run variance — essential when a metric's test slice is tiny.",
+    )
     return parser.parse_args(argv)
 
 
@@ -82,6 +89,7 @@ def build_train_args(args: argparse.Namespace) -> dict:
         "name": args.name,
         "exist_ok": True,
         "patience": args.patience,
+        "seed": args.seed,
     }
     if args.time is not None:
         train_args["time"] = args.time
