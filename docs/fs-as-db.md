@@ -13,7 +13,7 @@ next to it under `data/annotation/raw/<category>/`:
 |---|---|---|
 | `<image>.json` | Source-of-truth annotation: `{ v, boxed, boxes[] }` | **Yes** |
 | `<image>.txt` | YOLO export (labeled boxes only), derived from `.json` | No (regenerable) |
-| `<image>.suggest.json` | Model proposals (suggest_boxes / suggest_labels) | No (advisory) |
+| `<image>.suggest.json` | Model proposals (training/scripts/suggest.py) | No (advisory) |
 
 `v` is the schema version stamped on every write, so the format can evolve and be
 migrated later. An empty `.txt` is meaningful — it marks a reviewed "negative."

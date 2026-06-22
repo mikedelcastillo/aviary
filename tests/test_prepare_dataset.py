@@ -64,6 +64,38 @@ def test_main_excludes_unreviewed_by_default(tmp_path: Path) -> None:
     assert _train_images(output) == ["reviewed_percy"]
 
 
+def test_main_clears_stale_files_from_previous_prep(tmp_path: Path) -> None:
+    # Re-prepping over an existing dataset dir must not leave behind files from a
+    # prior run: a frame that lands in val/test this time but was copied to train
+    # last time would otherwise sit in BOTH folders and leak across the split.
+    src = tmp_path / "raw"
+    src.mkdir()
+    _reviewed_image(src, "reviewed_percy")
+    output = tmp_path / "ds"
+
+    stale_image = output / "images" / "train" / "ghost_from_last_run.jpg"
+    stale_label = output / "labels" / "train" / "ghost_from_last_run.txt"
+    stale_image.parent.mkdir(parents=True, exist_ok=True)
+    stale_label.parent.mkdir(parents=True, exist_ok=True)
+    stale_image.write_bytes(b"")
+    stale_label.write_text("0 0.5 0.5 0.1 0.1\n", encoding="utf-8")
+
+    _load_module().main(
+        [
+            "--source", str(src),
+            "--output", str(output),
+            "--model", "live",
+            "--roster", str(_roster(tmp_path)),
+            "--val-ratio", "0",
+            "--test-ratio", "0",
+        ]
+    )
+
+    assert _train_images(output) == ["reviewed_percy"]
+    assert not stale_image.exists()
+    assert not stale_label.exists()
+
+
 def test_main_include_unreviewed_keeps_placeholders(tmp_path: Path) -> None:
     src = tmp_path / "raw"
     src.mkdir()

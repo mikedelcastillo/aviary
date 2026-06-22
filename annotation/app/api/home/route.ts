@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 /**
- * GET /api/home?cats=day,ir -> { progress, queue, boxQueue, entry, labelStats }.
+ * GET /api/home?cats=day,ir -> { progress, queue, boxQueue, suggestionQueue, entry, labelStats }.
  * One server-side pass over the manifest replaces the five separate homepage
  * scans: one round-trip, each sidecar read once. `progress` is global; the rest
  * are scoped to `cats`.

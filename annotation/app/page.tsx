@@ -26,6 +26,7 @@ import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 
 const CATS_STORAGE_KEY = "aviary.cats";
 const RANDOM_STORAGE_KEY = "aviary.random";
+const SUGGESTIONS_STORAGE_KEY = "aviary.suggestionsOnly";
 
 interface LabelStat {
   label: string;
@@ -37,6 +38,7 @@ interface HomeData {
   progress: CategoryProgress[];
   queue: number[];
   boxQueue: number[];
+  suggestionQueue: number[];
   entry: { box: number; label: number };
   labelStats: LabelStat[];
 }
@@ -101,11 +103,13 @@ export default function Home() {
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [queue, setQueue] = useState<number[] | null>(null);
   const [boxQueue, setBoxQueue] = useState<number[] | null>(null);
+  const [suggestionQueue, setSuggestionQueue] = useState<number[] | null>(null);
   const [entry, setEntry] = useState<{ box: number; label: number } | null>(null);
   const [labelStats, setLabelStats] = useState<LabelStat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cats, setCats] = useState<CatId[]>(ALL_CATS);
   const [random, setRandom] = useState(false);
+  const [suggestionsOnly, setSuggestionsOnly] = useState(false);
   const [dedupeProgress, setDedupeProgress] = useState<{
     done: number;
     total: number;
@@ -128,6 +132,7 @@ export default function Home() {
       const saved = window.localStorage.getItem(CATS_STORAGE_KEY);
       if (saved) setCats(parseCats(saved));
       setRandom(window.localStorage.getItem(RANDOM_STORAGE_KEY) === "1");
+      setSuggestionsOnly(window.localStorage.getItem(SUGGESTIONS_STORAGE_KEY) === "1");
     } catch {
       /* localStorage unavailable — keep default */
     }
@@ -153,6 +158,15 @@ export default function Home() {
       /* ignore */
     }
   }, [random]);
+
+  // Persist the suggestions-only preference whenever it changes.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SUGGESTIONS_STORAGE_KEY, suggestionsOnly ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  }, [suggestionsOnly]);
 
   // Full manifest is selection-independent (ignores cats) — fetch once.
   useEffect(() => {
@@ -190,12 +204,14 @@ export default function Home() {
       setProgress(cached.progress);
       setQueue(cached.queue);
       setBoxQueue(cached.boxQueue);
+      setSuggestionQueue(cached.suggestionQueue);
       setEntry(cached.entry);
       setLabelStats(cached.labelStats);
       setRevalidating(true);
     } else {
       setQueue(null);
       setBoxQueue(null);
+      setSuggestionQueue(null);
       setEntry(null);
       setLabelStats(null);
       setRevalidating(false);
@@ -211,6 +227,7 @@ export default function Home() {
         setProgress(data.progress);
         setQueue(data.queue);
         setBoxQueue(data.boxQueue);
+        setSuggestionQueue(data.suggestionQueue);
         setEntry(data.entry);
         setLabelStats(data.labelStats);
         writeHomeCache(catsKey, data);
@@ -291,6 +308,27 @@ export default function Home() {
   const labelTarget = entry?.label ?? (queue && queue.length > 0 ? queue[0] : 0);
   const labelEmpty = queue !== null && queue.length === 0;
 
+  // When the Suggestions filter is on, Box/Label only walk frames that still have
+  // pending model proposals — restrict each mode's candidate set to its
+  // intersection with the suggestion queue. Both gate the enter buttons: Box is
+  // normally always enterable (it falls back to the first in-scope frame), but in
+  // suggestions-only mode it must no-op when no boxed/unboxed frame carries
+  // suggestions. `null` (still loading) means "not known empty yet".
+  const suggestSet = useMemo(
+    () => (suggestionQueue ? new Set(suggestionQueue) : null),
+    [suggestionQueue],
+  );
+  const boxSuggestEmpty =
+    suggestionsOnly && boxQueue !== null && suggestSet !== null
+      ? !boxQueue.some((n) => suggestSet.has(n))
+      : false;
+  const labelSuggestEmpty =
+    suggestionsOnly && queue !== null && suggestSet !== null
+      ? !queue.some((n) => suggestSet.has(n))
+      : false;
+  const boxDisabled = boxSuggestEmpty;
+  const labelDisabled = labelEmpty || labelSuggestEmpty;
+
   // Enter a mode. Land on the FIRST image still needing work in the seeded order
   // — computed exactly as the Box/Label page does (shuffle the full in-scope
   // manifest with the same seed, then pick the first to-do), so entry matches the
@@ -301,20 +339,41 @@ export default function Home() {
     [manifest, cats],
   );
   const enterBox = () => {
+    if (boxDisabled) return;
+    // Suggestions-only but the suggestion set hasn't loaded yet — don't enter with
+    // an unfiltered queue; wait for the data (revalidate fills it momentarily).
+    if (suggestionsOnly && !suggestSet) return;
     const seed = random ? newSeed() : null;
     const orderedHome = orderBySeed(filteredHome, seed);
-    const set = new Set(boxQueue ?? []);
-    const first = orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
-    const target = first?.n ?? boxTarget;
+    // Suggestions-only: walk only boxQueue frames that carry pending suggestions.
+    const candidates =
+      suggestionsOnly && suggestSet ? (boxQueue ?? []).filter((n) => suggestSet.has(n)) : boxQueue ?? [];
+    const set = new Set(candidates);
+    // In suggestions-only mode the candidate set is authoritative — never fall
+    // back to a non-suggestion frame; bail if nothing matches (guarded above).
+    const first = suggestionsOnly
+      ? orderedHome.find((e) => set.has(e.n))
+      : orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
+    const target = first?.n ?? (suggestionsOnly ? null : boxTarget);
+    if (target === null || target === undefined) return;
     router.push(withNav(`/box/${target}`, cats, seed));
   };
   const enterLabel = () => {
-    if (labelEmpty) return;
+    if (labelDisabled) return;
+    // Suggestions-only but the suggestion set hasn't loaded yet — don't enter with
+    // an unfiltered queue; wait for the data (revalidate fills it momentarily).
+    if (suggestionsOnly && !suggestSet) return;
     const seed = random ? newSeed() : null;
     const orderedHome = orderBySeed(filteredHome, seed);
-    const set = new Set(queue ?? []);
-    const first = orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
-    const target = first?.n ?? labelTarget;
+    // Suggestions-only: walk only label-queue frames that carry pending suggestions.
+    const candidates =
+      suggestionsOnly && suggestSet ? (queue ?? []).filter((n) => suggestSet.has(n)) : queue ?? [];
+    const set = new Set(candidates);
+    const first = suggestionsOnly
+      ? orderedHome.find((e) => set.has(e.n))
+      : orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
+    const target = first?.n ?? (suggestionsOnly ? null : labelTarget);
+    if (target === null || target === undefined) return;
     router.push(withNav(`/label/${target}`, cats, seed));
   };
 
@@ -389,35 +448,61 @@ export default function Home() {
         </div>
       )}
 
-      {/* Category selector (left) + randomize toggle (right). Scopes and
-          orders everything below. Both are interactive immediately — the
-          per-category counts pop in once progress lands. */}
+      {/* Category selector (left) + randomize / suggestions toggles (right).
+          Scopes and orders everything below. All are interactive immediately —
+          the per-category counts pop in once progress lands. */}
       <div className="mt-8 flex flex-wrap items-center justify-between gap-2">
         <CatToggle selected={cats} totals={categoryTotals} onChange={setCats} />
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={random}
-          onClick={() => setRandom(!random)}
-          title="Shuffle image order each time you enter Box/Label"
-          className={
-            "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
-            (random
-              ? "border-fg bg-fg text-bg"
-              : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
-          }
-        >
-          <span
-            aria-hidden
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={suggestionsOnly}
+            onClick={() => setSuggestionsOnly(!suggestionsOnly)}
+            title="Only visit frames that have pending model suggestions when entering Box/Label"
             className={
-              "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border text-[9px] leading-none " +
-              (random ? "border-bg/40 bg-bg/20 text-bg" : "border-border-strong text-transparent")
+              "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
+              (suggestionsOnly
+                ? "border-fg bg-fg text-bg"
+                : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
             }
           >
-            ✓
-          </span>
-          <span className="font-medium">Randomize</span>
-        </button>
+            <span
+              aria-hidden
+              className={
+                "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border text-[9px] leading-none " +
+                (suggestionsOnly ? "border-bg/40 bg-bg/20 text-bg" : "border-border-strong text-transparent")
+              }
+            >
+              ✓
+            </span>
+            <span className="font-medium">Suggestions</span>
+          </button>
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={random}
+            onClick={() => setRandom(!random)}
+            title="Shuffle image order each time you enter Box/Label"
+            className={
+              "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
+              (random
+                ? "border-fg bg-fg text-bg"
+                : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
+            }
+          >
+            <span
+              aria-hidden
+              className={
+                "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border text-[9px] leading-none " +
+                (random ? "border-bg/40 bg-bg/20 text-bg" : "border-border-strong text-transparent")
+              }
+            >
+              ✓
+            </span>
+            <span className="font-medium">Randomize</span>
+          </button>
+        </div>
       </div>
 
       {/* Primary entry points */}
@@ -425,13 +510,18 @@ export default function Home() {
         <button
           type="button"
           onClick={enterBox}
-          className="group flex cursor-pointer flex-col rounded-2xl bg-fg p-6 text-left text-bg transition-opacity hover:opacity-90"
+          aria-disabled={boxDisabled}
+          title={boxDisabled ? "No frames with pending suggestions to box" : undefined}
+          className={
+            "group flex flex-col rounded-2xl bg-fg p-6 text-left text-bg transition-opacity " +
+            (boxDisabled ? "cursor-default opacity-40" : "cursor-pointer hover:opacity-90")
+          }
         >
           <span className="text-lg font-semibold">Box mode</span>
           <span className="mt-1 text-sm opacity-70">Draw &amp; vet bounding boxes</span>
           {totals ? (
             <span className="mt-4 font-mono text-xs opacity-60">
-              {totals.boxed}/{totals.total} boxed
+              {boxDisabled ? "No suggestions to box" : `${totals.boxed}/${totals.total} boxed`}
             </span>
           ) : (
             <span className="mt-4 h-4 w-20 animate-pulse rounded bg-bg/20" />
@@ -441,11 +531,17 @@ export default function Home() {
         <button
           type="button"
           onClick={enterLabel}
-          aria-disabled={labelEmpty}
-          title={labelEmpty ? "Nothing to label yet" : undefined}
+          aria-disabled={labelDisabled}
+          title={
+            labelEmpty
+              ? "Nothing to label yet"
+              : labelSuggestEmpty
+                ? "No frames with pending suggestions to label"
+                : undefined
+          }
           className={
             "group flex cursor-pointer flex-col rounded-2xl border p-6 text-left transition-colors " +
-            (labelEmpty
+            (labelDisabled
               ? "border-border bg-surface text-faint hover:border-border-strong"
               : "border-border-strong bg-surface text-fg hover:bg-surface-2")
           }
@@ -456,7 +552,11 @@ export default function Home() {
             <span className="mt-4 h-4 w-24 animate-pulse rounded bg-elevated" />
           ) : (
             <span className="mt-4 font-mono text-xs text-faint">
-              {labelEmpty ? "Nothing to label yet" : `${queueLen} in queue`}
+              {labelEmpty
+                ? "Nothing to label yet"
+                : labelSuggestEmpty
+                  ? "No suggestions to label"
+                  : `${queueLen} in queue`}
             </span>
           )}
         </button>

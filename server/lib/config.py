@@ -50,7 +50,9 @@ class ModelConfig:
     # their detections are merged. A tuple (not a list) so this frozen dataclass
     # stays hashable.
     paths: tuple[Path, ...]
-    confidence: float = 0.75
+    # The detection confidence floor. 0.5 is the F1 peak on the held-out test
+    # split; the live server can override it via the MODEL_CONFIDENCE env var.
+    confidence: float = 0.5
     iou: float = 0.5
     image_size: int = 960
     device: str = "auto"
@@ -159,8 +161,45 @@ def _model_paths() -> tuple[Path, ...]:
     return paths
 
 
+def _model_confidence() -> float:
+    """Detection confidence floor; the env overrides the ModelConfig default.
+
+    Kept as an env knob (unlike iou/image_size) because the operating point is a
+    deployment trade-off — lower it for more recall, raise it for more precision —
+    that you tune without editing code. Blank/unset falls back to the single
+    source of truth, the dataclass default.
+    """
+    raw = os.environ.get("MODEL_CONFIDENCE", "").strip()
+    if not raw:
+        return ModelConfig.confidence
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"MODEL_CONFIDENCE must be a number, got {raw!r}") from exc
+
+
+def _model_image_size() -> int:
+    """Inference image size (px); the env overrides the ModelConfig default.
+
+    Like confidence, this is a deployment trade-off worth exposing: higher sizes
+    recover recall on small/distant birds (live-007 measured best at 1280) at the
+    cost of slower inference. Blank/unset falls back to the dataclass default.
+    """
+    raw = os.environ.get("MODEL_IMAGE_SIZE", "").strip()
+    if not raw:
+        return ModelConfig.image_size
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"MODEL_IMAGE_SIZE must be an integer, got {raw!r}") from exc
+
+
 def build_config() -> AppConfig:
-    model = ModelConfig(paths=_model_paths())
+    model = ModelConfig(
+        paths=_model_paths(),
+        confidence=_model_confidence(),
+        image_size=_model_image_size(),
+    )
 
     telegram = TelegramConfig(
         enabled=True,

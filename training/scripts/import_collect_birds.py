@@ -8,9 +8,11 @@ skipping any that don't exist yet. Non-roster folders (cat/, dog/, …) are igno
 
 For each folder it reads `*.jpg` + paired `*.json` detection files, classifies
 each frame as `day` (color) or `ir` (infrared/night) from image content, moves it
-into `data/annotation/raw/tapo/{day,ir}/` with a clean name, and writes a YOLO
-sidecar `.txt` from the detection box so the bird is pre-boxed when you open the
-frame to label it. The consumed `.json` is deleted.
+into `data/annotation/raw/tapo/{day,ir}/` with a clean name, and writes a
+non-authoritative `<stem>.suggest.json` from the detection box so the bird shows
+up as a YELLOW suggestion (accept/reject) when you open the frame to label it. The
+folder name carries the roster identity (the generic `bird` folder stays
+unlabeled). The consumed detection `.json` is deleted.
 
 Day/IR is decided from content, not timestamps: IR/night frames are grayscale
 (R=G=B) even though the JPEG is still 3-channel, so we measure the fraction of
@@ -38,6 +40,7 @@ from rich.progress import (
 )
 
 from aviary_training.roster import load_roster
+from aviary_training.suggest import write_suggestions
 
 console = Console()
 
@@ -83,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-labels",
         action="store_true",
-        help="Skip YOLO sidecar generation (sort/move images only)",
+        help="Skip suggestion sidecar generation (sort/move images only)",
     )
     parser.add_argument(
         "--dry-run",
@@ -132,15 +135,19 @@ def target_stem(source_stem: str, lighting: str, detection: dict | None) -> str:
     return f"{camera}_{lighting}_{source_stem}"
 
 
-def yolo_line(detection: dict) -> str | None:
-    """Convert a detection's pixel bbox_xyxy to a normalized YOLO line.
+def suggestion_box(detection: dict, label: str | None) -> dict | None:
+    """Build ONE non-authoritative proposal box from a detection's pixel bbox.
 
-    The class is a PLACEHOLDER ``0`` (``draft`` in the roster): these are
-    un-reviewed pre-boxes, not ground truth. The annotation tool ignores the
-    placeholder class (it seeds the box unlabeled), and dataset prep excludes any
-    frame without a human-confirmed ``.json``
-    (``aviary_training.annotations.is_training_ready``), so this ``0`` never
-    reaches training unless ``prepare-dataset --include-unreviewed`` is passed.
+    Returns a box dict shaped for ``<image>.suggest.json`` — normalized
+    center+size geometry plus ``conf``/``label``/``labelConf`` — that the
+    annotation tool renders as a YELLOW suggestion to accept or reject. These are
+    proposals, not ground truth: dataset prep excludes any frame without a
+    human-confirmed ``.json`` (``aviary_training.annotations``), so they never
+    reach training until a human reviews the frame.
+
+    ``label`` is the folder's roster identity, or None for the generic ``bird``
+    folder (proposal stays unlabeled). Returns None when the detection lacks the
+    geometry needed to place a box.
     """
     frame = detection.get("frame", {})
     bbox = detection.get("detection", {}).get("bbox_xyxy")
@@ -150,21 +157,41 @@ def yolo_line(detection: dict) -> str | None:
         return None
 
     x1, y1, x2, y2 = bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]
-    cx = ((x1 + x2) / 2) / width
-    cy = ((y1 + y2) / 2) / height
-    w = (x2 - x1) / width
-    h = (y2 - y1) / height
     clamp = lambda v: min(1.0, max(0.0, v))
-    return f"0 {clamp(cx):.6f} {clamp(cy):.6f} {clamp(w):.6f} {clamp(h):.6f}"
+    cx = clamp(((x1 + x2) / 2) / width)
+    cy = clamp(((y1 + y2) / 2) / height)
+    w = clamp((x2 - x1) / width)
+    h = clamp((y2 - y1) / height)
+
+    raw_conf = detection.get("detection", {}).get("confidence")
+    conf = float(raw_conf) if raw_conf is not None else 1.0
+
+    return {
+        "id": "sug-0",
+        "cx": round(cx, 6),
+        "cy": round(cy, 6),
+        "w": round(w, 6),
+        "h": round(h, 6),
+        "conf": round(conf, 4),
+        "label": label,
+        "labelConf": round(conf, 4) if label is not None else None,
+    }
 
 
-def classify_and_apply(image_path: Path, args, day_dir: Path, ir_dir: Path) -> dict:
-    """Classify one frame day/ir, then move + pre-box it (or plan it under dry-run).
+def classify_and_apply(
+    image_path: Path, args, day_dir: Path, ir_dir: Path, class_name: str
+) -> dict:
+    """Classify one frame day/ir, then move + suggest-box it (or plan it under dry-run).
 
-    Returns a record `{lighting, label, skipped, msg}`. Self-contained and
-    side-effect-isolated (distinct source/dest per image), so it is safe to run
-    in a thread pool; the caller folds the record into shared totals on the main
-    thread. `msg` carries an optional rich-markup line for the caller to print.
+    ``class_name`` is the collection folder's roster identity; the generic
+    ``bird`` folder maps to an UNLABELED proposal (label None), every other folder
+    stamps its name onto the suggestion.
+
+    Returns a record `{lighting, label, skipped, msg}` (``label`` now means "a
+    suggestion sidecar was written"). Self-contained and side-effect-isolated
+    (distinct source/dest per image), so it is safe to run in a thread pool; the
+    caller folds the record into shared totals on the main thread. `msg` carries
+    an optional rich-markup line for the caller to print.
     """
     from PIL import Image
 
@@ -192,32 +219,34 @@ def classify_and_apply(image_path: Path, args, day_dir: Path, ir_dir: Path) -> d
 
     stem = target_stem(image_path.stem, lighting, detection)
     dest_jpg = dest_dir / f"{stem}.jpg"
-    dest_txt = dest_dir / f"{stem}.txt"
 
     if dest_jpg.exists():
         result["skipped"] = True
         return result
 
-    line = None
+    # The generic "bird" folder has no identity -> leave the proposal unlabeled.
+    label = None if class_name == "bird" else class_name
+
+    sug_box = None
     if not args.no_labels and detection is not None:
-        line = yolo_line(detection)
-        if line is None:
+        sug_box = suggestion_box(detection, label)
+        if sug_box is None:
             result["msg"] = (
-                f"[yellow]⚠[/] (no bbox) {json_path.name}: image moved without sidecar"
+                f"[yellow]⚠[/] (no bbox) {json_path.name}: image moved without suggestion"
             )
 
     if args.dry_run:
-        extra = " [green]+label[/]" if line else ""
+        extra = " [green]+suggestion[/]" if sug_box else ""
         result["msg"] = (
             f"[dim][dry-run][/] → {lighting}/{dest_jpg.name}{extra} (frac={frac:.4f})"
         )
         result["lighting"] = lighting
-        result["label"] = line is not None
+        result["label"] = sug_box is not None
         return result
 
     image_path.rename(dest_jpg)
-    if line:
-        dest_txt.write_text(line + "\n")
+    if sug_box:
+        write_suggestions(dest_jpg, {"boxes": [sug_box], "labels": []})
         result["label"] = True
     if json_path.exists():
         json_path.unlink()
@@ -227,7 +256,7 @@ def classify_and_apply(image_path: Path, args, day_dir: Path, ir_dir: Path) -> d
 
 
 def import_folder(source: Path, args, day_dir: Path, ir_dir: Path, totals: dict) -> None:
-    """Sort/move/pre-box every *.jpg in one collection folder, updating `totals`."""
+    """Sort/move/suggest-box every *.jpg in one collection folder, updating `totals`."""
     images = sorted(source.glob("*.jpg"))
     if not images:
         console.print(f"[dim]·[/] [cyan]{source.name}[/]: no images")
@@ -243,7 +272,11 @@ def import_folder(source: Path, args, day_dir: Path, ir_dir: Path, totals: dict)
     ) as progress:
         task = progress.add_task(f"[cyan]{source.name}[/] · {len(images)} images", total=len(images))
 
-        worker = lambda image_path: classify_and_apply(image_path, args, day_dir, ir_dir)
+        # The folder name IS the roster identity for these captures.
+        class_name = source.name
+        worker = lambda image_path: classify_and_apply(
+            image_path, args, day_dir, ir_dir, class_name
+        )
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             # map preserves submission order, so dry-run output stays ordered.
             for record in executor.map(worker, images):
@@ -254,7 +287,7 @@ def import_folder(source: Path, args, day_dir: Path, ir_dir: Path, totals: dict)
                 elif record["lighting"]:
                     totals[record["lighting"]] += 1
                     if record["label"]:
-                        totals["labels"] += 1
+                        totals["suggestions"] += 1
                 progress.advance(task)
 
 
@@ -279,14 +312,14 @@ def main() -> None:
     )
     console.print(f"[dim]{args.collect_root} → {args.output}[/]\n")
 
-    totals = {"day": 0, "ir": 0, "labels": 0, "skipped": 0}
+    totals = {"day": 0, "ir": 0, "suggestions": 0, "skipped": 0}
     for source in present:
         import_folder(source, args, day_dir, ir_dir, totals)
 
     verb = "Would import" if args.dry_run else "Imported"
     console.print(
         f"\n[bold green]✓[/] {verb} [green]{totals['day']}[/] day + [green]{totals['ir']}[/] ir, "
-        f"[green]{totals['labels']}[/] sidecars, "
+        f"[green]{totals['suggestions']}[/] suggestions, "
         f"[yellow]{totals['skipped']}[/] skipped across {len(present)} folder(s)."
     )
 

@@ -652,6 +652,8 @@ export interface HomeData {
   progress: CategoryProgress[];
   queue: number[];
   boxQueue: number[];
+  /** Scoped frames that still have pending model suggestions (suggest count > 0). */
+  suggestionQueue: number[];
   entry: { box: number; label: number };
   labelStats: LabelStat[];
 }
@@ -705,6 +707,7 @@ export async function getHomeData(cats: CatId[] = ALL_CATS): Promise<HomeData> {
   const scoped = rows.filter((r) => cats.includes(r.e.cat));
   const queue = scoped.filter((r) => r.j.boxed && r.j.hasUnlabeled).map((r) => r.e.n);
   const boxQueue = scoped.filter((r) => !r.j.boxed).map((r) => r.e.n);
+  const suggestionQueue = scoped.filter((r) => r.s > 0).map((r) => r.e.n);
   const firstUnboxed = scoped.find((r) => !r.j.boxed);
   const entry = {
     box: firstUnboxed?.e.n ?? scoped[0]?.e.n ?? 0,
@@ -716,7 +719,7 @@ export async function getHomeData(cats: CatId[] = ALL_CATS): Promise<HomeData> {
     .map((r) => ({ label: r.name, count: counts.get(r.name) ?? 0 }))
     .sort((a, b) => b.count - a.count);
 
-  const data: HomeData = { progress, queue, boxQueue, entry, labelStats };
+  const data: HomeData = { progress, queue, boxQueue, suggestionQueue, entry, labelStats };
   memoSet("home", cats, data);
   return data;
 }

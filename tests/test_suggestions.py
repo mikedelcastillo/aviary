@@ -11,6 +11,7 @@ import json
 import pytest
 
 from aviary_training.suggest import (
+    dedupe_suggestions,
     empty_suggestions,
     iou,
     is_boxed,
@@ -70,6 +71,73 @@ def test_match_box_empty_candidates_returns_none():
     assert match_box(box(0.5, 0.5, 0.2, 0.2), [], threshold=0.5) is None
 
 
+# --- dedupe_suggestions -----------------------------------------------------
+
+
+def test_dedupe_drops_bird_overlapping_specific_box():
+    # A generic 'bird' box and a specific 'draft' box on the same spot -> keep
+    # only the specific one (bird is deprioritized).
+    boxes = [
+        box(0.5, 0.5, 0.2, 0.2, label="bird", conf=0.9),
+        box(0.5, 0.5, 0.2, 0.2, label="draft", conf=0.4),
+    ]
+    out = dedupe_suggestions(boxes, iou_threshold=0.6)
+    assert [b["label"] for b in out] == ["draft"]
+
+
+def test_dedupe_drops_unlabeled_overlapping_specific_box():
+    # label=None is treated as low priority just like 'bird'.
+    boxes = [
+        box(0.5, 0.5, 0.2, 0.2, label=None, conf=0.95),
+        box(0.5, 0.5, 0.2, 0.2, label="matcha", conf=0.3),
+    ]
+    out = dedupe_suggestions(boxes, iou_threshold=0.6)
+    assert [b["label"] for b in out] == ["matcha"]
+
+
+def test_dedupe_two_custom_boxes_keeps_higher_conf():
+    boxes = [
+        box(0.5, 0.5, 0.2, 0.2, label="matcha", conf=0.4),
+        box(0.5, 0.5, 0.2, 0.2, label="percy", conf=0.8),
+    ]
+    out = dedupe_suggestions(boxes, iou_threshold=0.6)
+    assert [b["label"] for b in out] == ["percy"]
+
+
+def test_dedupe_non_overlapping_all_kept():
+    boxes = [
+        box(0.1, 0.1, 0.1, 0.1, label="bird", conf=0.9),
+        box(0.5, 0.5, 0.1, 0.1, label="draft", conf=0.5),
+        box(0.9, 0.9, 0.1, 0.1, label=None, conf=0.7),
+    ]
+    out = dedupe_suggestions(boxes, iou_threshold=0.6)
+    assert out == boxes  # order + identity preserved
+
+
+def test_dedupe_keeps_bird_when_it_overlaps_nothing():
+    boxes = [
+        box(0.2, 0.2, 0.2, 0.2, label="percy", conf=0.8),
+        box(0.8, 0.8, 0.2, 0.2, label="bird", conf=0.6),
+    ]
+    out = dedupe_suggestions(boxes, iou_threshold=0.6)
+    assert [b["label"] for b in out] == ["percy", "bird"]
+
+
+def test_dedupe_preserves_input_order():
+    # Even though the higher-conf 'percy' is considered first internally, the
+    # surviving boxes come back in original input order.
+    boxes = [
+        box(0.5, 0.5, 0.2, 0.2, label="percy", conf=0.3),
+        box(0.1, 0.1, 0.1, 0.1, label="matcha", conf=0.9),
+    ]
+    out = dedupe_suggestions(boxes, iou_threshold=0.6)
+    assert [b["label"] for b in out] == ["percy", "matcha"]
+
+
+def test_dedupe_empty_returns_empty():
+    assert dedupe_suggestions([]) == []
+
+
 # --- Sidecar IO -------------------------------------------------------------
 
 
@@ -94,9 +162,10 @@ def test_write_then_read_round_trips(tmp_path):
     assert read_suggestions(img) == data
 
 
-def test_box_script_preserves_label_suggestions(tmp_path):
-    """Simulate suggest_boxes overwriting `boxes` while keeping `labels` that
-    suggest_labels wrote earlier — the two scripts must not stomp each other."""
+def test_rewrite_preserves_unset_sidecar_fields(tmp_path):
+    """read_suggestions -> mutate -> write_suggestions preserves fields the caller
+    did not touch. suggest.py relies on this: it reads the existing sidecar before
+    re-setting boxes/labels so any prior structure round-trips intact."""
     img = tmp_path / "x.jpg"
     write_suggestions(img, {"boxes": [], "labels": [{"boxId": "b1", "label": "percy", "conf": 0.6}]})
 

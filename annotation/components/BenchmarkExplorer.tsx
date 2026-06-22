@@ -33,6 +33,15 @@ function writeCache(value: BenchmarkFile | null): void {
 
 const METRIC_LABEL: Record<BenchMetric, string> = { recall: "Recall", f1: "F1", precision: "Precision" };
 
+// Plain-language one-liners for the repo owner (not a data scientist). Shown
+// contextually under the headline based on the selected metric, so the jargon on
+// the toggle always has a human translation right next to it.
+const METRIC_GLOSS: Record<BenchMetric, string> = {
+  recall: "Recall = of all the birds really in frame, how many the model found.",
+  precision: "Precision = of everything it flagged, how many were truly birds.",
+  f1: "F1 = the overall balance between catching birds and not crying wolf.",
+};
+
 // Chart geometry (viewBox units; the svg scales responsively to its container).
 const W = 600;
 const H = 210;
@@ -190,7 +199,9 @@ function Pill({
 function Explorer({ file }: { file: BenchmarkFile }) {
   const series = file.series.filter((s) => s.models.length > 0);
   const [seriesIdx, setSeriesIdx] = useState(0);
-  const [metric, setMetric] = useState<BenchMetric>("f1");
+  // Recall is the owner's stated priority ("show something about better recall"),
+  // so it's the default lens; the F1/precision toggles still work as before.
+  const [metric, setMetric] = useState<BenchMetric>("recall");
   const [byCategory, setByCategory] = useState(false);
   const [pinned, setPinned] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
@@ -253,6 +264,41 @@ function Explorer({ file }: { file: BenchmarkFile }) {
       ? (model.overall[metric] as number) - (prev.overall[metric] as number)
       : null;
 
+  // --- "Are we winning?" summary, computed on the OVERALL line of the active
+  // metric across every version (independent of what's currently scrubbed). The
+  // headline always describes the latest version's progress vs the start; the
+  // peak feeds the chart's best-ever marker. byCategory just changes the lines
+  // drawn — these high-level signals stay on the overall trend so the headline
+  // never goes blank in category view.
+  const overallValues = models.map((m) => m.overall[metric]);
+
+  // Index of the best-ever (peak) version for this metric; ties resolve to the
+  // earliest so "first time we hit the high water mark" reads naturally.
+  let peakIdx = -1;
+  let peakVal = -1;
+  overallValues.forEach((v, i) => {
+    if (v != null && v > peakVal) {
+      peakVal = v;
+      peakIdx = i;
+    }
+  });
+  const peak = peakIdx >= 0 ? { idx: peakIdx, val: peakVal, model: models[peakIdx] } : null;
+
+  // The latest version is the hero of the headline (not the scrubbed one).
+  const latestIdx = n - 1;
+  const latest = models[latestIdx];
+  const latestVal = latest.overall[metric];
+  const firstWithVal = overallValues.find((v) => v != null) ?? null;
+  const firstIdx = overallValues.findIndex((v) => v != null);
+  const sinceStart =
+    latestVal != null && firstWithVal != null && firstIdx >= 0 && firstIdx !== latestIdx
+      ? latestVal - firstWithVal
+      : null;
+  const prevLatestVal = latestIdx > 0 ? models[latestIdx - 1].overall[metric] : null;
+  const sincePrev =
+    latestVal != null && prevLatestVal != null ? latestVal - prevLatestVal : null;
+  const latestIsBest = peak != null && peak.idx === latestIdx;
+
   return (
     <div className="rounded-2xl border border-border bg-surface p-5">
       {/* Controls */}
@@ -290,6 +336,61 @@ function Explorer({ file }: { file: BenchmarkFile }) {
         </div>
       </div>
 
+      {/* Plain-language progress headline for the LATEST version — the hero
+          number, signed deltas vs first/previous, a "best yet" badge, and a
+          one-line gloss of the selected metric. This translates the jargon for
+          a non-data-scientist owner who just wants "are we progressing?". */}
+      <div className="mb-4 rounded-xl border border-border bg-bg px-4 py-3">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          {latestVal != null ? (
+            <>
+              <span className="font-mono text-2xl font-semibold text-fg">
+                {Math.round(latestVal * 100)}
+              </span>
+              <span className="text-sm text-muted">
+                {metric === "recall"
+                  ? `of 100 birds caught`
+                  : metric === "precision"
+                    ? `of 100 flags correct`
+                    : `balance score (of 100)`}
+              </span>
+              <span className="text-xs text-faint">· {latest.name}</span>
+              {latestIsBest ? (
+                <span className="ml-1 rounded-pill bg-box/15 px-2 py-0.5 text-[11px] font-semibold text-box">
+                  best yet
+                </span>
+              ) : peak ? (
+                <span className="ml-1 text-xs text-faint">
+                  best: {Math.round(peak.val * 100)} at {peak.model.name}
+                </span>
+              ) : null}
+            </>
+          ) : (
+            <span className="text-sm text-muted">No {METRIC_LABEL[metric].toLowerCase()} for {latest.name} yet.</span>
+          )}
+        </div>
+
+        {/* Signed point deltas vs the first and previous versions. */}
+        {(sincePrev != null || sinceStart != null) && (
+          <div className="mt-1 flex flex-wrap gap-x-3 font-mono text-xs">
+            {sincePrev != null && (
+              <span>
+                <DeltaChip delta={sincePrev} isNew={false} />{" "}
+                <span className="text-faint">since {models[latestIdx - 1].name}</span>
+              </span>
+            )}
+            {sinceStart != null && (
+              <span>
+                <DeltaChip delta={sinceStart} isNew={false} />{" "}
+                <span className="text-faint">since {models[firstIdx].name}</span>
+              </span>
+            )}
+          </div>
+        )}
+
+        <p className="mt-1.5 text-[11px] leading-snug text-faint">{METRIC_GLOSS[metric]}</p>
+      </div>
+
       {/* Trend chart with labeled axes */}
       <div className="flex gap-2">
         <div className="flex flex-col justify-between py-[14px] pb-[34px] text-right font-mono text-[9px] text-faint">
@@ -308,6 +409,35 @@ function Explorer({ file }: { file: BenchmarkFile }) {
           {[0, 0.25, 0.5, 0.75, 1].map((g) => (
             <line key={g} x1={PADL} y1={yAt(g)} x2={W - PADR} y2={yAt(g)} stroke="var(--color-border)" strokeWidth={1} />
           ))}
+
+          {/* best-ever marker: a faint green dashed line at the peak value with a
+              tiny "best" label, so "are we beating our record?" is visible at a
+              glance. Tracks the overall trend even in category view. */}
+          {peak != null && (
+            <>
+              <line
+                x1={PADL}
+                y1={yAt(peak.val)}
+                x2={W - PADR}
+                y2={yAt(peak.val)}
+                stroke={OVERALL_COLOR}
+                strokeOpacity={0.35}
+                strokeWidth={1}
+                strokeDasharray="2 4"
+              />
+              <text
+                x={W - PADR}
+                y={yAt(peak.val) - 3}
+                fill={OVERALL_COLOR}
+                fillOpacity={0.7}
+                fontSize={9}
+                textAnchor="end"
+                className="font-mono"
+              >
+                best {Math.round(peak.val * 100)}
+              </text>
+            </>
+          )}
 
           {/* crosshair on the focused version */}
           {n > 0 && (
@@ -336,6 +466,20 @@ function Explorer({ file }: { file: BenchmarkFile }) {
               )}
             </g>
           ))}
+
+          {/* subtle ring/halo around the best-ever overall point (overall view —
+              that's where the single dot lives). */}
+          {!byCategory && peak != null && (
+            <circle
+              cx={xAt(peak.idx, n)}
+              cy={yAt(peak.val)}
+              r={9}
+              fill="none"
+              stroke={OVERALL_COLOR}
+              strokeOpacity={0.5}
+              strokeWidth={1.5}
+            />
+          )}
 
           {/* value label on the focused point (overall view only) */}
           {!byCategory && model.overall[metric] != null && (
@@ -425,6 +569,11 @@ function Explorer({ file }: { file: BenchmarkFile }) {
         {model.images.toLocaleString()} labeled imgs · {model.gtBoxes.toLocaleString()} boxes
         {model.naBoxes > 0 && ` · ${model.naBoxes.toLocaleString()} out-of-vocab`} · conf{" "}
         {file.config.confidence} · IoU {file.config.iou}
+      </p>
+      <p className="mt-1.5 text-[11px] leading-snug text-faint">
+        Note: the earliest models were trained before later data-pipeline fixes and may have
+        seen some of today&apos;s test images, so their early scores are slightly flattering —
+        real progress is, if anything, a bit better than the line suggests.
       </p>
     </div>
   );

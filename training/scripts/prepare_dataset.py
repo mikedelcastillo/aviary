@@ -286,6 +286,12 @@ def main(argv: list[str] | None = None) -> None:
     names = model_classes.names
     remap = model_classes.remap
 
+    # Wipe any prior prep's split folders first. copy_split only adds files, so
+    # without this a frame that moves to a different split (or drops out) on
+    # re-prep would linger in its old folder and leak across train/val/test.
+    for subdir in ("images", "labels"):
+        shutil.rmtree(output / subdir, ignore_errors=True)
+
     splits = split_samples(samples, args.val_ratio, args.test_ratio, args.seed, args.group_minutes)
     rows: list[dict[str, str]] = []
     for split, split_samples_ in splits.items():

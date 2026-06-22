@@ -77,6 +77,64 @@ def match_box(detection: Box, candidates: list[Box], threshold: float) -> int | 
     return best_idx
 
 
+def dedupe_suggestions(
+    boxes: list[Box],
+    iou_threshold: float = 0.6,
+    deprioritize: tuple[str, ...] = ("bird",),
+) -> list[Box]:
+    """Drop overlapping box proposals, preferring specific-label boxes.
+
+    Combining the generic detector ('bird'/unlabeled) with the custom live model
+    (roster labels) routinely produces two boxes on the same bird. This collapses
+    them so the user reviews one proposal, not two.
+
+    Rules (deterministic):
+      - A box is *low priority* when its label is None or in ``deprioritize`` (by
+        default just ``'bird'``); otherwise it is *high priority* (a specific
+        roster identity).
+      - A box is dropped when it overlaps an already-kept box with IoU >=
+        ``iou_threshold`` AND the kept box is at least as high priority.
+      - Among same-priority overlaps the higher ``conf`` wins; the lower-conf box
+        is dropped.
+
+    Returns a new list in input order (kept boxes only); does not mutate inputs.
+    """
+
+    def is_low(box: Box) -> bool:
+        label = box.get("label")
+        return label is None or label in deprioritize
+
+    def conf_of(box: Box) -> float:
+        try:
+            return float(box.get("conf") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # Sort by descending priority, then descending conf, so the box we *want* to
+    # keep in any overlapping cluster is considered first. enumerate keeps the
+    # original index as a stable tiebreaker -> fully deterministic.
+    order = sorted(
+        enumerate(boxes),
+        key=lambda iv: (is_low(iv[1]), -conf_of(iv[1]), iv[0]),
+    )
+
+    kept: list[tuple[int, Box]] = []
+    for idx, box in order:
+        drop = False
+        for _, keep in kept:
+            if iou(box, keep) >= iou_threshold:
+                # ``keep`` was considered first, so it is >= this box in
+                # (priority, conf, index); dropping ``box`` is always correct.
+                drop = True
+                break
+        if not drop:
+            kept.append((idx, box))
+
+    # Restore input order for a stable, predictable result.
+    kept.sort(key=lambda iv: iv[0])
+    return [box for _, box in kept]
+
+
 # --- Sidecar paths ----------------------------------------------------------
 
 
