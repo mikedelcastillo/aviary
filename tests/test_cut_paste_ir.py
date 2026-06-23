@@ -3,7 +3,33 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
-from aviary_training.cut_paste_ir import feather_mask, ir_tone, paste_object, yolo_line
+from aviary_training.cut_paste_ir import (
+    DAY_TO_SPECIES,
+    feather_mask,
+    ir_tone,
+    overlaps_any,
+    parse_boxes,
+    paste_object,
+    yolo_line,
+)
+
+
+def test_parse_boxes_reads_geometry() -> None:
+    assert parse_boxes(["8 0.5 0.5 0.1 0.2", "", "bad", "6 0.1 0.1 0.05 0.05"]) == [
+        (0.5, 0.5, 0.1, 0.2),
+        (0.1, 0.1, 0.05, 0.05),
+    ]
+
+
+def test_overlaps_any_detects_and_clears() -> None:
+    existing = [(0.5, 0.5, 0.2, 0.2)]
+    assert overlaps_any((0.5, 0.5, 0.2, 0.2), existing, thr=0.05) is True   # same box
+    assert overlaps_any((0.9, 0.9, 0.1, 0.1), existing, thr=0.05) is False  # far away
+    assert overlaps_any((0.5, 0.5, 0.2, 0.2), [], thr=0.05) is False        # nothing to hit
+
+
+def test_day_to_species_mapping() -> None:
+    assert DAY_TO_SPECIES == {0: 6, 1: 6, 2: 7, 3: 7, 4: 7, 5: 8}
 
 
 def test_feather_mask_center_one_corner_low() -> None:

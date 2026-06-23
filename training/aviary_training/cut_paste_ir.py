@@ -80,3 +80,43 @@ def paste_object(
 def yolo_line(cls: int, box: tuple[float, float, float, float]) -> str:
     cx, cy, w, h = box
     return f"{cls} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"
+
+
+# Day individual roster index -> species index (mirrors aviary_training.synth_ir):
+# 0 draft, 1 pizza -> 6 cockatiel; 2 percy, 3 matcha, 4 jynx -> 7 lovebird; 5 bambi -> 8 budgie.
+DAY_TO_SPECIES: dict[int, int] = {0: 6, 1: 6, 2: 7, 3: 7, 4: 7, 5: 8}
+
+
+def parse_boxes(lines: list[str]) -> list[tuple[float, float, float, float]]:
+    """Existing (cx,cy,w,h) boxes from a label file's lines (geometry only)."""
+    out: list[tuple[float, float, float, float]] = []
+    for ln in lines:
+        p = ln.split()
+        if len(p) >= 5:
+            try:
+                out.append((float(p[1]), float(p[2]), float(p[3]), float(p[4])))
+            except ValueError:
+                continue
+    return out
+
+
+def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
+    ax1, ay1, ax2, ay2 = a[0] - a[2] / 2, a[1] - a[3] / 2, a[0] + a[2] / 2, a[1] + a[3] / 2
+    bx1, by1, bx2, by2 = b[0] - b[2] / 2, b[1] - b[3] / 2, b[0] + b[2] / 2, b[1] + b[3] / 2
+    iw, ih = max(0.0, min(ax2, bx2) - max(ax1, bx1)), max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def overlaps_any(
+    box: tuple[float, float, float, float],
+    existing: list[tuple[float, float, float, float]],
+    thr: float = 0.05,
+) -> bool:
+    """True if ``box`` overlaps any ``existing`` box above ``thr`` IoU. Used to
+    avoid pasting an object on top of a real labelled bird (which corrupted the
+    real bird's appearance and regressed cockatiel in the first cut-paste pass)."""
+    return any(_iou(box, e) > thr for e in existing)
