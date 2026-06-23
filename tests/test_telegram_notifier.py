@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 import threading
 
 import pytest
 import requests
 
 from lib.detector import Detection
-from lib.telegram.notifier import RETRY_AFTER_BUFFER_SECONDS, TelegramNotifier
+from lib.telegram.notifier import (
+    MEDIA_GROUP_LIMIT,
+    RETRY_AFTER_BUFFER_SECONDS,
+    TelegramNotifier,
+)
 
 
 def detection(label: str = "bird") -> Detection:
@@ -152,6 +157,109 @@ def test_429_gives_up_after_max_retries(monkeypatch) -> None:
     # Initial attempt + 3 retries = 4 posts, then it stops hammering.
     assert len(post.calls) == 4
     assert len(clock.slept) == 3
+
+
+def test_send_album_uses_media_group_for_multiple(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.send_album(
+        12345,
+        [(b"img-a", "camera-1"), (b"img-b", "camera-2"), (b"img-c", None)],
+    )
+
+    # One sendMediaGroup call carrying all three photos in a single album.
+    assert len(post.calls) == 1
+    call = post.calls[0]
+    assert call["url"].endswith("/sendMediaGroup")
+    assert call["data"]["chat_id"] == 12345
+
+    media = json.loads(call["data"]["media"])
+    assert [m["type"] for m in media] == ["photo", "photo", "photo"]
+    # Each entry references its attached file by key, and captions pass through
+    # (the third, None, carries no caption key).
+    assert [m["media"] for m in media] == [
+        "attach://photo0",
+        "attach://photo1",
+        "attach://photo2",
+    ]
+    assert media[0]["caption"] == "camera-1"
+    assert media[1]["caption"] == "camera-2"
+    assert "caption" not in media[2]
+    # The three image payloads are attached under the matching keys.
+    assert set(call["files"]) == {"photo0", "photo1", "photo2"}
+    assert call["files"]["photo0"][1] == b"img-a"
+
+
+def test_send_album_single_image_uses_send_photo(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.send_album(999, [(b"only", "camera-1")])
+
+    # A lone image can't be a media group, so it ships as a plain photo upload.
+    assert len(post.calls) == 1
+    call = post.calls[0]
+    assert call["url"].endswith("/sendPhoto")
+    assert call["data"] == {"chat_id": 999, "caption": "camera-1"}
+    assert call["files"]["photo"][1] == b"only"
+
+
+def test_send_album_chunks_beyond_media_group_limit(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    count = MEDIA_GROUP_LIMIT + 2
+    notifier.send_album(7, [(f"img{i}".encode(), f"camera-{i}") for i in range(count)])
+
+    # Split into a full album then the remaining two.
+    assert len(post.calls) == 2
+    first, second = post.calls
+    assert len(json.loads(first["data"]["media"])) == MEDIA_GROUP_LIMIT
+    assert len(json.loads(second["data"]["media"])) == 2
+
+
+def test_send_album_swallows_per_chunk_failure(monkeypatch) -> None:
+    # A media-group send that raises must not propagate past send_album.
+    post = RecordingPost([FakeResponse(500, {"ok": False})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.send_album(1, [(b"a", "camera-1"), (b"b", "camera-2")])  # no raise
+
+    assert len(post.calls) == 1
+
+
+def test_send_album_continues_to_later_chunk_after_one_fails(monkeypatch) -> None:
+    # The load-bearing promise: a failing chunk is swallowed AND the loop keeps
+    # going, so a partial album still reaches the user. First album (10 photos)
+    # 500s; the trailing single-photo chunk must still post.
+    post = RecordingPost([FakeResponse(500, {"ok": False}), FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    count = MEDIA_GROUP_LIMIT + 1
+    notifier.send_album(5, [(f"img{i}".encode(), f"camera-{i}") for i in range(count)])
+
+    assert len(post.calls) == 2
+    first, second = post.calls
+    assert first["url"].endswith("/sendMediaGroup")  # the chunk that failed
+    # The second chunk still shipped (a lone image => sendPhoto) with its bytes.
+    assert second["url"].endswith("/sendPhoto")
+    assert second["files"]["photo"][1] == f"img{MEDIA_GROUP_LIMIT}".encode()
+
+
+def test_send_album_empty_sends_nothing(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.send_album(1, [])
+
+    assert post.calls == []
 
 
 def test_retry_after_falls_back_to_header(monkeypatch) -> None:

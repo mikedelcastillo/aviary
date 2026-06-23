@@ -163,6 +163,7 @@ def run_command_bot(
     stop_event: Event | None = None,
     poll_timeout_seconds: int = 30,
     discover_provider: Callable[[], str] | None = None,
+    snapshot_provider: Callable[[int], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -232,6 +233,25 @@ def run_command_bot(
                         report = f"Discovery failed: {exc}"
                     send(chat_id, report)
                 LOGGER.info("Handled /discover for user %s", user_id)
+                continue
+
+            if command == "/snapshot":
+                # Like /discover, a two-message flow: grabbing every camera's
+                # latest frame, saving, and uploading an album takes a moment, so
+                # ack immediately, then deliver. The provider sends the album (it
+                # owns the notifier + chat) and returns a final text summary; the
+                # photos arrive between these two messages.
+                if str(user_id) not in allowed or snapshot_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    send(chat_id, "Capturing snapshots from all cameras...")
+                    try:
+                        report = snapshot_provider(chat_id)
+                    except Exception as exc:  # never let a snapshot error kill polling
+                        LOGGER.exception("Snapshot failed")
+                        report = f"Snapshot failed: {exc}"
+                    send(chat_id, report)
+                LOGGER.info("Handled /snapshot for user %s", user_id)
                 continue
 
             if command == "/userinfo":

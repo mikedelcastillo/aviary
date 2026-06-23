@@ -19,6 +19,7 @@ from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
 from lib.objects import ObjectRegistry
+from lib.snapshot import capture_snapshots, snapshot_caption
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_report
 from lib.telegram.commands import build_status_message, run_command_bot
@@ -55,12 +56,16 @@ def start_command_thread(
     stop_event: threading.Event,
     status_provider: Callable[[], str] | None = None,
     discover_provider: Callable[[], str] | None = None,
+    snapshot_provider: Callable[[int], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
         target=run_command_bot,
         args=(bot_token, user_ids, status_provider, stop_event),
-        kwargs={"discover_provider": discover_provider},
+        kwargs={
+            "discover_provider": discover_provider,
+            "snapshot_provider": snapshot_provider,
+        },
         name="telegram-commands",
         daemon=True,
     )
@@ -157,6 +162,22 @@ def main() -> None:
             snap, registry, app_config.telegram.bbox_movement_alert_ratio
         )
 
+    # /snapshot grabs every camera's latest live frame, saves it under the
+    # persistent collect tree (so import-collect-birds later sweeps it into the
+    # annotation pool), and uploads the set back to the requester as an album.
+    # Saving beside collected detections — not the run-scoped snapshot_dir, which
+    # is wiped each boot — is what makes the captures survive for training.
+    snapshot_collect_dir = app_config.collect.directory / "snapshots"
+
+    def snapshot_provider(chat_id: int) -> str:
+        saved = capture_snapshots(stats, stats_lock, snapshot_collect_dir)
+        if not saved:
+            return "No camera frames available yet; send /discover once cameras are online."
+        if notifier is not None:
+            items = [(snap.path.read_bytes(), snapshot_caption(snap)) for snap in saved]
+            notifier.send_album(chat_id, items)
+        return f"Sent {len(saved)} snapshot(s); saved to {snapshot_collect_dir}."
+
     start_command_thread(
         app_config.telegram.bot_token,
         app_config.telegram.user_ids,
@@ -165,6 +186,7 @@ def main() -> None:
         discover_provider=lambda: format_discovery_report(
             supervisor.discover_and_apply()
         ),
+        snapshot_provider=snapshot_provider,
     )
 
     dashboard = Dashboard(

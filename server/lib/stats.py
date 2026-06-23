@@ -36,6 +36,16 @@ class CameraStats:
         self._filter_objects = filter_objects
         self._lock = threading.Lock()
 
+        # Most-recent decoded frame, published by the capture loop for on-demand
+        # snapshots (the /snapshot command). Guarded by its OWN lock so grabbing a
+        # frame never contends with the dashboard's counter reads, and the store
+        # is a cheap reference swap on the hot path (the copy is paid by the rare
+        # reader instead). ``cv2.VideoCapture.read`` hands back a fresh array each
+        # call, so the stored reference is never mutated in place after this.
+        self._latest_frame = None
+        self._latest_frame_at: float | None = None
+        self._frame_lock = threading.Lock()
+
         self.status = "connecting"
         self.backoff = 0.0
         self.frames_total = 0
@@ -90,6 +100,29 @@ class CameraStats:
         # two locks at once.
         if detections and frame_size is not None and self._registry is not None:
             self._registry.record(detections, self.name, frame_size)
+
+    def set_latest_frame(self, frame) -> None:
+        """Publish the newest decoded frame for on-demand snapshots.
+
+        Called from the capture loop on every successful read. Stores the
+        reference only (no copy) so the hot path stays cheap; readers copy.
+        """
+        with self._frame_lock:
+            self._latest_frame = frame
+            self._latest_frame_at = time.monotonic()
+
+    def latest_frame(self) -> tuple[object | None, float | None]:
+        """Return ``(frame_copy, age_seconds)`` or ``(None, None)`` if unseen.
+
+        The frame is copied under the lock so the caller owns it outright and the
+        capture loop can keep replacing the stored reference. ``age_seconds`` is
+        how long ago that frame was captured, so a snapshot can flag a stalled or
+        disconnected camera whose last good frame is now stale.
+        """
+        with self._frame_lock:
+            if self._latest_frame is None or self._latest_frame_at is None:
+                return None, None
+            return self._latest_frame.copy(), time.monotonic() - self._latest_frame_at
 
     def record_read_failure(self) -> None:
         with self._lock:

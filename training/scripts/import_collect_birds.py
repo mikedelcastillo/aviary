@@ -2,9 +2,11 @@
 """Import auto-collected bird frames into the annotation pipeline.
 
 The server sorts captures into per-class folders under `data/server/collect/`
-(e.g. `bird/`, `draft/`, `matcha/`). This imports the generic `bird` folder PLUS
-every roster-named folder (`training/roster.yaml` is the single source of truth),
-skipping any that don't exist yet. Non-roster folders (cat/, dog/, …) are ignored.
+(e.g. `bird/`, `draft/`, `matcha/`). This imports the generic `bird` folder, the
+`snapshots/` folder (frames captured on demand via the `/snapshot` Telegram
+command), PLUS every roster-named folder (`training/roster.yaml` is the single
+source of truth), skipping any that don't exist yet. Non-roster folders (cat/,
+dog/, …) are ignored.
 
 For each folder it reads `*.jpg` + paired `*.json` detection files, classifies
 each frame as `day` (color) or `ir` (infrared/night) from image content, moves it
@@ -97,8 +99,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def collect_folders(roster_path: Path) -> list[str]:
-    """"bird" + every roster label name, de-duplicated, order preserved."""
-    names = ["bird"] + [label.name for label in load_roster(roster_path)]
+    """"bird" + "snapshots" + every roster label name, de-duplicated, order preserved.
+
+    The ``snapshots`` folder holds frames captured on demand by the ``/snapshot``
+    Telegram command. They carry no detection ``.json`` (no box was triggered),
+    so they import as unlabeled day/ir frames — raw material to label by hand.
+    """
+    names = ["bird", "snapshots"] + [label.name for label in load_roster(roster_path)]
     seen: set[str] = set()
     return [n for n in names if not (n in seen or seen.add(n))]
 

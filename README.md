@@ -97,6 +97,12 @@ Run from the repo root so the scripts' default relative paths resolve.
    `/discover` to re-run the scan and pick up cameras at runtime. The scan port
    and stream path live in `DiscoveryConfig` in `server/lib/config.py`.
 
+   Bot commands: `/status` (runtime health), `/discover` (re-scan the LAN), and
+   `/snapshot` — grabs every camera's latest live frame, replies with them as a
+   photo album, and saves them to `data/server/collect/snapshots/`. Those saved
+   frames are swept into the annotation pool by `uv run import-collect-birds`
+   (the `snapshots` folder is imported by default).
+
 ## Practical Dataset Targets
 
 Start with at least 100 to 200 labeled boxes per bird. Include day mode,

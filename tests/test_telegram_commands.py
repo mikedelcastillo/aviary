@@ -232,3 +232,100 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
         "Scanning the local network for cameras...",
         "found 2 cameras",
     ]
+
+
+def test_snapshot_command_requires_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    provider_called = False
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/snapshot",
+                            "from": {"id": 999},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def snapshot_provider(_chat_id: int) -> str:
+        nonlocal provider_called
+        provider_called = True
+        return "album sent"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        snapshot_provider=snapshot_provider,
+    )
+
+    assert sent_messages == ["Unauthorized."]
+    assert provider_called is False
+
+
+def test_snapshot_command_acks_then_reports_with_chat_id(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_chat_ids: list[int] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/snapshot",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        sent_messages.append(json["text"])
+        # Stop only once both the ack and the report have been sent.
+        if len(sent_messages) >= 2:
+            stop_event.set()
+        return Response()
+
+    def snapshot_provider(chat_id: int) -> str:
+        seen_chat_ids.append(chat_id)
+        return "Sent 3 snapshot(s)."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        snapshot_provider=snapshot_provider,
+    )
+
+    assert sent_messages == [
+        "Capturing snapshots from all cameras...",
+        "Sent 3 snapshot(s).",
+    ]
+    # The requesting chat is handed to the provider so the album goes to them.
+    assert seen_chat_ids == [123]

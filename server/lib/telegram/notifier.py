@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -14,6 +16,10 @@ from lib.detector import Detection
 
 
 LOGGER = logging.getLogger("lib.telegram")
+
+# Telegram caps a single ``sendMediaGroup`` album at 10 items; larger snapshot
+# sets are split into successive albums.
+MEDIA_GROUP_LIMIT = 10
 
 # Telegram answers bursts with HTTP 429 and a ``retry_after`` (seconds). Every
 # send shares one bot token, so the limit is global: ``_blocked_until`` parks
@@ -26,6 +32,14 @@ DEFAULT_MAX_SEND_RETRIES = 5
 RETRY_AFTER_BUFFER_SECONDS = 1.0
 # Fallback pause when a 429 arrives without any retry_after hint.
 RETRY_AFTER_FALLBACK_SECONDS = 1.0
+
+
+def _chunked(
+    items: list[tuple[bytes, str | None]], size: int
+) -> Iterator[list[tuple[bytes, str | None]]]:
+    """Yield successive ``size``-length slices of ``items`` (last may be shorter)."""
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 class TelegramNotifier:
@@ -103,6 +117,29 @@ class TelegramNotifier:
         # If no file_id was ever obtained, the loop above already attempted a
         # direct upload to every recipient, so there is nothing left to send.
 
+    def send_album(
+        self, chat_id: int | str, items: Sequence[tuple[bytes, str | None]]
+    ) -> None:
+        """Send images to a SINGLE chat as album(s) (used by ``/snapshot``).
+
+        ``items`` is ``(image_bytes, caption)`` pairs. Telegram caps a media
+        group at :data:`MEDIA_GROUP_LIMIT`, so larger sets become successive
+        albums; a lone image cannot form a media group and is sent as a plain
+        photo. This shares the rate-limit gate with alert delivery — one bot
+        token means one global limit — so a burst here paces alongside alerts
+        instead of racing them. Per-chunk failures are logged and swallowed so a
+        partial album still reaches the user rather than aborting the rest.
+        """
+        for chunk in _chunked(list(items), MEDIA_GROUP_LIMIT):
+            try:
+                if len(chunk) == 1:
+                    image_bytes, caption = chunk[0]
+                    self._send_photo_to_chat(chat_id, image_bytes, caption)
+                else:
+                    self._send_media_group(chat_id, chunk)
+            except requests.RequestException as exc:
+                LOGGER.warning("Album send to %s failed: %s", chat_id, exc)
+
     # -- delivery primitives ----------------------------------------------
 
     def _broadcast(self, user_ids: list[str], send) -> None:
@@ -135,6 +172,43 @@ class TelegramNotifier:
         )
         response.raise_for_status()
         return self._extract_file_id(response)
+
+    def _send_media_group(
+        self, chat_id: int | str, chunk: list[tuple[bytes, str | None]]
+    ) -> None:
+        # Telegram media groups attach each image as a multipart file and
+        # reference it from the JSON ``media`` array via ``attach://<key>``.
+        media: list[dict[str, str]] = []
+        files: dict[str, tuple[str, bytes, str]] = {}
+        for index, (image_bytes, caption) in enumerate(chunk):
+            key = f"photo{index}"
+            entry = {"type": "photo", "media": f"attach://{key}"}
+            if caption:
+                entry["caption"] = caption
+            media.append(entry)
+            files[key] = (f"{key}.jpg", image_bytes, "image/jpeg")
+        response = self._post(
+            f"{self.base_url}/sendMediaGroup",
+            data={"chat_id": chat_id, "media": json.dumps(media)},
+            files=files,
+            timeout=self.photo_timeout_seconds,
+        )
+        response.raise_for_status()
+
+    def _send_photo_to_chat(
+        self, chat_id: int | str, image_bytes: bytes, caption: str | None
+    ) -> None:
+        # A single image can't be a media group, so it ships as a plain upload.
+        data: dict[str, int | str] = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption
+        response = self._post(
+            f"{self.base_url}/sendPhoto",
+            data=data,
+            files={"photo": ("snapshot.jpg", image_bytes, "image/jpeg")},
+            timeout=self.photo_timeout_seconds,
+        )
+        response.raise_for_status()
 
     def _send_photo_by_file_id(self, user_id: str, caption: str, file_id: str) -> None:
         # No upload: Telegram already holds the bytes, so this is a small form

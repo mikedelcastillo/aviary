@@ -132,6 +132,12 @@ def monitor_camera(
                 # the base reconnect delay for the next outage.
                 backoff = camera.reconnect_seconds
 
+                # Publish the freshest frame for on-demand snapshots regardless of
+                # the inference throttle below, so /snapshot returns a near-live
+                # image even on cameras sampled at a low FPS. A reference swap
+                # under a dedicated lock, so it costs nothing on the hot path.
+                stats.set_latest_frame(frame)
+
                 now = time.monotonic()
                 if now < next_inference_at:
                     continue

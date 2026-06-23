@@ -60,6 +60,38 @@ def _color_jpg(path: Path) -> None:
     Image.new("RGB", (16, 16), (200, 30, 30)).save(path)
 
 
+# --- collect_folders includes snapshots -------------------------------------
+
+
+def test_snapshot_stem_is_matched_by_import_stem_regex():
+    # snapshot_stem (server side) and STEM_RE (this importer) are independent
+    # literals that must stay in lockstep, or snapshots fall to the degraded
+    # fallback name on import. Pin the contract so a future format drift fails
+    # here loudly instead of silently downgrading every imported snapshot.
+    from lib.snapshot import snapshot_stem
+
+    match = mod.STEM_RE.match(snapshot_stem("camera-1"))
+    assert match is not None
+    assert match["camera"] == "camera-1"
+
+
+def test_collect_folders_includes_bird_and_snapshots_by_default(tmp_path):
+    roster = tmp_path / "roster.yaml"
+    # Include a roster entry that repeats "bird" to prove de-duplication holds.
+    roster.write_text(
+        "labels:\n  - { name: matcha }\n  - { name: bird }\n",
+        encoding="utf-8",
+    )
+
+    folders = mod.collect_folders(roster)
+
+    # Generic "bird" and on-demand "snapshots" lead, roster labels follow.
+    assert folders[:2] == ["bird", "snapshots"]
+    assert "matcha" in folders
+    assert folders.count("bird") == 1
+    assert folders.count("snapshots") == 1
+
+
 # --- suggestion_box (pure) --------------------------------------------------
 
 
@@ -146,6 +178,28 @@ def test_classify_and_apply_bird_folder_leaves_label_none(tmp_path):
     moved = day / f"{mod.target_stem(img.stem, 'day', detection)}.jpg"
     sug = read_suggestions(moved)
     assert sug["boxes"][0]["label"] is None
+
+
+def test_classify_and_apply_snapshot_without_json_moves_without_suggestion(tmp_path):
+    src = tmp_path / "src"
+    day = tmp_path / "out" / "day"
+    ir = tmp_path / "out" / "ir"
+    for d in (src, day, ir):
+        d.mkdir(parents=True)
+
+    # A /snapshot capture: a color frame with NO paired detection json.
+    img = src / "20240101_120000_0_camera-1_snapshot_abc123.jpg"
+    _color_jpg(img)
+
+    record = mod.classify_and_apply(img, _args(), day, ir, class_name="snapshots")
+
+    assert record["lighting"] == "day"
+    assert record["label"] is False  # no detection => no suggestion sidecar
+    assert record["skipped"] is False
+
+    moved = day / f"{mod.target_stem(img.stem, 'day', None)}.jpg"
+    assert moved.exists()
+    assert not suggestion_path(moved).exists()
 
 
 def test_classify_and_apply_no_labels_moves_only(tmp_path):
