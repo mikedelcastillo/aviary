@@ -36,3 +36,8 @@ venv/
 
 # Superpowers brainstorming visual-companion mockups (local, ephemeral).
 .superpowers/
+
+# local-only: research papers + scratch drivers
+ghiasi.pdf
+ghiasi.txt
+_*.sh
