@@ -8,7 +8,7 @@ server DB and no authentication.
 ## Run
 
 ```bash
-./scripts/annotation.sh
+uv run annotation
 ```
 
 Then open **http://0.0.0.0:5000**. First run installs npm dependencies; Node 18+

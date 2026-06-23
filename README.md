@@ -5,7 +5,7 @@ Computer vision platform for monitoring a bird room with Tapo cameras.
 The project is split into three working areas:
 
 - `annotation/`: the `/annotation` web tool to collect images and label birds
-  with bounding boxes (run `./scripts/annotation.sh` — a Next.js app).
+  with bounding boxes (run `uv run annotation` — a Next.js app).
 - `training/`: prepare datasets and train the Ultralytics YOLO detectors.
 - `server/`: consume camera streams, run inference, and send Telegram alerts.
 
@@ -65,7 +65,7 @@ Run from the repo root so the scripts' default relative paths resolve.
    - Extract Tapo day frames into `data/annotation/raw/tapo/day/`.
    - Extract Tapo infrared frames into `data/annotation/raw/tapo/ir/`.
 
-3. Label images with the `/annotation` web tool — run `./scripts/annotation.sh` (Next.js)
+3. Label images with the `/annotation` web tool — run `uv run annotation` (Next.js)
    and open http://0.0.0.0:5000. It labels against `training/roster.yaml` (the
    single label roster for both the live and archive models — see
    `training/STRATEGY.md`) and writes YOLO `.txt` labels back next to each image.

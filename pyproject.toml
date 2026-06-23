@@ -34,6 +34,8 @@ import-immich-albums = "import_immich_albums:main"
 extract-frames = "extract_frames:main"
 synth-ir = "synth_ir:main"
 cut-paste-ir = "cut_paste_ir:main"
+annotation = "annotation_app:main"
+doctor-fsdb = "doctor_fsdb:main"
 tests = "pytest:console_main"
 
 [build-system]
@@ -63,6 +65,8 @@ packages = [
 "training/scripts/import_immich_albums.py" = "import_immich_albums.py"
 "training/scripts/synth_ir.py" = "synth_ir.py"
 "training/scripts/cut_paste_ir.py" = "cut_paste_ir.py"
+"training/scripts/annotation_app.py" = "annotation_app.py"
+"training/scripts/doctor_fsdb.py" = "doctor_fsdb.py"
 
 # Pin torch/torchvision to the CUDA 12.8 (cu128) wheels — the build with
 # Blackwell/sm_120 support for the RTX 5060. The machine is Linux + RTX 5060 only,

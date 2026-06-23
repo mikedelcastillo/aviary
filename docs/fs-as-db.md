@@ -57,7 +57,7 @@ manifest rebuild, so a client can poll cheaply and refetch only on change.
 
 ## Operations
 
-- **Integrity check:** `node scripts/doctor-fsdb.mjs` reports corrupt JSON,
+- **Integrity check:** `uv run doctor-fsdb` reports corrupt JSON,
   orphaned sidecars (no matching image), leftover `.tmp` files, empty `.txt`, and
   un-annotated images. Exits non-zero if anything needs attention.
 - **Backups.** Sidecars are tiny and text — back them up independently of the
