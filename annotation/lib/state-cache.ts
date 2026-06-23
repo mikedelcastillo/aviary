@@ -29,6 +29,10 @@ const EMPTY: JsonState = { boxed: false, labeled: false, hasUnlabeled: false, bo
 
 const jsonCache = new Map<string, { mtimeMs: number; state: JsonState }>();
 const suggestCache = new Map<string, { mtimeMs: number; count: number }>();
+const suggestLabelsCache = new Map<string, { mtimeMs: number; labels: string[] }>();
+
+/** Generic box proposals carry no roster label — bucket them under this name. */
+const GENERIC_SUGGEST_LABEL = "bird";
 
 // Warn at most once per corrupt file so a single bad sidecar doesn't spam logs.
 const warnedCorrupt = new Set<string>();
@@ -115,8 +119,51 @@ export async function getSuggestCount(cat: CatId, name: string): Promise<number>
   return count;
 }
 
+/**
+ * Distinct suggested LABELS for one image from `<image>.suggest.json`,
+ * mtime-validated + cached (sibling of {@link getSuggestCount}). The set is the
+ * union of `boxes[].label` (null/empty -> the generic bucket "bird") and
+ * `labels[].label` (always a roster name). Empty array if no/garbled sidecar.
+ */
+export async function getSuggestLabels(cat: CatId, name: string): Promise<string[]> {
+  const p = sidecarFsPath(cat, name, ".suggest.json");
+  const k = key(cat, name);
+  let st;
+  try {
+    st = await statLimited(p);
+  } catch {
+    suggestLabelsCache.delete(k);
+    return [];
+  }
+  const hit = suggestLabelsCache.get(k);
+  if (hit && hit.mtimeMs === st.mtimeMs) return hit.labels;
+  let labels: string[] = [];
+  try {
+    const data = JSON.parse(await readTextLimited(p)) as {
+      boxes?: Array<{ label?: string | null }>;
+      labels?: Array<{ label?: string | null }>;
+    };
+    const set = new Set<string>();
+    if (Array.isArray(data.boxes)) {
+      for (const b of data.boxes) {
+        const lab = b.label ? b.label : GENERIC_SUGGEST_LABEL;
+        set.add(lab);
+      }
+    }
+    if (Array.isArray(data.labels)) {
+      for (const l of data.labels) if (l.label) set.add(l.label);
+    }
+    labels = [...set];
+  } catch {
+    return []; // absent/garbled — suggestions are an optional layer
+  }
+  suggestLabelsCache.set(k, { mtimeMs: st.mtimeMs, labels });
+  return labels;
+}
+
 /** Drop one image's cached state (call after the app writes its sidecars). */
 export function invalidateState(cat: CatId, name: string): void {
   jsonCache.delete(key(cat, name));
   suggestCache.delete(key(cat, name));
+  suggestLabelsCache.delete(key(cat, name));
 }

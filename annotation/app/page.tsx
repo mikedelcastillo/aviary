@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { ProgressCard } from "@/components/ProgressCard";
@@ -26,7 +26,12 @@ import { useCoarsePointer } from "@/hooks/useCoarsePointer";
 
 const CATS_STORAGE_KEY = "aviary.cats";
 const RANDOM_STORAGE_KEY = "aviary.random";
-const SUGGESTIONS_STORAGE_KEY = "aviary.suggestionsOnly";
+// Replaces the old binary `aviary.suggestionsOnly`. Stores the selected
+// suggestion filter: the sentinel "all" (any suggestion) or a list of label names.
+const SUGGESTION_LABELS_STORAGE_KEY = "aviary.suggestionLabels";
+
+/** Sentinel value meaning "any suggestion" (the old checked behavior). */
+const ALL_SUGGESTIONS = "all";
 
 interface LabelStat {
   label: string;
@@ -39,6 +44,7 @@ interface HomeData {
   queue: number[];
   boxQueue: number[];
   suggestionQueue: number[];
+  suggestionLabelIndex: Record<string, number[]>;
   entry: { box: number; label: number };
   labelStats: LabelStat[];
 }
@@ -104,12 +110,21 @@ export default function Home() {
   const [queue, setQueue] = useState<number[] | null>(null);
   const [boxQueue, setBoxQueue] = useState<number[] | null>(null);
   const [suggestionQueue, setSuggestionQueue] = useState<number[] | null>(null);
+  // Old localStorage caches predate this field — treat a missing one as {} until
+  // the revalidate fetch fills it (same guarding as suggestionQueue's null).
+  const [suggestionLabelIndex, setSuggestionLabelIndex] = useState<Record<
+    string,
+    number[]
+  > | null>(null);
   const [entry, setEntry] = useState<{ box: number; label: number } | null>(null);
   const [labelStats, setLabelStats] = useState<LabelStat[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cats, setCats] = useState<CatId[]>(ALL_CATS);
   const [random, setRandom] = useState(false);
-  const [suggestionsOnly, setSuggestionsOnly] = useState(false);
+  // Selected suggestion filter: empty set = off (no filter); a set containing
+  // ALL_SUGGESTIONS = any suggestion; otherwise the specific label names to union.
+  const [suggestionLabels, setSuggestionLabels] = useState<Set<string>>(new Set());
+  const [suggestOpen, setSuggestOpen] = useState(false);
   const [dedupeProgress, setDedupeProgress] = useState<{
     done: number;
     total: number;
@@ -132,7 +147,20 @@ export default function Home() {
       const saved = window.localStorage.getItem(CATS_STORAGE_KEY);
       if (saved) setCats(parseCats(saved));
       setRandom(window.localStorage.getItem(RANDOM_STORAGE_KEY) === "1");
-      setSuggestionsOnly(window.localStorage.getItem(SUGGESTIONS_STORAGE_KEY) === "1");
+      // Restore the suggestion filter; migrate the legacy binary flag if present.
+      const rawLabels = window.localStorage.getItem(SUGGESTION_LABELS_STORAGE_KEY);
+      if (rawLabels !== null) {
+        try {
+          const arr = JSON.parse(rawLabels) as unknown;
+          if (Array.isArray(arr)) setSuggestionLabels(new Set(arr.map(String)));
+        } catch {
+          /* corrupt — keep default (off) */
+        }
+      } else if (window.localStorage.getItem("aviary.suggestionsOnly") === "1") {
+        // Legacy "checked" -> "any suggestion".
+        setSuggestionLabels(new Set([ALL_SUGGESTIONS]));
+      }
+      window.localStorage.removeItem("aviary.suggestionsOnly");
     } catch {
       /* localStorage unavailable — keep default */
     }
@@ -159,14 +187,17 @@ export default function Home() {
     }
   }, [random]);
 
-  // Persist the suggestions-only preference whenever it changes.
+  // Persist the suggestion filter whenever it changes.
   useEffect(() => {
     try {
-      window.localStorage.setItem(SUGGESTIONS_STORAGE_KEY, suggestionsOnly ? "1" : "0");
+      window.localStorage.setItem(
+        SUGGESTION_LABELS_STORAGE_KEY,
+        JSON.stringify([...suggestionLabels]),
+      );
     } catch {
       /* ignore */
     }
-  }, [suggestionsOnly]);
+  }, [suggestionLabels]);
 
   // Full manifest is selection-independent (ignores cats) — fetch once.
   useEffect(() => {
@@ -205,6 +236,7 @@ export default function Home() {
       setQueue(cached.queue);
       setBoxQueue(cached.boxQueue);
       setSuggestionQueue(cached.suggestionQueue);
+      setSuggestionLabelIndex(cached.suggestionLabelIndex ?? {});
       setEntry(cached.entry);
       setLabelStats(cached.labelStats);
       setRevalidating(true);
@@ -212,6 +244,7 @@ export default function Home() {
       setQueue(null);
       setBoxQueue(null);
       setSuggestionQueue(null);
+      setSuggestionLabelIndex(null);
       setEntry(null);
       setLabelStats(null);
       setRevalidating(false);
@@ -228,6 +261,7 @@ export default function Home() {
         setQueue(data.queue);
         setBoxQueue(data.boxQueue);
         setSuggestionQueue(data.suggestionQueue);
+        setSuggestionLabelIndex(data.suggestionLabelIndex ?? {});
         setEntry(data.entry);
         setLabelStats(data.labelStats);
         writeHomeCache(catsKey, data);
@@ -308,22 +342,36 @@ export default function Home() {
   const labelTarget = entry?.label ?? (queue && queue.length > 0 ? queue[0] : 0);
   const labelEmpty = queue !== null && queue.length === 0;
 
-  // When the Suggestions filter is on, Box/Label only walk frames that still have
-  // pending model proposals — restrict each mode's candidate set to its
-  // intersection with the suggestion queue. Both gate the enter buttons: Box is
-  // normally always enterable (it falls back to the first in-scope frame), but in
-  // suggestions-only mode it must no-op when no boxed/unboxed frame carries
-  // suggestions. `null` (still loading) means "not known empty yet".
-  const suggestSet = useMemo(
-    () => (suggestionQueue ? new Set(suggestionQueue) : null),
-    [suggestionQueue],
-  );
+  // The Suggestions filter is ON when any chip is selected. "all" means the whole
+  // suggestionQueue (any proposal); specific labels mean the UNION of their
+  // per-label frame-index lists. Empty selection = off (no filter).
+  const suggestActive = suggestionLabels.size > 0;
+  const suggestAll = suggestionLabels.has(ALL_SUGGESTIONS);
+
+  // Resolve the selection to the concrete set of scoped frame indices it permits.
+  // `null` = filter is active but data hasn't loaded yet ("not known empty yet");
+  // callers must wait rather than enter with an unfiltered queue.
+  const suggestSet = useMemo<Set<number> | null>(() => {
+    if (!suggestActive) return null; // off — no filter applied downstream
+    if (suggestAll) return suggestionQueue ? new Set(suggestionQueue) : null;
+    if (suggestionLabelIndex === null) return null; // loading
+    const out = new Set<number>();
+    for (const label of suggestionLabels) {
+      for (const n of suggestionLabelIndex[label] ?? []) out.add(n);
+    }
+    return out;
+  }, [suggestActive, suggestAll, suggestionLabels, suggestionQueue, suggestionLabelIndex]);
+
+  // With the filter active, Box/Label may have nothing matching their queue — gate
+  // the enter buttons. Box is normally always enterable (it falls back to the first
+  // in-scope frame), but with a filter it must no-op when no boxed/unboxed frame
+  // matches. A `null` suggestSet (still loading) is "not known empty yet".
   const boxSuggestEmpty =
-    suggestionsOnly && boxQueue !== null && suggestSet !== null
+    suggestActive && boxQueue !== null && suggestSet !== null
       ? !boxQueue.some((n) => suggestSet.has(n))
       : false;
   const labelSuggestEmpty =
-    suggestionsOnly && queue !== null && suggestSet !== null
+    suggestActive && queue !== null && suggestSet !== null
       ? !queue.some((n) => suggestSet.has(n))
       : false;
   const boxDisabled = boxSuggestEmpty;
@@ -340,41 +388,111 @@ export default function Home() {
   );
   const enterBox = () => {
     if (boxDisabled) return;
-    // Suggestions-only but the suggestion set hasn't loaded yet — don't enter with
-    // an unfiltered queue; wait for the data (revalidate fills it momentarily).
-    if (suggestionsOnly && !suggestSet) return;
+    // Filter active but its frame set hasn't loaded yet — don't enter with an
+    // unfiltered queue; wait for the data (revalidate fills it momentarily).
+    if (suggestActive && !suggestSet) return;
     const seed = random ? newSeed() : null;
     const orderedHome = orderBySeed(filteredHome, seed);
-    // Suggestions-only: walk only boxQueue frames that carry pending suggestions.
+    // Filtered: walk only boxQueue frames permitted by the suggestion selection.
     const candidates =
-      suggestionsOnly && suggestSet ? (boxQueue ?? []).filter((n) => suggestSet.has(n)) : boxQueue ?? [];
+      suggestActive && suggestSet ? (boxQueue ?? []).filter((n) => suggestSet.has(n)) : boxQueue ?? [];
     const set = new Set(candidates);
-    // In suggestions-only mode the candidate set is authoritative — never fall
-    // back to a non-suggestion frame; bail if nothing matches (guarded above).
-    const first = suggestionsOnly
+    // With a filter the candidate set is authoritative — never fall back to a
+    // non-matching frame; bail if nothing matches (guarded above).
+    const first = suggestActive
       ? orderedHome.find((e) => set.has(e.n))
       : orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
-    const target = first?.n ?? (suggestionsOnly ? null : boxTarget);
+    const target = first?.n ?? (suggestActive ? null : boxTarget);
     if (target === null || target === undefined) return;
-    router.push(withNav(`/box/${target}`, cats, seed));
+    router.push(withNav(`/box/${target}`, cats, seed, suggestActive ? suggestionLabels : null));
   };
   const enterLabel = () => {
     if (labelDisabled) return;
-    // Suggestions-only but the suggestion set hasn't loaded yet — don't enter with
-    // an unfiltered queue; wait for the data (revalidate fills it momentarily).
-    if (suggestionsOnly && !suggestSet) return;
+    // Filter active but its frame set hasn't loaded yet — don't enter with an
+    // unfiltered queue; wait for the data (revalidate fills it momentarily).
+    if (suggestActive && !suggestSet) return;
     const seed = random ? newSeed() : null;
     const orderedHome = orderBySeed(filteredHome, seed);
-    // Suggestions-only: walk only label-queue frames that carry pending suggestions.
+    // Filtered: walk only label-queue frames permitted by the suggestion selection.
     const candidates =
-      suggestionsOnly && suggestSet ? (queue ?? []).filter((n) => suggestSet.has(n)) : queue ?? [];
+      suggestActive && suggestSet ? (queue ?? []).filter((n) => suggestSet.has(n)) : queue ?? [];
     const set = new Set(candidates);
-    const first = suggestionsOnly
+    const first = suggestActive
       ? orderedHome.find((e) => set.has(e.n))
       : orderedHome.find((e) => set.has(e.n)) ?? orderedHome[0];
-    const target = first?.n ?? (suggestionsOnly ? null : labelTarget);
+    const target = first?.n ?? (suggestActive ? null : labelTarget);
     if (target === null || target === undefined) return;
-    router.push(withNav(`/label/${target}`, cats, seed));
+    router.push(withNav(`/label/${target}`, cats, seed, suggestActive ? suggestionLabels : null));
+  };
+
+  // Dropdown options: each suggested label with its frame count, roster-ordered
+  // (labelStats is the roster set, count-desc) with any non-roster bucket like
+  // "bird" appended by its own count. Built from suggestionLabelIndex so counts
+  // reflect frames-with-that-suggestion, not labeled boxes.
+  const suggestOptions = useMemo<{ label: string; count: number }[]>(() => {
+    if (!suggestionLabelIndex) return [];
+    const counts = new Map<string, number>(
+      Object.entries(suggestionLabelIndex).map(([k, v]) => [k, v.length]),
+    );
+    const order = labelStats ? labelStats.map((s) => s.label) : [];
+    const seen = new Set<string>();
+    const out: { label: string; count: number }[] = [];
+    for (const label of order) {
+      if (counts.has(label)) {
+        out.push({ label, count: counts.get(label) ?? 0 });
+        seen.add(label);
+      }
+    }
+    // Non-roster buckets (e.g. "bird") not in labelStats — append by count desc.
+    const rest = [...counts.entries()]
+      .filter(([k]) => !seen.has(k))
+      .sort((a, b) => b[1] - a[1]);
+    for (const [label, count] of rest) out.push({ label, count });
+    return out;
+  }, [suggestionLabelIndex, labelStats]);
+
+  // Trigger summary text.
+  const suggestSummary = !suggestActive
+    ? "off"
+    : suggestAll
+      ? "all"
+      : suggestionLabels.size <= 2
+        ? [...suggestionLabels].join(", ")
+        : `${suggestionLabels.size} birds`;
+
+  // Close the dropdown on outside tap / Escape (iPad-friendly).
+  const suggestRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!suggestOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (suggestRef.current && !suggestRef.current.contains(e.target as Node)) {
+        setSuggestOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSuggestOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [suggestOpen]);
+
+  // Toggle a specific label; selecting a label clears the "all" sentinel and vice
+  // versa, so "all" and specific labels are mutually exclusive selections.
+  const toggleSuggestLabel = (label: string) => {
+    setSuggestionLabels((prev) => {
+      const next = new Set(prev);
+      next.delete(ALL_SUGGESTIONS);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
+  };
+  const toggleSuggestAll = () => {
+    setSuggestionLabels((prev) => (prev.has(ALL_SUGGESTIONS) ? new Set() : new Set([ALL_SUGGESTIONS])));
   };
 
   return (
@@ -454,30 +572,67 @@ export default function Home() {
       <div className="mt-8 flex flex-wrap items-center justify-between gap-2">
         <CatToggle selected={cats} totals={categoryTotals} onChange={setCats} />
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            role="checkbox"
-            aria-checked={suggestionsOnly}
-            onClick={() => setSuggestionsOnly(!suggestionsOnly)}
-            title="Only visit frames that have pending model suggestions when entering Box/Label"
-            className={
-              "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
-              (suggestionsOnly
-                ? "border-fg bg-fg text-bg"
-                : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
-            }
-          >
-            <span
-              aria-hidden
+          {/* Suggestions filter — multi-select dropdown. Off (none), "all" (any
+              proposal), or one/many specific labels (union of their frames). */}
+          <div ref={suggestRef} className="relative">
+            <button
+              type="button"
+              aria-haspopup="listbox"
+              aria-expanded={suggestOpen}
+              onClick={() => setSuggestOpen((o) => !o)}
+              title="Filter Box/Label entry to frames whose model suggestions include the selected birds"
               className={
-                "flex h-3.5 w-3.5 items-center justify-center rounded-[4px] border text-[9px] leading-none " +
-                (suggestionsOnly ? "border-bg/40 bg-bg/20 text-bg" : "border-border-strong text-transparent")
+                "flex cursor-pointer items-center gap-2 rounded-pill border px-3.5 py-1.5 text-sm transition-colors " +
+                (suggestActive
+                  ? "border-fg bg-fg text-bg"
+                  : "border-border bg-surface text-muted hover:border-border-strong hover:text-fg")
               }
             >
-              ✓
-            </span>
-            <span className="font-medium">Suggestions</span>
-          </button>
+              <span className="font-medium">Suggestions: {suggestSummary}</span>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+                className={"h-3.5 w-3.5 transition-transform " + (suggestOpen ? "rotate-180" : "")}
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+            {suggestOpen && (
+              <div
+                role="listbox"
+                aria-multiselectable
+                className="absolute right-0 z-20 mt-2 max-h-80 w-64 overflow-y-auto rounded-xl border border-border bg-elevated p-1.5 shadow-xl"
+              >
+                <SuggestRow
+                  label="All suggested"
+                  count={suggestionQueue?.length}
+                  selected={suggestAll}
+                  onClick={toggleSuggestAll}
+                />
+                <div className="my-1.5 border-t border-border" />
+                {suggestionLabelIndex === null ? (
+                  <div className="px-2.5 py-2 text-xs text-faint">Loading…</div>
+                ) : suggestOptions.length === 0 ? (
+                  <div className="px-2.5 py-2 text-xs text-faint">No suggestions available</div>
+                ) : (
+                  suggestOptions.map((o) => (
+                    <SuggestRow
+                      key={o.label}
+                      label={o.label}
+                      count={o.count}
+                      selected={suggestionLabels.has(o.label)}
+                      onClick={() => toggleSuggestLabel(o.label)}
+                    />
+                  ))
+                )}
+              </div>
+            )}
+          </div>
           <button
             type="button"
             role="checkbox"
@@ -610,6 +765,46 @@ export default function Home() {
           Sits at the bottom of the page. */}
       <BenchmarkExplorer />
     </main>
+  );
+}
+
+/** One selectable row in the Suggestions dropdown — checkbox + name + count. */
+function SuggestRow({
+  label,
+  count,
+  selected,
+  onClick,
+}: {
+  label: string;
+  count?: number;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={selected}
+      onClick={onClick}
+      className={
+        "flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors " +
+        (selected ? "bg-surface-2 text-fg" : "text-muted hover:bg-surface hover:text-fg")
+      }
+    >
+      <span
+        aria-hidden
+        className={
+          "flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border text-[10px] leading-none " +
+          (selected ? "border-fg bg-fg text-bg" : "border-border-strong text-transparent")
+        }
+      >
+        ✓
+      </span>
+      <span className="flex-1 truncate">{label}</span>
+      {count !== undefined && (
+        <span className="shrink-0 font-mono text-xs text-faint">{count.toLocaleString()}</span>
+      )}
+    </button>
   );
 }
 

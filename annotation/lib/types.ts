@@ -90,16 +90,63 @@ export function parseSeed(param: string | null | undefined): number | null {
 }
 
 /**
- * Append `?cats=…&random=…` to a path, omitting each param when not in effect so
- * default (all-cats, sequential) URLs stay identical to before. The single nav
- * helper used by Box/Label so the category scope AND shuffle seed both ride
- * along across page navigations.
+ * URL token for the "any suggestion" sentinel. The in-memory selection uses the
+ * `ALL_SUGGESTIONS` sentinel; it maps to/from this URL-safe token in the
+ * `?suggest=` param so it can never collide with a comma-listed label name.
  */
-export function withNav(href: string, cats: CatId[], seed: number | null): string {
+const SUGGEST_ALL_URL = "__all__";
+
+/** The in-memory "any suggestion" sentinel (matches page.tsx ALL_SUGGESTIONS). */
+const SUGGEST_ALL_MEM = "all";
+
+/**
+ * Serialize a suggestion selection for the `?suggest=` URL param. Empty selection
+ * → null (omit the param). The in-memory all-sentinel → the URL-safe `__all__`
+ * token; otherwise a comma-joined list of label names (e.g. "budgie,draft").
+ */
+export function serializeSuggest(labels: Set<string>): string | null {
+  if (labels.size === 0) return null;
+  if (labels.has(SUGGEST_ALL_MEM)) return SUGGEST_ALL_URL;
+  return [...labels].join(",");
+}
+
+/**
+ * Parse a `?suggest=` param into an in-memory selection Set. Absent/empty → an
+ * empty Set (filter inactive). The `__all__` token → the all-sentinel; otherwise
+ * the comma-split label names. An empty Set means "don't restrict".
+ */
+export function parseSuggest(param: string | null): Set<string> {
+  if (!param) return new Set();
+  if (param === SUGGEST_ALL_URL) return new Set([SUGGEST_ALL_MEM]);
+  const out = new Set(
+    param
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0),
+  );
+  return out;
+}
+
+/**
+ * Append `?cats=…&random=…&suggest=…` to a path, omitting each param when not in
+ * effect so default (all-cats, sequential, no suggestion filter) URLs stay
+ * identical to before. The single nav helper used by Box/Label so the category
+ * scope, shuffle seed, AND suggestion filter all ride along across navigations.
+ */
+export function withNav(
+  href: string,
+  cats: CatId[],
+  seed: number | null,
+  suggest?: Set<string> | null,
+): string {
   const params = new URLSearchParams();
   const c = serializeCats(cats);
   if (c) params.set("cats", c);
   if (seed != null) params.set("random", String(seed));
+  if (suggest) {
+    const s = serializeSuggest(suggest);
+    if (s) params.set("suggest", s);
+  }
   const qs = params.toString();
   return qs ? `${href}?${qs}` : href;
 }

@@ -24,6 +24,8 @@ import {
   orderBySeed,
   parseCats,
   parseSeed,
+  parseSuggest,
+  serializeCats,
   withNav,
   type CatId,
   type ManifestEntry,
@@ -33,6 +35,9 @@ import {
 } from "@/lib/types";
 
 type RosterData = Record<CatId, Pill[]>;
+
+/** The in-memory "any suggestion" sentinel (matches page.tsx ALL_SUGGESTIONS). */
+const ALL_SUGGESTIONS = "all";
 
 function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -47,12 +52,23 @@ export default function LabelPage() {
   const searchParams = useSearchParams();
   const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
   const seed = useMemo(() => parseSeed(searchParams.get("random")), [searchParams]);
+  // Suggestion filter carried from Home (and across every navigation). Empty set
+  // = inactive (browse all in-scope frames as before).
+  const suggest = useMemo(() => parseSuggest(searchParams.get("suggest")), [searchParams]);
+  const suggestActive = suggest.size > 0;
   const coarse = useCoarsePointer();
 
   // --- Fetch manifest / roster / queue once on mount. -----------------------
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
   const [rosterData, setRosterData] = useState<RosterData | null>(null);
   const [queue, setQueue] = useState<number[] | null>(null);
+  // The suggestion index (label -> global frame indices) from /api/home, fetched
+  // only when the suggestion filter is active. `null` until it lands so navigation
+  // can hold off on restricting (rather than wrongly skipping every frame).
+  const [suggestionLabelIndex, setSuggestionLabelIndex] = useState<Record<
+    string,
+    number[]
+  > | null>(null);
 
   // Load (or refresh) the manifest + label queue together, returning both so a
   // post-delete handler can navigate against the freshly-renumbered indices.
@@ -94,6 +110,51 @@ export default function LabelPage() {
     };
   }, [loadManifestQueue]);
 
+  // When the suggestion filter is active, pull the per-label frame index from
+  // /api/home once so navigation can constrain to matching frames. Reuses the
+  // same payload the home page caches; guards for an absent field on old servers.
+  const catsKey = serializeCats(cats);
+  useEffect(() => {
+    if (!suggestActive) {
+      setSuggestionLabelIndex(null);
+      return;
+    }
+    let cancelled = false;
+    const qs = catsKey ? `?cats=${catsKey}` : "";
+    fetch(`/api/home${qs}`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+      .then((data: { suggestionLabelIndex?: Record<string, number[]> }) => {
+        if (!cancelled) setSuggestionLabelIndex(data.suggestionLabelIndex ?? {});
+      })
+      .catch(() => {
+        // On failure, treat as "no restriction" rather than stranding the user.
+        if (!cancelled) setSuggestionLabelIndex({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [suggestActive, catsKey]);
+
+  // Resolve the suggestion selection to the concrete set of permitted frame
+  // indices. `null` = filter active but index still loading (don't restrict yet);
+  // a non-null Set = the frames whose suggestions include a selected label. With
+  // the all-sentinel it's the union of EVERY label's frames (any suggestion).
+  const suggestSet = useMemo<Set<number> | null>(() => {
+    if (!suggestActive) return null; // off — no restriction
+    if (suggestionLabelIndex === null) return null; // loading
+    const out = new Set<number>();
+    if (suggest.has(ALL_SUGGESTIONS)) {
+      for (const arr of Object.values(suggestionLabelIndex)) {
+        for (const m of arr) out.add(m);
+      }
+    } else {
+      for (const label of suggest) {
+        for (const m of suggestionLabelIndex[label] ?? []) out.add(m);
+      }
+    }
+    return out;
+  }, [suggestActive, suggest, suggestionLabelIndex]);
+
   // Selected-category subset. `queueSet` (boxed-but-unlabeled image indices) is a
   // membership Set only — it drives Space's "jump to next unlabeled", NOT the
   // navigation order.
@@ -120,14 +181,22 @@ export default function LabelPage() {
   // — to the nearest in-scope image at/after it (else the first in the sequence).
   useEffect(() => {
     if (manifest == null || queue == null) return; // still loading
+    if (suggestActive && suggestSet == null) return; // suggestion index still loading
     if (queue.length === 0 || ordered.length === 0) {
       router.replace("/");
       return;
     }
-    if (pos >= 0) return;
-    const target = ordered.find((e) => e.n >= n) ?? ordered[0];
-    router.replace(withNav(`/label/${target.n}`, cats, seed));
-  }, [manifest, queue, ordered, pos, n, cats, seed, router]);
+    const validHere = pos >= 0 && (!suggestSet || suggestSet.has(n));
+    if (validHere) return;
+    const target = suggestSet
+      ? ordered.find((e) => e.n >= n && suggestSet.has(e.n)) ?? ordered.find((e) => suggestSet.has(e.n))
+      : ordered.find((e) => e.n >= n) ?? ordered[0];
+    if (!target) {
+      router.replace("/");
+      return;
+    }
+    router.replace(withNav(`/label/${target.n}`, cats, seed, suggest));
+  }, [manifest, queue, ordered, pos, n, cats, seed, suggest, suggestActive, suggestSet, router]);
 
   const entry = baseEntry && inCats ? baseEntry : null;
   const cat = entry?.cat ?? null;
@@ -191,15 +260,27 @@ export default function LabelPage() {
   // --- Navigation helpers (scoped to selected categories). ------------------
   const goPrev = useCallback(() => {
     const idx = ordered.findIndex((e) => e.n === n);
-    const prev = idx > 0 ? ordered[idx - 1] : undefined;
-    if (prev) router.push(withNav(`/label/${prev.n}`, cats, seed));
-  }, [ordered, n, router, cats, seed]);
+    let prev: ManifestEntry | undefined;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (!suggestSet || suggestSet.has(ordered[i].n)) {
+        prev = ordered[i];
+        break;
+      }
+    }
+    if (prev) router.push(withNav(`/label/${prev.n}`, cats, seed, suggest));
+  }, [ordered, n, suggestSet, router, cats, seed, suggest]);
 
   const goNext = useCallback(() => {
     const idx = ordered.findIndex((e) => e.n === n);
-    const next = idx >= 0 ? ordered[idx + 1] : undefined;
-    if (next) router.push(withNav(`/label/${next.n}`, cats, seed));
-  }, [ordered, n, router, cats, seed]);
+    let next: ManifestEntry | undefined;
+    for (let i = idx + 1; i < ordered.length; i++) {
+      if (!suggestSet || suggestSet.has(ordered[i].n)) {
+        next = ordered[i];
+        break;
+      }
+    }
+    if (next) router.push(withNav(`/label/${next.n}`, cats, seed, suggest));
+  }, [ordered, n, suggestSet, router, cats, seed, suggest]);
 
   // Space / image-completion: jump to the next image that still NEEDS labeling,
   // in the fixed order. Scan starts at idx+1 so the just-completed current image
@@ -208,13 +289,14 @@ export default function LabelPage() {
     const idx = ordered.findIndex((e) => e.n === n);
     let target: ManifestEntry | undefined;
     for (let i = idx + 1; i < ordered.length; i++) {
-      if (queueSet.has(ordered[i].n)) {
+      const m = ordered[i].n;
+      if (queueSet.has(m) && (!suggestSet || suggestSet.has(m))) {
         target = ordered[i];
         break;
       }
     }
-    router.push(target ? withNav(`/label/${target.n}`, cats, seed) : "/");
-  }, [ordered, n, queueSet, cats, seed, router]);
+    router.push(target ? withNav(`/label/${target.n}`, cats, seed, suggest) : "/");
+  }, [ordered, n, queueSet, suggestSet, cats, seed, suggest, router]);
 
   // --- Assign a label to the active box, then advance if image is done. -----
   const pick = useCallback(
@@ -264,26 +346,26 @@ export default function LabelPage() {
     await deleteCurrent(cat, name, async () => {
       const { manifest: fresh } = await loadManifestQueue();
       const t = nextId ? fresh.find((e) => e.cat === nextId.cat && e.name === nextId.name) : undefined;
-      router.push(t ? withNav(`/label/${t.n}`, cats, seed) : "/");
+      router.push(t ? withNav(`/label/${t.n}`, cats, seed, suggest) : "/");
     });
-  }, [cat, name, ordered, n, deleteCurrent, loadManifestQueue, router, cats, seed]);
+  }, [cat, name, ordered, n, deleteCurrent, loadManifestQueue, router, cats, seed, suggest]);
 
   const handleDeleteUndo = useCallback(() => {
     void undoDelete(async (p) => {
       const { manifest: fresh } = await loadManifestQueue();
       const t = fresh.find((e) => e.cat === p.cat && e.name === p.name);
-      if (t) router.push(withNav(`/label/${t.n}`, cats, seed));
+      if (t) router.push(withNav(`/label/${t.n}`, cats, seed, suggest));
     });
-  }, [undoDelete, loadManifestQueue, router, cats, seed]);
+  }, [undoDelete, loadManifestQueue, router, cats, seed, suggest]);
 
   // --- Undo/redo: history is session-global, so a mistake made before an
   // auto-advance is undone by hopping back to the image it happened on. ------
   const navToHistory = useCallback(
     (key: { cat: CatId; name: string }) => {
       const target = manifest?.find((e) => e.cat === key.cat && e.name === key.name);
-      if (target) router.push(withNav(`/label/${target.n}`, cats, seed));
+      if (target) router.push(withNav(`/label/${target.n}`, cats, seed, suggest));
     },
-    [manifest, router, cats, seed],
+    [manifest, router, cats, seed, suggest],
   );
   const handleUndo = useCallback(() => {
     const target = undo();
@@ -296,8 +378,8 @@ export default function LabelPage() {
 
   // Flip random/sequential order in place (no need to bounce through Home).
   const toggleRandom = useCallback(() => {
-    router.replace(withNav(`/label/${n}`, cats, seed != null ? null : newSeed()));
-  }, [router, n, cats, seed]);
+    router.replace(withNav(`/label/${n}`, cats, seed != null ? null : newSeed(), suggest));
+  }, [router, n, cats, seed, suggest]);
 
   // --- Keyboard. ------------------------------------------------------------
   useEffect(() => {

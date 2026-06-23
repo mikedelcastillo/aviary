@@ -28,7 +28,7 @@ import { loadRoster, nameToIndex } from "./roster";
 import { withFileLock } from "./file-lock";
 import { dropFromCache } from "./hash-cache";
 import { readTextLimited } from "./fs-limit";
-import { getJsonState, getSuggestCount, invalidateState } from "./state-cache";
+import { getJsonState, getSuggestCount, getSuggestLabels, invalidateState } from "./state-cache";
 
 const IMG_RE = /\.(jpe?g|png)$/i;
 
@@ -654,6 +654,12 @@ export interface HomeData {
   boxQueue: number[];
   /** Scoped frames that still have pending model suggestions (suggest count > 0). */
   suggestionQueue: number[];
+  /**
+   * Per suggested-label -> sorted list of scoped global frame indices (n) whose
+   * suggestions include that label. The "any suggestion" union over all labels
+   * equals {@link suggestionQueue}. Generic null-label boxes bucket under "bird".
+   */
+  suggestionLabelIndex: Record<string, number[]>;
   entry: { box: number; label: number };
   labelStats: LabelStat[];
 }
@@ -672,8 +678,13 @@ export async function getHomeData(cats: CatId[] = ALL_CATS): Promise<HomeData> {
   const manifest = getManifest();
   const rows = await Promise.all(
     manifest.map(async (e) => {
-      const [j, s] = await Promise.all([getJsonState(e.cat, e.name), getSuggestCount(e.cat, e.name)]);
-      return { e, j, s };
+      // Suggested labels double as the count: labels.length > 0 iff there are
+      // pending proposals, so one read replaces the former getSuggestCount call.
+      const [j, suggestLabels] = await Promise.all([
+        getJsonState(e.cat, e.name),
+        getSuggestLabels(e.cat, e.name),
+      ]);
+      return { e, j, s: suggestLabels.length, suggestLabels };
     }),
   );
 
@@ -708,6 +719,15 @@ export async function getHomeData(cats: CatId[] = ALL_CATS): Promise<HomeData> {
   const queue = scoped.filter((r) => r.j.boxed && r.j.hasUnlabeled).map((r) => r.e.n);
   const boxQueue = scoped.filter((r) => !r.j.boxed).map((r) => r.e.n);
   const suggestionQueue = scoped.filter((r) => r.s > 0).map((r) => r.e.n);
+  // For each suggested label, the scoped frame indices whose suggestions include
+  // it. `scoped` is already in manifest (n-ascending) order, so each list is
+  // sorted by construction. Union over all labels == suggestionQueue.
+  const suggestionLabelIndex: Record<string, number[]> = {};
+  for (const r of scoped) {
+    for (const label of r.suggestLabels) {
+      (suggestionLabelIndex[label] ??= []).push(r.e.n);
+    }
+  }
   const firstUnboxed = scoped.find((r) => !r.j.boxed);
   const entry = {
     box: firstUnboxed?.e.n ?? scoped[0]?.e.n ?? 0,
@@ -719,7 +739,15 @@ export async function getHomeData(cats: CatId[] = ALL_CATS): Promise<HomeData> {
     .map((r) => ({ label: r.name, count: counts.get(r.name) ?? 0 }))
     .sort((a, b) => b.count - a.count);
 
-  const data: HomeData = { progress, queue, boxQueue, suggestionQueue, entry, labelStats };
+  const data: HomeData = {
+    progress,
+    queue,
+    boxQueue,
+    suggestionQueue,
+    suggestionLabelIndex,
+    entry,
+    labelStats,
+  };
   memoSet("home", cats, data);
   return data;
 }

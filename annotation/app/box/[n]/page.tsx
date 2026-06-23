@@ -24,6 +24,7 @@ import {
   orderBySeed,
   parseCats,
   parseSeed,
+  parseSuggest,
   serializeCats,
   withNav,
   type CatId,
@@ -32,6 +33,9 @@ import {
   type Pt,
   type StageHandle,
 } from "@/lib/types";
+
+/** The in-memory "any suggestion" sentinel (matches page.tsx ALL_SUGGESTIONS). */
+const ALL_SUGGESTIONS = "all";
 
 const MIN_DRAG = 0.005;
 
@@ -59,6 +63,10 @@ export default function BoxPage() {
   const searchParams = useSearchParams();
   const cats = useMemo(() => parseCats(searchParams.get("cats")), [searchParams]);
   const seed = useMemo(() => parseSeed(searchParams.get("random")), [searchParams]);
+  // Suggestion filter carried from Home (and across every navigation). Empty set
+  // = inactive (browse all in-scope frames as before).
+  const suggest = useMemo(() => parseSuggest(searchParams.get("suggest")), [searchParams]);
+  const suggestActive = suggest.size > 0;
   const coarse = useCoarsePointer();
 
   const [manifest, setManifest] = useState<ManifestEntry[] | null>(null);
@@ -67,6 +75,13 @@ export default function BoxPage() {
   // jumps to the next image that still needs boxing — it does NOT drive the
   // navigation order, so it can refetch freely without disturbing prev/next.
   const [boxQueue, setBoxQueue] = useState<number[] | null>(null);
+  // The suggestion index (label -> global frame indices) from /api/home, fetched
+  // only when the suggestion filter is active. `null` until it lands so navigation
+  // can hold off on restricting (rather than wrongly skipping every frame).
+  const [suggestionLabelIndex, setSuggestionLabelIndex] = useState<Record<
+    string,
+    number[]
+  > | null>(null);
 
   const stageRef = useRef<StageHandle>(null);
   const startRef = useRef<Pt | null>(null);
@@ -113,6 +128,50 @@ export default function BoxPage() {
     void loadBoxQueue();
   }, [loadBoxQueue]);
 
+  // When the suggestion filter is active, pull the per-label frame index from
+  // /api/home once so navigation can constrain to matching frames. Reuses the
+  // same payload the home page caches; guards for an absent field on old servers.
+  useEffect(() => {
+    if (!suggestActive) {
+      setSuggestionLabelIndex(null);
+      return;
+    }
+    let cancelled = false;
+    const qs = catsKey ? `?cats=${catsKey}` : "";
+    fetch(`/api/home${qs}`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
+      .then((data: { suggestionLabelIndex?: Record<string, number[]> }) => {
+        if (!cancelled) setSuggestionLabelIndex(data.suggestionLabelIndex ?? {});
+      })
+      .catch(() => {
+        // On failure, treat as "no restriction" rather than stranding the user.
+        if (!cancelled) setSuggestionLabelIndex({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [suggestActive, catsKey]);
+
+  // Resolve the suggestion selection to the concrete set of permitted frame
+  // indices. `null` = filter active but index still loading (don't restrict yet);
+  // a non-null Set = the frames whose suggestions include a selected label. With
+  // the all-sentinel it's the union of EVERY label's frames (any suggestion).
+  const suggestSet = useMemo<Set<number> | null>(() => {
+    if (!suggestActive) return null; // off — no restriction
+    if (suggestionLabelIndex === null) return null; // loading
+    const out = new Set<number>();
+    if (suggest.has(ALL_SUGGESTIONS)) {
+      for (const arr of Object.values(suggestionLabelIndex)) {
+        for (const m of arr) out.add(m);
+      }
+    } else {
+      for (const label of suggest) {
+        for (const m of suggestionLabelIndex[label] ?? []) out.add(m);
+      }
+    }
+    return out;
+  }, [suggestActive, suggest, suggestionLabelIndex]);
+
   // The navigation sequence walked by prev/next: EVERY in-scope image, in global
   // order (sequential) or one fixed seeded shuffle (random). Because it shuffles
   // the full manifest — whose contents never change as you box — the order is
@@ -133,13 +192,23 @@ export default function BoxPage() {
 
   // Deep-link guard: if `n` isn't a valid stop in the nav sequence (wrong
   // category, or — in random mode — already boxed), snap to the first in-scope
-  // image at or after it (else the first in the sequence).
+  // image at or after it (else the first in the sequence). With the suggestion
+  // filter active, only frames in suggestSet are valid stops; wait while it loads.
   useEffect(() => {
     if (manifest == null || ordered.length === 0) return;
-    if (pos >= 0) return;
-    const target = ordered.find((e) => e.n >= n) ?? ordered[0];
-    router.replace(withNav(`/box/${target.n}`, cats, seed));
-  }, [manifest, ordered, pos, n, cats, seed, router]);
+    if (suggestActive && suggestSet == null) return; // index still loading
+    const validHere = pos >= 0 && (!suggestSet || suggestSet.has(n));
+    if (validHere) return;
+    const target =
+      (suggestSet
+        ? ordered.find((e) => e.n >= n && suggestSet.has(e.n)) ?? ordered.find((e) => suggestSet.has(e.n))
+        : ordered.find((e) => e.n >= n)) ?? (suggestSet ? undefined : ordered[0]);
+    if (!target) {
+      router.replace("/");
+      return;
+    }
+    router.replace(withNav(`/box/${target.n}`, cats, seed, suggest));
+  }, [manifest, ordered, pos, n, cats, seed, suggest, suggestActive, suggestSet, router]);
 
   const cat: CatId | null = entry && inCats ? entry.cat : null;
   const name: string | null = entry && inCats ? entry.name : null;
@@ -217,16 +286,28 @@ export default function BoxPage() {
   const goNext = useCallback(() => {
     confirmCurrent();
     const idx = ordered.findIndex((e) => e.n === n);
-    const next = idx >= 0 ? ordered[idx + 1] : undefined;
-    if (next) router.push(withNav(`/box/${next.n}`, cats, seed));
-  }, [confirmCurrent, ordered, n, router, cats, seed]);
+    let next: ManifestEntry | undefined;
+    for (let i = idx + 1; i < ordered.length; i++) {
+      if (!suggestSet || suggestSet.has(ordered[i].n)) {
+        next = ordered[i];
+        break;
+      }
+    }
+    if (next) router.push(withNav(`/box/${next.n}`, cats, seed, suggest));
+  }, [confirmCurrent, ordered, n, suggestSet, router, cats, seed, suggest]);
 
   const goPrev = useCallback(() => {
     const idx = ordered.findIndex((e) => e.n === n);
-    const prev = idx > 0 ? ordered[idx - 1] : undefined;
+    let prev: ManifestEntry | undefined;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (!suggestSet || suggestSet.has(ordered[i].n)) {
+        prev = ordered[i];
+        break;
+      }
+    }
     if (!prev) return;
-    router.push(withNav(`/box/${prev.n}`, cats, seed));
-  }, [ordered, n, router, cats, seed]);
+    router.push(withNav(`/box/${prev.n}`, cats, seed, suggest));
+  }, [ordered, n, suggestSet, router, cats, seed, suggest]);
 
   // Space: jump to the next image that still NEEDS boxing, in the fixed order.
   // Scan starts at idx+1 so the just-confirmed current image is never re-shown.
@@ -236,22 +317,23 @@ export default function BoxPage() {
     const idx = ordered.findIndex((e) => e.n === n);
     let target: ManifestEntry | undefined;
     for (let i = idx + 1; i < ordered.length; i++) {
-      if (!boxSet || boxSet.has(ordered[i].n)) {
+      const m = ordered[i].n;
+      if ((!boxSet || boxSet.has(m)) && (!suggestSet || suggestSet.has(m))) {
         target = ordered[i];
         break;
       }
     }
-    router.push(target ? withNav(`/box/${target.n}`, cats, seed) : "/");
-  }, [confirmCurrent, ordered, n, boxSet, router, cats, seed]);
+    router.push(target ? withNav(`/box/${target.n}`, cats, seed, suggest) : "/");
+  }, [confirmCurrent, ordered, n, boxSet, suggestSet, router, cats, seed, suggest]);
 
   // --- Undo/redo: history is session-global, so an edit made before advancing
   // is undone by hopping back to the image it happened on. ------------------
   const navToHistory = useCallback(
     (key: { cat: CatId; name: string }) => {
       const target = manifest?.find((e) => e.cat === key.cat && e.name === key.name);
-      if (target) router.push(withNav(`/box/${target.n}`, cats, seed));
+      if (target) router.push(withNav(`/box/${target.n}`, cats, seed, suggest));
     },
-    [manifest, router, cats, seed],
+    [manifest, router, cats, seed, suggest],
   );
   const handleUndo = useCallback(() => {
     const target = undo();
@@ -264,8 +346,8 @@ export default function BoxPage() {
 
   // Flip random/sequential order in place (no need to bounce through Home).
   const toggleRandom = useCallback(() => {
-    router.replace(withNav(`/box/${n}`, cats, seed != null ? null : newSeed()));
-  }, [router, n, cats, seed]);
+    router.replace(withNav(`/box/${n}`, cats, seed != null ? null : newSeed(), suggest));
+  }, [router, n, cats, seed, suggest]);
 
   // Clear the current image: wipe every placed box (reverting `boxed`, so the
   // flag keeps meaning "has user boxes") AND reject every pending yellow
@@ -299,18 +381,18 @@ export default function BoxPage() {
       const fresh = await loadManifest();
       await loadBoxQueue();
       const t = nextId ? fresh.find((e) => e.cat === nextId.cat && e.name === nextId.name) : undefined;
-      router.push(t ? withNav(`/box/${t.n}`, cats, seed) : "/");
+      router.push(t ? withNav(`/box/${t.n}`, cats, seed, suggest) : "/");
     });
-  }, [cat, name, ordered, n, deleteCurrent, loadManifest, loadBoxQueue, router, cats, seed]);
+  }, [cat, name, ordered, n, deleteCurrent, loadManifest, loadBoxQueue, router, cats, seed, suggest]);
 
   const handleDeleteUndo = useCallback(() => {
     void undoDelete(async (p) => {
       const fresh = await loadManifest();
       await loadBoxQueue();
       const t = fresh.find((e) => e.cat === p.cat && e.name === p.name);
-      if (t) router.push(withNav(`/box/${t.n}`, cats, seed));
+      if (t) router.push(withNav(`/box/${t.n}`, cats, seed, suggest));
     });
-  }, [undoDelete, loadManifest, loadBoxQueue, router, cats, seed]);
+  }, [undoDelete, loadManifest, loadBoxQueue, router, cats, seed, suggest]);
 
   // --- Drawing --------------------------------------------------------------
   const onDrawStart = useCallback((pt: Pt) => {
