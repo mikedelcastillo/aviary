@@ -148,7 +148,7 @@ function EmptyState() {
       <p className="text-sm font-semibold text-fg">No benchmarks yet</p>
       <p className="mt-1 text-sm text-muted">Run the benchmark to score your models.</p>
       <p className="mt-4 inline-block rounded-lg border border-border bg-bg px-3.5 py-2 font-mono text-[13px] text-box">
-        scripts/benchmark.ps1 <span className="text-faint">· scripts/benchmark.sh</span>
+        uv run benchmark
       </p>
     </div>
   );

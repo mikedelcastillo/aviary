@@ -11,15 +11,29 @@ dependencies = [
     "requests>=2.32.0",
     "rich>=13.7.0",
     "ultralytics>=8.3.0",
+    # torch/torchvision are pinned to the CUDA 12.8 (cu128) index below — the
+    # build with Blackwell/sm_120 support for the RTX 5060. uv resolves the wheel
+    # itself; `uv sync` installs the right GPU torch with no post-step.
+    "torch",
+    "torchvision",
 ]
 
+# Every operational script is a console command: `uv run <name>`. Names are
+# hyphen-case; the Python modules/functions they map to stay underscore.
 [project.scripts]
-train = "train:main"
-evaluate = "evaluate:main"
-prepare-dataset = "prepare_dataset:main"
-extract-frames = "extract_frames:main"
-benchmark = "benchmark:main"
 server = "lib.main:main"
+train = "train:main"
+train-live = "train_live:main"
+train-archive = "train_archive:main"
+prepare-dataset = "prepare_dataset:main"
+benchmark = "benchmark:main"
+evaluate = "evaluate:main"
+suggest = "suggest:main"
+import-collect-birds = "import_collect_birds:main"
+import-immich-albums = "import_immich_albums:main"
+extract-frames = "extract_frames:main"
+synth-ir = "synth_ir:main"
+cut-paste-ir = "cut_paste_ir:main"
 tests = "pytest:console_main"
 
 [build-system]
@@ -34,20 +48,33 @@ packages = [
 ]
 
 # ... plus each standalone script mapped explicitly to a top-level module, so
-# `train`, `evaluate`, ... import cleanly as their entry points expect.
+# `train`, `benchmark`, ... import cleanly as their entry points expect.
 [tool.hatch.build.targets.wheel.force-include]
 "training/scripts/train.py" = "train.py"
+"training/scripts/train_live.py" = "train_live.py"
+"training/scripts/train_archive.py" = "train_archive.py"
+"training/scripts/train_pipeline.py" = "train_pipeline.py"
 "training/scripts/evaluate.py" = "evaluate.py"
 "training/scripts/prepare_dataset.py" = "prepare_dataset.py"
 "training/scripts/extract_frames.py" = "extract_frames.py"
 "training/scripts/benchmark.py" = "benchmark.py"
+"training/scripts/suggest.py" = "suggest.py"
+"training/scripts/import_collect_birds.py" = "import_collect_birds.py"
+"training/scripts/import_immich_albums.py" = "import_immich_albums.py"
+"training/scripts/synth_ir.py" = "synth_ir.py"
+"training/scripts/cut_paste_ir.py" = "cut_paste_ir.py"
 
-# NOTE: `torch`/`torchvision` come in transitively via ultralytics (a default build that does
-# not match every GPU). The correct per-machine GPU build is installed into the venv by
-# scripts/install-gpu.{sh,ps1} after `uv sync` — see that script and the README.
-# (uv can't pick the build itself: it sees only "linux/x86_64" and not the actual GPU, so it
-# can't choose the right CUDA wheel — e.g. cu128 with Blackwell for the RTX 5060.)
+# Pin torch/torchvision to the CUDA 12.8 (cu128) wheels — the build with
+# Blackwell/sm_120 support for the RTX 5060. The machine is Linux + RTX 5060 only,
+# so `uv sync` resolves a recent cu128 torch compatible with ultralytics directly.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 [dependency-groups]
-# Pure-Python; safe to install without disturbing the per-machine GPU torch build.
 dev = ["pytest>=8.0.0"]

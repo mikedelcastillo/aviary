@@ -91,10 +91,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models", action="append", help="Only these model filenames/stems (repeatable)")
     parser.add_argument(
         "--split",
-        default="all",
+        default="test",
         choices=["all", "train", "val", "test"],
-        help="Score only this dataset split (default all). 'test' = the held-out set "
-        "from the manifest, so the score isn't measured on training images.",
+        help="Score only this dataset split (default test). 'test' = the held-out set "
+        "from the manifest, so the homepage isn't scoring training images. Pass "
+        "--split all to score the whole labeled tree.",
     )
     parser.add_argument(
         "--dataset-dir",

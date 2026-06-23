@@ -6,7 +6,7 @@ budgie A/B is honest), keeps day frames that contain a chosen source class
 (default ``bambi``=5, the sole budgie), renders each to an IR look, and writes a
 synthetic image + species-remapped label into the train split (or a staging dir).
 
-  PYTHONPATH=training uv run --no-sync python training/scripts/synth_ir.py \
+  uv run synth-ir \
     --dataset-dir data/training/datasets/live --output-dir <stage-or-train>
 """
 

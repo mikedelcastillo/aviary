@@ -242,7 +242,7 @@ _MODEL_RE = re.compile(r"-(\d{3})$")
 def latest_model(models_dir: Path, prefix: str) -> Path | None:
     """Highest-numbered ``<prefix>-NNN.pt`` under ``models_dir`` (the model the
     train scripts most recently exported), or None if none exist. Mirrors the
-    sequence scan in scripts/train_live.{ps1,sh}."""
+    sequence scan in train_pipeline.next_export_path."""
     best: tuple[int, Path] | None = None
     if not models_dir.is_dir():
         return None

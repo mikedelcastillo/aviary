@@ -9,7 +9,10 @@ Two models are built from that one roster:
 - `live` — 6 living birds + 3 IR species + `unknown_bird` (the real-time CCTV detector).
 - `archive` — all individuals (living + deceased), no species (the photo-library catalog).
 
-Trained weights land in `training/models/`: `live.pt` and `archive.pt` (gitignored).
+Versioned weights land in `data/models/`: `live-NNN.pt` and `archive-NNN.pt`
+(gitignored), where `NNN` is the next zero-padded sequence number after the
+highest existing one — so each run is preserved and never clobbers the model the
+server may currently be loading.
 
 ## One-command build (recommended)
 
@@ -17,17 +20,17 @@ From the repo root, build a model end-to-end — prepare its dataset from the
 labeled raw images, train, and export the weights:
 
 ```bash
-./scripts/train_live.sh      # -> training/models/live.pt
-./scripts/train_archive.sh   # -> training/models/archive.pt
+uv run train-live      # -> data/models/live-NNN.pt
+uv run train-archive   # -> data/models/archive-NNN.pt
 ```
 
-Each script runs `uv sync`, picks the right per-machine GPU torch build via
-`scripts/install-gpu.sh`, prepares `data/training/datasets/<model>/` from
-`data/annotation/raw`, then trains and exports. Extra flags pass through to
-`train`, e.g.:
+Each command prepares `data/training/datasets/<model>/` from
+`data/annotation/raw`, then trains and exports to the next sequence number.
+(`uv sync` already installed the cu128 torch build for the RTX 5060.) Extra flags
+pass through to `train`, e.g.:
 
 ```bash
-./scripts/train_live.sh --epochs 200 --imgsz 960 --device cuda:0 --model yolo11s.pt
+uv run train-live --epochs 200 --imgsz 960 --device cuda:0 --model yolo11s.pt
 ```
 
 Override the labeled-image source with `AVIARY_LABEL_SOURCE` if your layout differs.
@@ -72,9 +75,9 @@ uv run train \
   --export-to training/models/live.pt
 ```
 
-Use `--device cuda:0` on a Linux NVIDIA machine or `--device mps` on Apple
-Silicon. Omit `--device` to let Ultralytics decide. `--name live`/`archive` keeps
-each model's runs separate under `data/training/runs/`.
+Use `--device cuda:0` to pin the RTX 5060, or omit `--device` to let Ultralytics
+decide. `--name live`/`archive` keeps each model's runs separate under
+`data/training/runs/`.
 
 ### Evaluate
 

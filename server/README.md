@@ -18,29 +18,24 @@ Update:
 - `TAPO_CREDENTIALS` (`user:password` — only the Tapo camera-account
   credentials; cameras are auto-discovered on the LAN, see below)
 - `TAPO_DISCOVERY_CIDR` (optional — override the scanned subnet when auto-detect
-  picks the wrong interface, e.g. inside Docker)
-- `MODEL_PATH` if running outside Docker (comma-separated for multiple models —
-  each runs a separate pass per frame and their detections are merged)
+  picks the wrong interface)
+- `MODEL_PATH` (comma-separated for multiple models — each runs a separate pass
+  per frame and their detections are merged)
 
 ## Run
 
 From the repo root (see the top-level README for installing uv):
 
 ```bash
-./scripts/server.sh
+uv run server
 ```
 
-This runs the server natively in the uv venv, installing the correct GPU torch
-build for the machine first. It expects the model at:
+This runs the server natively in the uv venv on the Linux/RTX 5060 host (`uv sync`
+already installed the cu128 torch build). It expects the model at:
 
 ```text
 data/server/models/current/object_detector.pt
 ```
-
-A `server/Dockerfile` is still provided if you'd rather containerize the server.
-
-On Apple Silicon, set the model `device` to `mps` in the `ModelConfig` defaults
-in `server/lib/config.py`.
 
 ## Camera Discovery
 
