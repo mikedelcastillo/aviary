@@ -8,8 +8,8 @@
 # (uv doesn't know about the GPU wheel installed here). To drop the flag, set UV_NO_SYNC=1 once
 # in your shell profile and then `uv run train` works as-is.
 #
-# uv can't pick the build automatically — the GTX 1060 and RTX 5060 both look like
-# "linux/x86_64" to uv but need incompatible wheels (cu118/Pascal vs cu128/Blackwell).
+# uv can't pick the build automatically — it sees only "linux/x86_64" and not the actual GPU,
+# so it can't choose the right CUDA wheel (e.g. cu128/Blackwell for the RTX 5060).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,14 +21,8 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 fi
 
 cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ')"
-major="${cap%%.*}"
-if [ "${major:-0}" -le 6 ]; then
-    URL="https://download.pytorch.org/whl/cu118"
-    LABEL="cu118 (Pascal/Maxwell, e.g. GTX 1060)"
-else
-    URL="https://download.pytorch.org/whl/cu128"
-    LABEL="cu128 (Turing..Blackwell, e.g. RTX 5060)"
-fi
+URL="https://download.pytorch.org/whl/cu128"
+LABEL="cu128 (Turing..Blackwell, e.g. RTX 5060)"
 
 echo "Detected compute capability ${cap:-unknown} -> installing torch ${LABEL}"
 uv pip install --reinstall torch torchvision --index-url "${URL}"

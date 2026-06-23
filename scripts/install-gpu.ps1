@@ -47,12 +47,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "ROCm torch install failed (uv exit $LASTEXITCODE)." }
     }
     elseif ($gpus -match "NVIDIA|GeForce") {
-        if ($gpus -match "GTX 10\d\d") { $url = "https://download.pytorch.org/whl/cu118" }
-        else { $url = "https://download.pytorch.org/whl/cu128" }
+        $url = "https://download.pytorch.org/whl/cu128"
         Write-Host "Installing torch from $url"
-        # No version pin: each CUDA index serves its own newest torch (cu118 caps lower than cu128),
-        # and uv already picks the newest. The smoke import below fails loudly on an incompatible
-        # torch/torchvision/ultralytics combo.
+        # cu128 covers the current NVIDIA card (RTX 5060, Blackwell / sm_120). No version pin: the
+        # CUDA index serves its own newest torch and uv already picks it. The smoke import below
+        # fails loudly on an incompatible torch/torchvision/ultralytics combo.
         uv pip install --reinstall torch torchvision --index-url $url
         if ($LASTEXITCODE -ne 0) { throw "torch install failed (uv exit $LASTEXITCODE)." }
     }

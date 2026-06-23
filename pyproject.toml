@@ -45,8 +45,8 @@ packages = [
 # NOTE: `torch`/`torchvision` come in transitively via ultralytics (a default build that does
 # not match every GPU). The correct per-machine GPU build is installed into the venv by
 # scripts/install-gpu.{sh,ps1} after `uv sync` — see that script and the README.
-# (uv can't pick the build itself: the GTX 1060 and RTX 5060 are both "linux/x86_64" to uv yet
-# need incompatible wheels — cu118 with Pascal vs cu128 with Blackwell.)
+# (uv can't pick the build itself: it sees only "linux/x86_64" and not the actual GPU, so it
+# can't choose the right CUDA wheel — e.g. cu128 with Blackwell for the RTX 5060.)
 
 [dependency-groups]
 # Pure-Python; safe to install without disturbing the per-machine GPU torch build.
