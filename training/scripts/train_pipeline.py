@@ -46,6 +46,16 @@ def run(model: str, argv: list[str] | None = None) -> None:
     Extra CLI flags in ``argv`` pass through to training (e.g. ``--epochs 200
     --device cuda:0 --model yolo11s.pt``), matching the old wrapper behavior.
     """
+    # Handle --help BEFORE any side effects: this command rebuilds the dataset
+    # (a destructive re-prep), so `train-<model> --help` must NOT trigger it.
+    if argv and ("-h" in argv or "--help" in argv):
+        print(
+            f"{model}: prepare a dataset from the labeled raw images, then train and "
+            f"export data/models/{model}-NNN.pt. Extra flags pass through to training:\n"
+        )
+        train.main(["--help"])  # argparse prints the training options, then exits
+        return
+
     source = Path(os.environ.get("AVIARY_LABEL_SOURCE", "data/annotation/raw"))
     dataset = Path("data/training/datasets") / model
 
