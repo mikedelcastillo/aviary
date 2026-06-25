@@ -77,7 +77,10 @@ class OllamaConfig:
     enabled: bool
     base_url: str = "http://localhost:11434"
     llm_model: str = "qwen3:4b"
-    vlm_model: str = "qwen2.5vl:7b"
+    # 3B (not 7B): on an 8GB GPU the 7B VLM (4.75GB) + LLM (3.2GB) + YOLO spilled
+    # to CPU. The 3B is 2.16GB at the same ~20s latency and near-identical caption
+    # quality, so all three coexist on-GPU (~5.8GB) with headroom. See bench.
+    vlm_model: str = "qwen2.5vl:3b"
     # Generous: vision passes over a photo can take tens of seconds on a busy GPU.
     timeout_seconds: float = 120.0
     # Max concurrent vision (image) calls; the rest queue. 1 keeps the GPU from
