@@ -177,14 +177,35 @@ class ConsoleLogToggle:
 def run_terminal_chat(dispatcher: ConsoleDispatcher, stop_event) -> None:
     """Read lines from stdin and dispatch them until EOF / quit / stop.
 
-    Deliberately a simple readline loop (no full-screen takeover) so it composes
-    with normal terminal scrollback and never fights the camera threads' output.
+    Reads on a daemon thread and polls a queue so the loop also wakes on
+    ``stop_event`` — that way an external SIGTERM (server shutdown) stops the
+    chat too, not just Ctrl-C/Ctrl-D. Deliberately a simple readline UI (no
+    full-screen takeover) so it composes with normal terminal scrollback.
     """
+    import queue
+    import threading
+
     print("\n🐦 Aviary console — type /help, or just chat. Ctrl-D to exit.\n")
+    lines: "queue.Queue[str | None]" = queue.Queue()
+
+    def reader() -> None:
+        while True:
+            try:
+                lines.put(input("aviary> "))
+            except (EOFError, KeyboardInterrupt):
+                lines.put(None)
+                return
+
+    threading.Thread(target=reader, name="console-input", daemon=True).start()
+
     while not stop_event.is_set():
         try:
-            line = input("aviary> ")
-        except (EOFError, KeyboardInterrupt):
+            line = lines.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        except KeyboardInterrupt:
+            break
+        if line is None:  # Ctrl-D / EOF
             print()
             break
         try:

@@ -96,14 +96,17 @@ class ActivityResponder:
             summary = notes[-1]
         self._notify(chat_id, summary or notes[-1])
 
-        # A few of the most recent distinct photos.
+        # A few of the most recent distinct photos (newest entries first).
         if self._send_photo is not None:
             chosen: list[str] = []
             seen: set[str] = set()
             for entry in reversed(entries):
-                if entry.photo and entry.photo not in seen and Path(entry.photo).exists():
-                    seen.add(entry.photo)
-                    chosen.append(entry.photo)
+                for photo in entry.photos:
+                    if photo not in seen and Path(photo).exists():
+                        seen.add(photo)
+                        chosen.append(photo)
+                    if len(chosen) >= MAX_QA_PHOTOS:
+                        break
                 if len(chosen) >= MAX_QA_PHOTOS:
                     break
             for photo in reversed(chosen):

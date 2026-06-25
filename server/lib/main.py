@@ -659,17 +659,15 @@ def main() -> None:
         and app_config.memory_interval_minutes > 0
     ):
         MemoryMaker(
-            app_config.collect.directory,
             memories_dir,
             registry,
+            grab_frame,
+            describe_frame,
             ollama_client,
             app_config.ollama.llm_model,
-            app_config.ollama.vlm_model,
             notifier,
             stop_event,
             interval_seconds=app_config.memory_interval_minutes * 60.0,
-            member_species=member_species,
-            pronouns=pronouns,
             camera_display=namer.display,
         ).start()
         LOGGER.info(

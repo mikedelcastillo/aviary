@@ -63,10 +63,11 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '- "status": how the cameras or system are doing, health, what is online. argument = "".\n'
         '- "snapshot": take or show pictures from all cameras right now. argument = "".\n'
         '- "activity": what a bird IS or WAS doing / its day / behaviour / recent photos — '
-        '"what did percy do today", "what is draft up to", "what are the birds doing", "how '
-        'was matcha today", "show me recent photos of pizza", "show me what the birds are up '
-        'to", "where are the birds", "where is everyone". argument = the bird/group named, or '
-        '"" for all birds.\n'
+        '"what did percy do today", "what is draft up to", "what has pizza been up to", '
+        '"what are the birds doing", "what\'s going on", "anything happening?", "how was '
+        'matcha today", "show me recent photos of pizza", "show me what the birds are up to", '
+        '"where are the birds", "where is everyone". argument = the bird/group named, or "" '
+        "for all birds.\n"
         '- "chat": greetings, thanks, or anything that isn\'t about the birds\' whereabouts '
         'or activity. argument = "".\n\n'
         "Rules:\n"

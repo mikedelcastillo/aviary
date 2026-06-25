@@ -34,7 +34,7 @@ class MemoryEntry:
     time: datetime
     birds: list[str]
     note: str
-    photo: str | None = None
+    photos: list[str] = field(default_factory=list)
 
 
 def memory_path(memories_dir: Path, day: date) -> Path:
@@ -48,8 +48,8 @@ def append_entry(memories_dir: Path, entry: MemoryEntry) -> Path:
     new_file = not path.exists()
     birds = ", ".join(entry.birds) if entry.birds else "quiet"
     block = f"## {entry.time.strftime('%H:%M')} | {birds}\n{entry.note.strip()}\n"
-    if entry.photo:
-        block += f"> photo: {entry.photo}\n"
+    for photo in entry.photos:
+        block += f"> photo: {photo}\n"
     with path.open("a", encoding="utf-8") as handle:
         if new_file:
             handle.write(f"# Aviary memories — {entry.time.date().isoformat()}\n\n")
@@ -66,8 +66,7 @@ def load_entries(memories_dir: Path, day: date) -> list[MemoryEntry]:
     entries: list[MemoryEntry] = []
     for match in _ENTRY_RE.finditer(text):
         hhmm, birds_raw, body = match.group(1), match.group(2), match.group(3)
-        photo_match = _PHOTO_RE.search(body)
-        photo = photo_match.group(1).strip() if photo_match else None
+        photos = [p.strip() for p in _PHOTO_RE.findall(body)]
         note = _PHOTO_RE.sub("", body).strip()
         try:
             when = datetime.combine(
@@ -76,7 +75,7 @@ def load_entries(memories_dir: Path, day: date) -> list[MemoryEntry]:
         except ValueError:
             continue
         birds = [b.strip().lower() for b in birds_raw.split(",") if b.strip() and b.strip() != "quiet"]
-        entries.append(MemoryEntry(time=when, birds=birds, note=note, photo=photo))
+        entries.append(MemoryEntry(time=when, birds=birds, note=note, photos=photos))
     return entries
 
 

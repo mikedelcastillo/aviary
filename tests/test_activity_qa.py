@@ -38,7 +38,7 @@ def test_parse_activity_arg() -> None:
 def test_respond_summarises_recent_memory(tmp_path) -> None:
     photo = tmp_path / "p.jpg"
     photo.write_bytes(b"\xff\xd8jpeg")
-    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy", "matcha"], "Percy preens.", str(photo)))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy", "matcha"], "Percy preens.", [str(photo)]))
     sent: list = []
     photos: list = []
     _responder(tmp_path, lambda c, t: sent.append(t), send_photo=lambda c, img, cap: photos.append(img)).respond(

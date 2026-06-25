@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import json
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 from lib.journal import load_entries
 from lib.memory_maker import MemoryMaker
@@ -38,84 +37,66 @@ class FakeRegistry:
 
 
 class FakeClient:
-    def generate(self, model, prompt, *, images=None, timeout_seconds=None, **kwargs):
-        return "doing bird things"
-
     def chat(self, model, messages, **kwargs):
-        return "Percy preened with Matcha."
+        return "Percy preened on the perch."
 
 
-def _write_sighting(collect_dir, label, conf, when: datetime) -> None:
-    folder = collect_dir / label
-    folder.mkdir(parents=True, exist_ok=True)
-    stem = f"{label}_{int(when.timestamp())}"
-    (folder / f"{stem}.jpg").write_bytes(b"\xff\xd8jpeg")
-    (folder / f"{stem}.json").write_text(
-        json.dumps(
-            {
-                "object": label,
-                "camera": {"name": "camera-192.168.1.8"},
-                "collected_at": when.replace(tzinfo=timezone.utc).isoformat(),
-                "frame": {"width": 100, "height": 100},
-                "detection": {"confidence": conf, "bbox_xyxy": {"x1": 1, "y1": 1, "x2": 9, "y2": 9}},
-            }
-        )
-    )
+def row(label, camera="camera-192.168.1.8", since=1.0):
+    return {"camera": camera, "label": label, "since": since}
 
 
-def row(label, since=1.0):
-    return {"camera": "camera-192.168.1.8", "label": label, "since": since}
-
-
-def _maker(collect, memories, registry, notifier, now_dt, clock_val):
+def _maker(memories, registry, notifier, now_dt, clock_val, *, describe=lambda img: "perched"):
     return MemoryMaker(
-        collect, memories, registry, FakeClient(), "qwen3:4b", "qwen2.5vl:7b", notifier,
-        threading.Event(), interval_seconds=300, poll_seconds=30, fresh_seconds=15,
-        camera_display=lambda n: "Big Cage", clock=lambda: clock_val, now=lambda: now_dt,
+        memories,
+        registry,
+        grab_frame=lambda cam: b"\xff\xd8jpeg-" + cam.encode(),
+        describe_frame=describe,
+        client=FakeClient(),
+        llm_model="qwen3:4b",
+        notifier=notifier,
+        stop_event=threading.Event(),
+        interval_seconds=300,
+        poll_seconds=30,
+        fresh_seconds=15,
+        camera_display=lambda n: "Big Cage",
+        clock=lambda: clock_val,
+        now=lambda: now_dt,
     )
 
 
-def test_report_writes_memory_and_broadcasts(tmp_path) -> None:
-    collect = tmp_path / "collect"
+def test_report_saves_images_writes_memory_and_broadcasts(tmp_path) -> None:
     memories = tmp_path / "memories"
     now_dt = datetime(2026, 6, 25, 15, 0)
-    _write_sighting(collect, "percy", 0.9, now_dt - timedelta(minutes=2))
     notifier = FakeNotifier()
-    maker = _maker(collect, memories, FakeRegistry([row("percy")]), notifier, now_dt, 1000.0)
-    maker._window_start = now_dt - timedelta(minutes=5)
+    maker = _maker(memories, FakeRegistry([row("percy")]), notifier, now_dt, 1000.0)
 
-    maker._report(frozenset({"percy"}))
+    assert maker._report({"percy": ["camera-192.168.1.8"]}) is True
 
-    assert notifier.tracked and "Percy" in notifier.tracked[0]
-    assert notifier.photos  # photo(s) sent individually
+    # Photo(s) sent, image(s) saved to the memory image store, memory written.
+    assert notifier.photos and notifier.tracked
+    images = list((memories / "images").glob("*.jpg"))
+    assert images, "expected a memory image to be saved"
     entries = load_entries(memories, now_dt.date())
-    assert entries and "percy" in entries[0].birds
+    assert entries and entries[0].birds == ["percy"]
+    assert entries[0].photos and entries[0].photos[0].endswith(".jpg")
 
 
 def test_tick_reports_on_new_bird(tmp_path) -> None:
-    collect = tmp_path / "collect"
     memories = tmp_path / "memories"
     now_dt = datetime(2026, 6, 25, 15, 0)
-    _write_sighting(collect, "percy", 0.9, now_dt - timedelta(minutes=1))
     notifier = FakeNotifier()
-    maker = _maker(collect, memories, FakeRegistry([row("percy")]), notifier, now_dt, 1000.0)
-    maker._window_start = now_dt - timedelta(minutes=5)
-
-    maker._tick()  # percy is new -> immediate report
-
+    maker = _maker(memories, FakeRegistry([row("percy")]), notifier, now_dt, 1000.0)
+    maker._tick()
     assert notifier.tracked
 
 
 def test_tick_edits_in_place_when_quiet(tmp_path) -> None:
-    collect = tmp_path / "collect"
     memories = tmp_path / "memories"
     now_dt = datetime(2026, 6, 25, 3, 0)
     notifier = FakeNotifier()
-    maker = _maker(collect, memories, FakeRegistry([]), notifier, now_dt, 1000.0)
+    maker = _maker(memories, FakeRegistry([]), notifier, now_dt, 1000.0)
     maker._last_report_at = 1000.0 - 400  # the 5-min beat is due
     maker._activity_msgs = {"A": 100}
-
-    maker._tick()  # quiet + due -> edit the last message, no new broadcast
-
+    maker._tick()
     assert notifier.tracked == []
     assert notifier.edits and "quiet" in notifier.edits[0][2].lower()

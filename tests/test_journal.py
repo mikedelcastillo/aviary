@@ -6,24 +6,23 @@ from lib.journal import MemoryEntry, append_entry, load_entries, load_recent, me
 
 
 def test_append_creates_dated_file_with_header(tmp_path) -> None:
-    entry = MemoryEntry(datetime(2026, 6, 25, 14, 32), ["percy", "matcha"], "Percy preens by Matcha.", "p.jpg")
+    entry = MemoryEntry(datetime(2026, 6, 25, 14, 32), ["percy", "matcha"], "Percy preens by Matcha.", ["a.jpg", "b.jpg"])
     path = append_entry(tmp_path, entry)
     assert path == memory_path(tmp_path, date(2026, 6, 25))
     text = path.read_text()
     assert text.startswith("# Aviary memories — 2026-06-25")
     assert "## 14:32 | percy, matcha" in text
-    assert "> photo: p.jpg" in text
+    assert "> photo: a.jpg" in text and "> photo: b.jpg" in text
 
 
-def test_append_then_load_roundtrip(tmp_path) -> None:
-    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 9, 5), ["bambi"], "Bambi eats.", "b.jpg"))
+def test_append_then_load_roundtrip_multiple_photos(tmp_path) -> None:
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 9, 5), ["bambi"], "Bambi eats.", ["b1.jpg", "b2.jpg"]))
     append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 9, 40), ["percy"], "Percy naps."))
     entries = load_entries(tmp_path, date(2026, 6, 25))
     assert [e.time.strftime("%H:%M") for e in entries] == ["09:05", "09:40"]
-    assert entries[0].birds == ["bambi"]
-    assert entries[0].photo == "b.jpg"
+    assert entries[0].photos == ["b1.jpg", "b2.jpg"]
     assert entries[1].note == "Percy naps."
-    assert entries[1].photo is None
+    assert entries[1].photos == []
 
 
 def test_quiet_entry_has_no_birds(tmp_path) -> None:
