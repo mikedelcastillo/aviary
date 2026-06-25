@@ -83,6 +83,18 @@ def test_no_backfire_when_started_late_evening() -> None:
     assert sent == []
 
 
+def test_winddown_fires_before_sunset_not_after() -> None:
+    # sunset 18:30 -> wind-down anchor 17:30. The "~1h before sunset" nudge must
+    # land before sunset, never after it.
+    scheduler, sent, _ = _make()
+    scheduler._tick(THURSDAY.replace(hour=17, minute=40))  # inside the pre-sunset window
+    assert any("Winding down" in m for m in sent)
+
+    later, sent_late, _ = _make()
+    later._tick(THURSDAY.replace(hour=18, minute=45))  # just after sunset
+    assert not any("Winding down" in m for m in sent_late)
+
+
 def test_weekly_clean_fires_on_weekly_day_only() -> None:
     scheduler, sent, _ = _make()
     scheduler._tick(THURSDAY.replace(hour=13, minute=10))  # not the weekly day

@@ -6,9 +6,10 @@ bedtime with 10-12 hours of dark, and a weekly deep-clean + weigh-in. This
 scheduler sends those nudges, keyed to the flock's actual day:
 
   * Morning and bedtime fire on the OBSERVED light — the moment the cameras see
-    the room light up (leave IR) or go dark (all IR) — which is the real signal
-    the birds wake/roost by. If no light transition is seen, they fall back to
-    local sunrise/sunset (see :mod:`lib.suntimes`).
+    the room light up (leave IR) or go dark (all IR), which is the real signal
+    the birds wake/roost by — OR at local sunrise/sunset (see :mod:`lib.suntimes`),
+    whichever comes first. The sun anchor means the nudge still arrives without a
+    transition (no cameras, or a view that never changes IR).
   * The produce-pickup nudge fires ~2 hours after the morning one (food safety).
   * Midday enrichment, the pre-sunset wind-down, and the weekly clean/weigh fire
     on local PH time.
@@ -16,14 +17,13 @@ scheduler sends those nudges, keyed to the flock's actual day:
 Each reminder fires at most once per day (or week), and only within a window
 after its anchor, so a server that starts mid-evening never backfires a day's
 worth of missed nudges at once. The logic in :meth:`_tick` is driven by an
-injected clock and light state, so it is fully unit-testable without real time.
+injected ``now`` and light state, so it is fully unit-testable without real time.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-import time as time_module
 from datetime import date, datetime, time, timedelta
 from typing import Callable
 
@@ -94,7 +94,6 @@ class CareScheduler:
         camera_count: Callable[[], int] | None = None,
         sun_times: Callable[[date], tuple[time | None, time | None]] | None = None,
         now: Callable[[], datetime] = now_ph,
-        clock: Callable[[], float] = time_module.monotonic,
         poll_seconds: float = 60.0,
         morning_fallback: time = time(7, 0),
         bedtime_fallback: time = time(20, 0),
@@ -108,7 +107,6 @@ class CareScheduler:
         self._camera_count = camera_count or (lambda: 0)
         self._sun_times = sun_times or (lambda day: default_sun_times(day))
         self._now = now
-        self._clock = clock
         self._poll = poll_seconds
         self._morning_fallback = morning_fallback
         self._bedtime_fallback = bedtime_fallback
@@ -181,8 +179,10 @@ class CareScheduler:
         if self._due("midday", day_key) and _within(now_t, self._midday, self._window):
             self._fire("midday", day_key)
 
-        # Wind-down ~1h before sunset/target bedtime.
-        if self._due("winddown", day_key) and _within(now_t, winddown_anchor, self._window):
+        # Wind-down ~1h before sunset/target bedtime. Its window is capped below
+        # the 60-min offset so it always lands BEFORE sunset/bedtime, never after
+        # (a "winding down ~1h before sunset" nudge must not fire post-sunset).
+        if self._due("winddown", day_key) and _within(now_t, winddown_anchor, min(self._window, 55)):
             self._fire("winddown", day_key)
 
         # Bedtime: the room going dark is the real signal; otherwise the sunset/
