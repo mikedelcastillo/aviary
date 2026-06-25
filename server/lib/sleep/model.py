@@ -68,6 +68,10 @@ class SleepNight:
     score: int | None = None
     components: dict[str, float] = field(default_factory=dict)
     confidence: float = 1.0
+    # Whether consistency was scored against a real rolling baseline (False on a
+    # cold start with too little history) — so the report doesn't claim a bird is
+    # "off their usual" when there is no usual yet.
+    baselined: bool = True
     notes: list[str] = field(default_factory=list)
     summary: str = ""
     finalized: bool = False
@@ -98,6 +102,7 @@ def to_json(night: SleepNight) -> dict:
         "score": night.score,
         "components": night.components,
         "confidence": night.confidence,
+        "baselined": night.baselined,
         "notes": night.notes,
         "summary": night.summary,
         "finalized": night.finalized,
@@ -131,6 +136,7 @@ def from_json(data: dict) -> SleepNight:
         score=data.get("score"),
         components=dict(data.get("components", {})),
         confidence=float(data.get("confidence", 1.0)),
+        baselined=bool(data.get("baselined", True)),
         notes=list(data.get("notes", [])),
         summary=str(data.get("summary", "")),
         finalized=bool(data.get("finalized", False)),

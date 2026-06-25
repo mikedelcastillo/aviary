@@ -10,8 +10,8 @@ from lib.sleep.tracker import SleepTracker
 class Env:
     """Drives a SleepTracker with an injected clock + fake IR/motion, no threads."""
 
-    def __init__(self, sleep_dir, *, morning_report: bool = False) -> None:
-        self.now = datetime(2026, 6, 25, 19, 0)
+    def __init__(self, sleep_dir, *, morning_report: bool = False, now0: datetime | None = None) -> None:
+        self.now = now0 or datetime(2026, 6, 25, 19, 0)
         self.dark = False
         self.cameras = 2
         self.move = 0.0
@@ -101,6 +101,21 @@ def test_camera_drop_midnight_marks_partial_coverage(tmp_path) -> None:
     env.cameras = 1
     env.at(datetime(2026, 6, 25, 21, 0)); env.ir()
     assert env.tracker.in_progress().partial_coverage is True
+
+
+def test_restart_while_lit_anchors_the_open_light(tmp_path) -> None:
+    env1 = Env(tmp_path)
+    env1.at(datetime(2026, 6, 25, 20, 0)); env1.dark = True; env1.ir()
+    env1.at(datetime(2026, 6, 25, 20, 6)).tick()  # night open, sidecar saved
+
+    # Restart at 2am with the room currently LIT (dark defaults False in Env).
+    env2 = Env(tmp_path, now0=datetime(2026, 6, 26, 2, 0))
+    assert env2.tracker._state._leave_since is not None  # the open light is tracked
+    # When the room returns to dark, that lit span is recorded (excluded from dark).
+    env2.dark = True
+    env2.at(datetime(2026, 6, 26, 2, 30)); env2.ir()
+    night = env2.tracker.in_progress()
+    assert any(d.kind == "light" for d in night.disturbances)
 
 
 def test_night_fright_recorded_and_scored(tmp_path) -> None:

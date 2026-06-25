@@ -86,6 +86,13 @@ class SleepTracker:
         self._state.night = night
         self._state._relit_minutes = sum(d.minutes for d in night.disturbances if d.kind == LIGHT)
         self._state._last_cameras = night.camera_count_at_dark
+        # If the room is LIT at resume (cameras reporting, not all-IR), anchor the
+        # open lit interval to now so it's excluded from dark when it closes. The
+        # pre-restart portion is unavoidably lost; with no cameras yet we make no
+        # assumption and let the first live IR event settle the state.
+        if self._camera_count() > 0 and not self._all_ir():
+            self._state._leave_since = self._now()
+            self._state._last_leave_at = self._state._leave_since
         LOGGER.info("Resumed in-progress sleep night from %s", self._dir)
 
     # -- public ------------------------------------------------------------
@@ -152,6 +159,7 @@ class SleepTracker:
 
     def _finalize(self, night: SleepNight) -> None:
         baseline = rolling_baseline(load_recent(self._dir, BASELINE_NIGHTS))
+        night.baselined = baseline is not None
         night.score, night.components, night.confidence = score_night(night, baseline)
         night.summary = format_morning(night)
         try:

@@ -66,6 +66,20 @@ def test_format_week_empty() -> None:
     assert "No finished nights" in format_week([])
 
 
+def test_format_last_cold_start_has_no_usual_to_compare() -> None:
+    night = _night()
+    night.baselined = False  # first night, no rolling baseline yet
+    text = format_last(night)
+    assert "Still learning their routine" in text
+    assert "off their usual" not in text
+
+
+def test_status_line_clamps_negative_time() -> None:
+    night = SleepNight(night_of=date(2026, 6, 25), lights_out=datetime(2026, 6, 25, 20, 0))
+    line = format_status_line(night, datetime(2026, 6, 25, 19, 0))  # now BEFORE lights_out
+    assert line is not None and "0h00m" in line  # clamped, never negative
+
+
 def test_status_line_while_night_open() -> None:
     night = SleepNight(night_of=date(2026, 6, 25), lights_out=datetime(2026, 6, 25, 20, 0))
     line = format_status_line(night, datetime(2026, 6, 25, 23, 12))

@@ -36,7 +36,7 @@ def _band(score: int) -> str:
 
 
 def _hm(minutes: int | None) -> str:
-    minutes = int(minutes or 0)
+    minutes = max(0, int(minutes or 0))
     return f"{minutes // 60}h{minutes % 60:02d}m"
 
 
@@ -65,6 +65,8 @@ def _disturbance_line(night: SleepNight) -> str:
 
 
 def _schedule_line(night: SleepNight) -> str:
+    if not night.baselined:
+        return "Still learning their routine — no usual bedtime to compare to yet."
     consistency = night.components.get("consistency")
     if consistency is None:
         return ""
@@ -165,7 +167,7 @@ def format_status_line(in_progress: SleepNight | None, now: datetime) -> str | N
     """A single '/status' line while a night is open, or None."""
     if in_progress is None or in_progress.lights_out is None:
         return None
-    minutes = int((now - in_progress.lights_out).total_seconds() / 60)
+    minutes = max(0, int((now - in_progress.lights_out).total_seconds() / 60))
     return f"🌙 Night in progress — dark {_hm(minutes)} so far"
 
 
