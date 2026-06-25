@@ -30,11 +30,13 @@ SCENE_PROMPT = (
 
 # A short, unique label for a camera's view (replaces the IP-based name).
 CAMERA_NAME_PROMPT = (
-    "This is a still from a home camera watching pet birds. Give a SHORT, unique "
-    "1-2 word label for THIS camera's view, based on the most distinctive thing "
-    "in frame (for example: Window Perch, Food Bowl, Big Cage, Play Gym, Couch, "
-    "Desk). Reply with ONLY the label in Title Case — no punctuation, no quotes, "
-    "no explanation."
+    "This is a still from a home camera watching pet birds. Give a SHORT, "
+    "descriptive 1-2 word name for the PLACE or main object in frame — name the "
+    "thing itself (for example: Window Perch, Food Bowl, Big Cage, Play Gym, "
+    "Couch, Desk, Bookshelf, Kitchen Counter). Do NOT use words about the camera "
+    "or angle (no 'view', 'viewpoint', 'cam', 'camera', 'cctv', 'vantage', "
+    "'angle', 'overhead', 'wide'). Reply with ONLY the name in Title Case — no "
+    "punctuation, no quotes, no explanation."
 )
 
 
@@ -124,11 +126,14 @@ def describe_scene(
     )
 
 
-# Generic descriptors that add nothing to a camera name; stripped out so we
-# don't end up with "Big Cage View" / "Window Cam".
+# Generic words that describe the CAMERA/viewpoint rather than the place itself;
+# stripped so names stay descriptive ("Big Cage", not "Big Cage View"/"CCTV").
 _REDUNDANT_NAME_WORDS = {
-    "view", "cam", "camera", "shot", "angle", "feed", "scene", "area",
-    "image", "picture", "photo", "closeup", "perspective",
+    "view", "viewpoint", "views", "cam", "cams", "camera", "cameras", "cctv",
+    "vantage", "angle", "angles", "shot", "feed", "footage", "scene", "area",
+    "image", "picture", "photo", "closeup", "close", "perspective", "pov",
+    "lens", "capture", "monitor", "surveillance", "security", "overview",
+    "overhead", "wide", "frame", "looking", "facing",
 }
 
 

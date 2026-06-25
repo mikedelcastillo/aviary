@@ -47,6 +47,12 @@ def test_clean_camera_name_splits_camelcase_and_strips_descriptors() -> None:
     assert clean_camera_name("food bowl camera") == "Food Bowl"
 
 
+def test_clean_camera_name_strips_all_viewpoint_words() -> None:
+    for banned in ("viewpoint", "cctv", "vantage", "overhead", "wide", "angle"):
+        assert clean_camera_name(f"Bookshelf {banned}") == "Bookshelf"
+    assert clean_camera_name("CCTV Overhead") == ""  # nothing descriptive left
+
+
 def test_position_phrase_thirds() -> None:
     assert position_phrase(10, 10, 100, 100) == "top-left"
     assert position_phrase(50, 50, 100, 100) == "centre"
