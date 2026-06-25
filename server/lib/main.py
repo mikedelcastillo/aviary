@@ -25,6 +25,7 @@ from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
+from lib.care_scheduler import CareScheduler
 from lib.clock import now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
 from lib.console import (
@@ -48,6 +49,7 @@ from lib.objects import ObjectRegistry
 from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_sentence
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.stats import CameraStats
+from lib.suntimes import sun_times
 from lib.supervisor import CameraSupervisor, format_discovery_report
 from lib.telegram.commands import build_status_message, run_command_bot
 from lib.terminal_logging import NativeStderrRedirect
@@ -827,6 +829,22 @@ def main() -> None:
             "Caretaker reports every ~%.0f min; raw photo alerts %s",
             app_config.memory_interval_minutes,
             "on" if app_config.raw_photo_alerts else "off",
+        )
+
+    # Daily/weekly care reminders (fresh food + water, produce pickup, midday
+    # enrichment, wind-down, bedtime, weekly clean + weigh) keyed to the observed
+    # light (cameras leaving/entering IR) and PH sunrise/sunset. Independent of
+    # the AI — it only needs a notifier to talk to.
+    if notifier is not None and app_config.care_reminders:
+        CareScheduler(
+            notifier.broadcast_text,
+            stop_event,
+            all_ir=ir_state.all_ir,
+            camera_count=lambda: len(ir_state.known()),
+            sun_times=lambda day: sun_times(day, app_config.latitude, app_config.longitude),
+        ).start()
+        LOGGER.info(
+            "Care reminders on (lat=%.4f lon=%.4f)", app_config.latitude, app_config.longitude
         )
 
     # Presentation: the live dashboard by default, or the interactive terminal

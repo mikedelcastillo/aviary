@@ -159,6 +159,13 @@ class AppConfig:
     # so it sweeps the tilt axis too. 4 x 3 = 12 cells by default.
     ptz_scan_cols: int = 4
     ptz_scan_rows: int = 3
+    # Daily/weekly bird-care reminders (food, water, bedtime, weekly clean)
+    # keyed to observed light + local sunrise/sunset. On by default (just needs
+    # a notifier; no AI required); CARE_REMINDERS=0 turns them off.
+    care_reminders: bool = True
+    # Location for sunrise/sunset, defaulting to Manila (the host runs PH time).
+    latitude: float = 14.5995
+    longitude: float = 120.9842
 
 
 def _require_env(name: str) -> str:
@@ -311,4 +318,7 @@ def build_config() -> AppConfig:
         raw_photo_alerts=raw_photo_alerts,
         ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),
         ptz_scan_rows=max(1, int(_as_float("PTZ_SCAN_ROWS", 3))),
+        care_reminders=_as_bool("CARE_REMINDERS", True),
+        latitude=_as_float("AVIARY_LATITUDE", 14.5995),
+        longitude=_as_float("AVIARY_LONGITUDE", 120.9842),
     )
