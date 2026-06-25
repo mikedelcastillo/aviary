@@ -134,6 +134,7 @@ def name_cameras(
     frame_attempts: int = 8,
     name_attempts: int = 3,
     force: bool = False,
+    is_movable: Callable[[str], bool] | None = None,
 ) -> None:
     """Name cameras from a current frame (best-effort, blocking).
 
@@ -144,10 +145,20 @@ def name_cameras(
     on the next sweep). With ``force`` it RE-names already-named cameras too —
     used on /discover, since a pan-tilt camera may have moved to a new view; an
     existing name is kept if the re-name fails.
+
+    ``is_movable`` lets force skip re-naming a FIXED, already-named camera: only
+    a pan-tilt camera's view changes, so re-running the VLM on fixed ones every
+    sweep is wasted GPU/cluster work. Unnamed cameras are always (re)tried.
     """
+    skipped_fixed = 0
     for camera_name in camera_names:
         already_named = namer.has(camera_name)
         if already_named and not force:
+            continue
+        # Force re-name: a fixed camera's view doesn't move, so keep its cached
+        # name instead of spending a VLM call to re-derive the same thing.
+        if already_named and force and is_movable is not None and not is_movable(camera_name):
+            skipped_fixed += 1
             continue
         if stop_event is not None and stop_event.is_set():
             return
@@ -201,3 +212,6 @@ def name_cameras(
         display = unique_name(base, used)
         namer.set(camera_name, display)
         LOGGER.info("Named camera %s -> %s", camera_name, display)
+
+    if skipped_fixed:
+        LOGGER.info("Re-name skipped %d fixed camera(s) with a cached name", skipped_fixed)

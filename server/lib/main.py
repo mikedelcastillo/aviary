@@ -600,6 +600,9 @@ def main() -> None:
                 "stop_event": stop_event,
                 "timeout_seconds": VLM_DESCRIBE_TIMEOUT_SECONDS,
                 "force": force,
+                # Only re-VLM a camera that can move (pan-tilt); a fixed camera's
+                # view is stable, so its cached name stands — saves cluster work.
+                "is_movable": lambda cam: ptz_manager.camera_for(cam.removeprefix("camera-")) is not None,
             },
             name="camera-naming",
             daemon=True,

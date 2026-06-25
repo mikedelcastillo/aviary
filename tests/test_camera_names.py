@@ -158,3 +158,41 @@ def test_camera_namer_missing_cache_is_fine(tmp_path) -> None:
     namer = CameraNamer(cache_path=tmp_path / "nope.json")
     # Nothing cached yet -> IP fallback, no crash.
     assert namer.display("camera-192.168.1.8") == "192.168.1.8"
+
+
+def test_force_rename_skips_fixed_already_named_cameras() -> None:
+    namer = CameraNamer()
+    namer.set("camera-192.168.1.30", "Big Cage")   # pan-tilt (movable)
+    namer.set("camera-192.168.1.44", "Window Sill")  # fixed
+    client = FakeVlmClient("New Ledge")
+    movable = {"camera-192.168.1.30"}
+    name_cameras(
+        namer,
+        ["camera-192.168.1.30", "camera-192.168.1.44"],
+        grab_frame=lambda c: b"jpeg",
+        client=client,
+        model="m",
+        stop_event=threading.Event(),
+        frame_attempts=1,
+        force=True,
+        is_movable=lambda cam: cam in movable,
+    )
+    # The movable (PTZ) camera was re-named; the fixed one kept its cached name.
+    assert namer.display("camera-192.168.1.30") == "New Ledge"
+    assert namer.display("camera-192.168.1.44") == "Window Sill"
+
+
+def test_force_rename_still_names_unnamed_fixed_camera() -> None:
+    namer = CameraNamer()
+    name_cameras(
+        namer,
+        ["camera-192.168.1.44"],  # fixed AND unnamed -> must still be named
+        grab_frame=lambda c: b"jpeg",
+        client=FakeVlmClient("Window Sill"),
+        model="m",
+        stop_event=threading.Event(),
+        frame_attempts=1,
+        force=True,
+        is_movable=lambda cam: False,
+    )
+    assert namer.display("camera-192.168.1.44") == "Window Sill"
