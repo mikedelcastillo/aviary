@@ -126,7 +126,10 @@ def toxic_food_in(text: str) -> ToxicFood | None:
     lowered = text.lower()
     for food in TOXIC_FOODS:
         for alias in food.aliases:
-            if re.search(rf"\b{re.escape(alias)}\b", lowered):
+            # Allow a simple trailing-"s" plural so a plural mention still trips
+            # the safety gate ("scallions", "leeks", "beers"). Irregular plurals
+            # (cherries, peaches) are listed explicitly in the alias data.
+            if re.search(rf"\b{re.escape(alias)}s?\b", lowered):
                 return food
     return None
 
@@ -146,6 +149,11 @@ def relevant_facts(
     budgie cold fact, not the lovebird one.
     """
     topics = detected_topics(text)
+    # Naming a toxic food implies the toxic_foods topic even when the phrasing is
+    # just "can the budgie eat avocado" (topic 'diet' only) — so the curated,
+    # species-specific toxic fact (e.g. budgie avocado dose) can surface.
+    if toxic_food_in(text) is not None:
+        topics = topics | {"toxic_foods"}
     if not topics:
         return []
     species = detect_species(text, member_species)

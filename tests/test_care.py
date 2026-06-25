@@ -38,6 +38,24 @@ def test_toxic_food_detection() -> None:
     assert toxic_food_in("good morning friend") is None
 
 
+def test_toxic_food_detection_handles_plurals() -> None:
+    # Plural mentions must still trip the safety gate — this is the toxic-food
+    # guard, so a miss is fail-open (the bot might call a toxic food fine).
+    assert toxic_food_in("can the birds eat scallions").name == "onion"
+    assert toxic_food_in("are leeks safe for percy").name == "onion"
+    assert toxic_food_in("can they have shallots").name == "onion"
+    assert toxic_food_in("can i give them beers").name == "alcohol"
+    assert toxic_food_in("are cherries safe").name == "fruit pits"
+    assert toxic_food_in("what about peaches").name == "fruit pits"
+
+
+def test_budgie_avocado_fact_surfaces_for_natural_phrasing() -> None:
+    # "can the budgie eat avocado" detects only the 'diet' topic, but naming a
+    # toxic food must still surface the species-specific avocado fact.
+    facts = relevant_facts("can the budgie eat avocado", member_species=MEMBER_SPECIES)
+    assert any(f.species == "budgie" and f.topic == "toxic_foods" for f in facts)
+
+
 def test_toxic_alias_respects_word_boundaries() -> None:
     # "cola" is a substring of "chocolate" but must not match as caffeine/soda,
     # and chocolate itself is correctly flagged.

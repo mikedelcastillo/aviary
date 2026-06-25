@@ -143,7 +143,10 @@ TOXIC_FOODS: tuple[ToxicFood, ...] = (
     ),
     ToxicFood(
         "fruit pits",
-        ("fruit pit", "stone fruit", "cherry pit", "peach pit", "apricot pit", "plum pit", "apple core"),
+        (
+            "fruit pit", "stone fruit", "cherry pit", "peach pit", "apricot pit", "plum pit",
+            "apple core", "cherry", "cherries", "peach", "peaches", "apricot", "plum",
+        ),
         "cherry/plum/apricot/peach pits release cyanide; the depitted fruit flesh itself is safe",
     ),
     ToxicFood(
