@@ -22,10 +22,13 @@ from lib.care.facts import (
 )
 from lib.care.knowledge import (
     care_context,
+    care_overview,
+    care_reply,
     detect_species,
     detected_topics,
     relevant_facts,
     toxic_food_in,
+    toxic_food_list,
 )
 
 __all__ = [
@@ -41,8 +44,11 @@ __all__ = [
     "CareFact",
     "ToxicFood",
     "care_context",
+    "care_overview",
+    "care_reply",
     "detect_species",
     "detected_topics",
     "relevant_facts",
     "toxic_food_in",
+    "toxic_food_list",
 ]

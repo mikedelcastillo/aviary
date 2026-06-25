@@ -5,6 +5,7 @@ from lib.care import (
     SLEEP_HOURS,
     TOXIC_FOODS,
     care_context,
+    care_reply,
     detect_species,
     detected_topics,
     relevant_facts,
@@ -110,3 +111,39 @@ def test_toxic_foods_cover_the_critical_ones() -> None:
     names = {food.name for food in TOXIC_FOODS}
     for required in ("avocado", "chocolate", "caffeine", "alcohol", "onion"):
         assert required in names
+
+
+def test_care_reply_overview_when_empty() -> None:
+    text = care_reply("")
+    assert "Caring for the flock" in text
+    assert "/care diet" in text  # points to the deeper topics
+
+
+def test_care_reply_toxic_lists_foods() -> None:
+    text = care_reply("toxic")
+    assert "keep AWAY" in text
+    assert "Avocado" in text and "Chocolate" in text
+
+
+def test_care_reply_named_toxic_food_leads_with_warning() -> None:
+    text = care_reply("avocado")
+    assert text.startswith("⚠️ Avocado is dangerous")
+
+
+def test_care_reply_topic_returns_relevant_facts() -> None:
+    text = care_reply("sleep")
+    assert "Sleep & light" in text
+    low, high = SLEEP_HOURS
+    assert f"{low}-{high}" in text  # the headline sleep numbers
+    assert "•" in text  # bulleted facts
+
+
+def test_care_reply_species_returns_that_species_facts() -> None:
+    text = care_reply("cockatiel")
+    assert "[cockatiel]" in text  # this species' specific facts surface
+    assert "[lovebird]" not in text and "[budgie]" not in text  # not other species' specifics
+
+
+def test_care_reply_unknown_query_gives_hint() -> None:
+    text = care_reply("xyzzy")
+    assert "don't have specific care notes" in text

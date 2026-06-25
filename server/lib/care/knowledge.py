@@ -17,6 +17,7 @@ import re
 
 from lib.care.facts import (
     CARE_FACTS,
+    CARE_SUMMARY,
     SLEEP_HOURS_TEXT,
     TEMPERATURE_RANGE_TEXT,
     TOXIC_FOODS,
@@ -221,3 +222,91 @@ def care_context(
         "emergency, urge an avian vet):"
     )
     return header + "\n" + "\n".join(lines)
+
+
+# -- /care command formatting ------------------------------------------------
+
+# Topics a user can ask for by name, mapped to a friendly label for the header.
+_TOPIC_LABELS = {
+    "diet": "Diet & feeding",
+    "toxic_foods": "Toxic foods",
+    "sleep_light": "Sleep & light",
+    "temperature": "Temperature",
+    "enrichment": "Enrichment",
+    "social": "Social & housing",
+    "hygiene": "Hygiene & cleaning",
+    "health_signs": "Health signs",
+    "emergency": "Emergencies",
+}
+
+
+def care_overview() -> str:
+    """The bare ``/care`` reply: the flock summary + how to dig deeper."""
+    return (
+        "🐦 Caring for the flock\n"
+        + CARE_SUMMARY
+        + "\n\nAsk for more: /care diet · /care sleep · /care temperature · /care health · "
+        "/care toxic · or a bird/species (e.g. /care cockatiel, /care percy)."
+    )
+
+
+def toxic_food_list() -> str:
+    """The full toxic-food list, for ``/care toxic``."""
+    lines = ["⚠️ Foods to keep AWAY from the birds:"]
+    for food in TOXIC_FOODS:
+        lines.append(f"• {food.name.title()} — {food.reason}")
+    return "\n".join(lines)
+
+
+def care_reply(query: str, *, member_species: dict[str, str] | None = None, limit: int = 10) -> str:
+    """Answer a ``/care`` request: an overview, a toxic list, or topic/species facts."""
+    q = (query or "").strip()
+    if not q:
+        return care_overview()
+    lower = q.lower()
+
+    food = toxic_food_in(lower)
+    topics = detected_topics(lower)
+    species = detect_species(lower, member_species)
+
+    # Toxic-food intent: a named food, or asking about toxic/unsafe foods.
+    if food is not None or topics == {"toxic_foods"} or any(
+        word in lower for word in ("toxic", "poison", "unsafe", "dangerous", "can't eat", "cannot eat")
+    ):
+        head = f"⚠️ {food.name.title()} is dangerous: {food.reason}.\n\n" if food is not None else ""
+        return head + toxic_food_list()
+
+    matched: list[CareFact] = []
+    for fact in CARE_FACTS:
+        if topics and fact.topic not in topics:
+            continue
+        if species and fact.species != "general" and fact.species not in species:
+            continue
+        if not topics and not species:
+            continue
+        matched.append(fact)
+
+    if not matched:
+        return (
+            f'I don\'t have specific care notes for "{q}". Try /care diet, /care sleep, '
+            "/care temperature, /care health, /care toxic, or a bird/species name."
+        )
+
+    # Species-specific facts first, then general; safety-critical first within each.
+    matched.sort(key=lambda f: (0 if (species and f.species in species) else 1, 0 if f.safety_critical else 1))
+
+    parts = []
+    label = next((_TOPIC_LABELS[t] for t in _TOPIC_LABELS if t in topics), None)
+    if species and not label:
+        label = ", ".join(sorted(s.title() for s in species)) + " care"
+    if label:
+        parts.append(f"🐦 {label}")
+    if "sleep_light" in topics:
+        parts.append(f"• {SLEEP_HOURS_TEXT}")
+    if "temperature" in topics:
+        parts.append(f"• {TEMPERATURE_RANGE_TEXT}")
+    for fact in matched[:limit]:
+        scope = "" if fact.species == "general" else f"[{fact.species}] "
+        tag = " ⚠️" if fact.safety_critical else ""
+        parts.append(f"• {scope}{fact.fact}{tag}")
+    return "\n".join(parts)
