@@ -120,8 +120,6 @@ class AutoFinder:
         overdue = self._overdue()
         if not overdue:
             return
-        with self._lock:
-            self._alerted.update(overdue)
         minutes = int(self._unseen // 60)
         # The search's own progress/result go to one chat (finder.start targets a
         # single chat_id), so the kickoff notice goes to that SAME chat — not a
@@ -132,6 +130,10 @@ class AutoFinder:
             f"🔍 Auto-find: haven't seen {_phrase(overdue)} in over {minutes} min — searching all cameras…",
         )
         self._finder.start(chat_id, " and ".join(overdue), self._stop)
+        # Mark as alerted only AFTER the search has actually been launched, so a
+        # failure above doesn't permanently suppress re-alerting these birds.
+        with self._lock:
+            self._alerted.update(overdue)
 
     def _overdue(self) -> list[str]:
         last = bird_last_seen(self._registry.snapshot())
