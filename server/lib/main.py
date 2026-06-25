@@ -10,13 +10,15 @@ import signal
 import threading
 from collections.abc import Callable
 
+import cv2
+import numpy as np
 from dotenv import load_dotenv
 
 from lib.ai.chat import chat_reply
 from lib.ai.client import OllamaClient
 from lib.ai.intent import Intent
 from lib.ai.router import NaturalLanguageRouter
-from lib.ai.vlm import describe_scene
+from lib.ai.vlm import build_detection_context, describe_scene
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.config import AppConfig, _as_user_ids, build_config
@@ -310,15 +312,32 @@ def main() -> None:
             camera_stats = stats.get(camera_name)
         return latest_frame_jpeg(camera_stats) if camera_stats is not None else None
 
+    # Roster groups (species -> members) for /find expansion, and the reverse
+    # (member -> species) to annotate VLM detection context ("Pizza (a cockatiel)").
+    species_members = load_species_members()
+    member_species = {
+        member: species for species, members in species_members.items() for member in members
+    }
+
     def describe_frame(image: bytes) -> str | None:
-        # Best-effort VLM scene description for /find hits. Bounded timeout so a
-        # slow/cold vision model never holds up the find reply for long.
+        # Best-effort VLM scene description for /find hits. We FIRST run the
+        # detector on the frame and hand the VLM exactly which birds are where —
+        # otherwise it misses the small, distant birds and says "no birds".
+        # Bounded timeout so a cold vision model never stalls the find reply.
         if ollama_client is None:
             return None
+        frame = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+        context = None
+        if frame is not None:
+            height, width = frame.shape[:2]
+            context = build_detection_context(
+                detector.predict(frame), width, height, member_species
+            )
         return describe_scene(
             ollama_client,
             app_config.ollama.vlm_model,
             image,
+            context=context,
             timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
         )
 
@@ -331,7 +350,7 @@ def main() -> None:
             send_album=notifier.send_album,
             describe_frame=describe_frame if ollama_client is not None else None,
             make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
-            species_members=load_species_members(),
+            species_members=species_members,
         )
         if notifier is not None
         else None

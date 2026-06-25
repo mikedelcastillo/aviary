@@ -11,6 +11,17 @@ from __future__ import annotations
 import base64
 import re
 
+import cv2
+import numpy as np
+
+from lib.labels import pretty
+
+
+# Downscale frames to this longest edge before sending to the VLM. The empirical
+# sweep showed a full 2304px frame takes ~25s while a 1024px one takes ~3s with
+# no loss of usefulness (the detection context, below, does the real work).
+MAX_VLM_DIM = 1024
+
 
 # One/two-sentence "what's happening" used by /find and the stream narrator.
 SCENE_PROMPT = (
@@ -33,25 +44,100 @@ def encode_image(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("ascii")
 
 
+def downscale_jpeg(image_bytes: bytes, max_dim: int = MAX_VLM_DIM) -> bytes:
+    """Re-encode the image so its longest edge is <= ``max_dim`` (else unchanged)."""
+    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if array is None:
+        return image_bytes
+    height, width = array.shape[:2]
+    scale = max_dim / max(height, width)
+    if scale >= 1.0:
+        return image_bytes
+    resized = cv2.resize(array, (int(width * scale), int(height * scale)))
+    ok, buffer = cv2.imencode(".jpg", resized)
+    return buffer.tobytes() if ok else image_bytes
+
+
+def position_phrase(cx: float, cy: float, width: int, height: int) -> str:
+    """Describe a point as top/middle/bottom + left/centre/right thirds."""
+    xr = cx / width if width else 0.5
+    yr = cy / height if height else 0.5
+    horiz = "left" if xr < 0.34 else "right" if xr > 0.66 else "centre"
+    vert = "top" if yr < 0.34 else "bottom" if yr > 0.66 else "middle"
+    if horiz == "centre" and vert == "middle":
+        return "centre"
+    return f"{vert}-{horiz}"
+
+
+def build_detection_context(
+    detections,
+    width: int,
+    height: int,
+    species_of: dict[str, str] | None = None,
+) -> str:
+    """Turn YOLO detections into grounding text so the VLM knows what to look at.
+
+    The birds are usually tiny in a wide camera frame, so left to itself the VLM
+    says "there are no birds". Telling it exactly which birds the detector found
+    and where (in thirds) makes it describe them accurately — and, empirically,
+    much faster. ``detections`` are anything with ``.label`` and ``.bbox_xyxy``.
+    """
+    species_of = species_of or {}
+    if not detections:
+        return (
+            "This is a still from a pet-bird camera. The detector found no birds "
+            "in it, but look carefully — a bird may be small or partly hidden."
+        )
+    parts = []
+    for detection in detections:
+        x1, y1, x2, y2 = detection.bbox_xyxy
+        name = pretty(detection.label)
+        species = species_of.get(detection.label.lower())
+        who = f"{name} (a {species})" if species and species != detection.label.lower() else name
+        parts.append(f"{who} in the {position_phrase((x1 + x2) / 2, (y1 + y2) / 2, width, height)}")
+    return (
+        "This is a still from a pet-bird camera. The camera detected these birds: "
+        + "; ".join(parts)
+        + ". They may be small or far from the camera."
+    )
+
+
 def describe_image(
     client,
     model: str,
     image_bytes: bytes,
     prompt: str,
     *,
+    context: str | None = None,
+    max_dim: int = MAX_VLM_DIM,
     timeout_seconds: float | None = None,
 ) -> str:
-    """Run a single image + prompt through the vision model; return its text."""
+    """Run a single image + prompt through the vision model; return its text.
+
+    ``context`` (e.g. :func:`build_detection_context`) is prepended to the prompt
+    to ground the model; the image is downscaled to ``max_dim`` for speed.
+    """
+    full_prompt = f"{context}\n\n{prompt}" if context else prompt
+    image = downscale_jpeg(image_bytes, max_dim) if max_dim else image_bytes
     return client.generate(
         model,
-        prompt,
-        images=[encode_image(image_bytes)],
+        full_prompt,
+        images=[encode_image(image)],
         timeout_seconds=timeout_seconds,
     ).strip()
 
 
-def describe_scene(client, model: str, image_bytes: bytes, *, timeout_seconds: float | None = None) -> str:
-    return describe_image(client, model, image_bytes, SCENE_PROMPT, timeout_seconds=timeout_seconds)
+def describe_scene(
+    client,
+    model: str,
+    image_bytes: bytes,
+    *,
+    context: str | None = None,
+    timeout_seconds: float | None = None,
+) -> str:
+    return describe_image(
+        client, model, image_bytes, SCENE_PROMPT, context=context, timeout_seconds=timeout_seconds
+    )
 
 
 def clean_camera_name(raw: str) -> str:
