@@ -185,3 +185,15 @@ def test_start_while_active_replaces() -> None:
     # The previous search is cancelled and the new one announced as a switch.
     assert old_cancel.is_set()
     assert "Switching" in msg
+
+
+def test_bird_last_seen_picks_most_recent_camera() -> None:
+    from lib.find import bird_last_seen
+    rows = [
+        {"label": "percy", "camera": "cam-a", "since": 300.0},
+        {"label": "percy", "camera": "cam-b", "since": 12.0},  # more recent
+        {"label": "draft", "camera": "cam-a", "since": 50.0},
+    ]
+    seen = bird_last_seen(rows)
+    assert seen["percy"] == (12.0, "cam-b")
+    assert seen["draft"] == (50.0, "cam-a")

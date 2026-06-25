@@ -30,3 +30,23 @@ def downscale_jpeg(image_bytes: bytes, max_dim: int = 1280, quality: int = 80) -
         return image_bytes
     ok, buffer = cv2.imencode(".jpg", array, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     return buffer.tobytes() if ok else image_bytes
+
+
+# Mean HSV saturation below this reads as a grayscale (IR / night-mode) frame.
+# Daylight colour frames sit well above it; IR frames are near-zero with a little
+# JPEG noise.
+IR_SATURATION_THRESHOLD = 16.0
+
+
+def is_ir_frame(image_bytes: bytes, threshold: float = IR_SATURATION_THRESHOLD) -> bool:
+    """True if the frame looks like night/IR mode (effectively grayscale).
+
+    Tapo cameras drop to monochrome IR after dark; the birds can't be told apart
+    then, so the server gates colour-dependent work (auto-search) on this. Returns
+    False if the frame can't be decoded (don't assume IR on a bad read).
+    """
+    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if array is None:
+        return False
+    saturation = cv2.cvtColor(array, cv2.COLOR_BGR2HSV)[:, :, 1]
+    return float(saturation.mean()) < threshold

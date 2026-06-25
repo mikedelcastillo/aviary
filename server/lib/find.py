@@ -63,6 +63,21 @@ def currently_visible(rows: list[dict], fresh_seconds: float) -> dict[str, list[
     return {label: sorted(cameras) for label, cameras in visible.items()}
 
 
+def bird_last_seen(rows: list[dict]) -> dict[str, tuple[float, str]]:
+    """Map each label to ``(seconds_since_last_seen, camera)`` for its most recent
+    sighting across all cameras (the registry rows are per camera+label)."""
+    best: dict[str, tuple[float, str]] = {}
+    for row in rows:
+        since = row.get("since")
+        if since is None:
+            continue
+        label = str(row["label"]).lower()
+        camera = str(row["camera"])
+        if label not in best or since < best[label][0]:
+            best[label] = (since, camera)
+    return best
+
+
 def format_visible(visible: dict[str, list[str]], display=short_camera) -> str:
     """Render the visible map as ``Percy (Window Perch), Matcha (Food Bowl)``."""
     if not visible:

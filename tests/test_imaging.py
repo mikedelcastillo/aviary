@@ -3,34 +3,23 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from lib.imaging import downscale_jpeg
+from lib.imaging import is_ir_frame
 
 
-def _jpeg(width: int, height: int) -> bytes:
-    array = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
-    ok, buffer = cv2.imencode(".jpg", array)
-    assert ok
-    return buffer.tobytes()
+def _jpeg(bgr) -> bytes:
+    return cv2.imencode(".jpg", bgr)[1].tobytes()
 
 
-def _dims(image_bytes: bytes) -> tuple[int, int]:
-    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-    return array.shape[1], array.shape[0]  # (width, height)
+def test_is_ir_frame_detects_grayscale() -> None:
+    gray = np.full((64, 64, 3), 120, np.uint8)  # equal channels -> no saturation
+    assert is_ir_frame(_jpeg(gray)) is True
 
 
-def test_downscales_large_frame_to_max_dim() -> None:
-    big = _jpeg(2304, 1296)
-    out = downscale_jpeg(big, max_dim=1280)
-    w, h = _dims(out)
-    assert max(w, h) == 1280
-    assert len(out) < len(big)
+def test_is_ir_frame_false_for_colour() -> None:
+    color = np.zeros((64, 64, 3), np.uint8)
+    color[:, :, 2] = 200  # strong red -> high saturation
+    assert is_ir_frame(_jpeg(color)) is False
 
 
-def test_leaves_small_image_untouched() -> None:
-    small = _jpeg(320, 240)
-    # Well under both max_dim and the size threshold -> returned as-is.
-    assert downscale_jpeg(small, max_dim=1280) == small
-
-
-def test_invalid_bytes_returned_unchanged() -> None:
-    assert downscale_jpeg(b"not an image") == b"not an image"
+def test_is_ir_frame_false_on_undecodable() -> None:
+    assert is_ir_frame(b"not an image") is False

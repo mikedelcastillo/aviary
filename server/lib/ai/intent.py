@@ -23,7 +23,7 @@ LOGGER = logging.getLogger("lib.ai.intent")
 # Every action the router can emit. "chat" is the catch-all for questions and
 # conversation, routed to the memory/VLM layer rather than a command.
 ACTIONS = (
-    "pause", "resume", "find", "stop_find", "discover",
+    "pause", "resume", "find", "stop_find", "discover", "home", "autofind",
     "status", "snapshot", "activity", "chat",
 )
 
@@ -59,7 +59,14 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '"any bird". Groups (cockatiels, lovebirds, budgies, birds) and "any" are allowed.\n'
         '- "stop_find": cancel an in-progress search — "stop looking", "cancel the search", '
         '"never mind". argument = "". (But "look for X instead" is a NEW find, not stop_find.)\n'
-        '- "discover": rescan / reload / refresh the cameras on the network. argument = "".\n'
+        '- "discover": rescan / reload / refresh / find the cameras on the network — '
+        '"discover cameras", "reload cams", "rescan", "look for new cameras". argument = "".\n'
+        '- "home": aim/point/reset the pan-tilt cameras to their saved home viewpoint — '
+        '"home the cameras", "reset the cameras", "point the cams home", "face the cameras '
+        'back". argument = "".\n'
+        '- "autofind": turn the automatic missing-bird search on or off — "enable autofind", '
+        '"turn on auto find", "disable autofind", "stop auto searching". argument = "enable" '
+        'or "disable" (or "" to report its state).\n'
         '- "status": how the cameras or system are doing, health, what is online. argument = "".\n'
         '- "snapshot": take or show pictures from all cameras right now. argument = "".\n'
         '- "activity": ANY question or request about what a bird IS or WAS doing, its day, '

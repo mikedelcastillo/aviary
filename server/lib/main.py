@@ -36,7 +36,9 @@ from lib.memory_maker import MemoryMaker
 from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
+from lib.autofind import AutoFinder
 from lib.find import BirdFinder
+from lib.imaging import is_ir_frame
 from lib.labels import pretty_labels
 from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
@@ -95,6 +97,7 @@ def start_command_thread(
     status_provider: Callable[[], str] | None = None,
     discover_provider: Callable[[], str] | None = None,
     home_provider: Callable[[], str] | None = None,
+    autofind_provider: Callable[[str], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
@@ -110,6 +113,7 @@ def start_command_thread(
         kwargs={
             "discover_provider": discover_provider,
             "home_provider": home_provider,
+            "autofind_provider": autofind_provider,
             "snapshot_provider": snapshot_provider,
             "pause_provider": pause_provider,
             "resume_provider": resume_provider,
@@ -137,6 +141,8 @@ def build_nl_router(
     discover_provider,
     status_provider,
     snapshot_provider,
+    home_provider=None,
+    autofind_provider=None,
     activity_responder=None,
     memory=None,
 ) -> NaturalLanguageRouter | None:
@@ -187,6 +193,10 @@ def build_nl_router(
         elif action == "discover":
             notifier.send_text(chat_id, "Scanning the local network for cameras...")
             notifier.send_text(chat_id, discover_provider())
+        elif action == "home" and home_provider is not None:
+            notifier.send_text(chat_id, home_provider())
+        elif action == "autofind" and autofind_provider is not None:
+            notifier.send_text(chat_id, autofind_provider(intent.argument))
         elif action == "status":
             notifier.send_text(chat_id, status_provider())
         elif action == "snapshot":
@@ -300,6 +310,7 @@ def make_console_dispatcher(
         discover_provider=discover_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_text,
+        home_provider=lambda: home_report(ptz_manager, supervisor.active_hosts()),
         activity_responder=activity_responder,
         memory=ConversationMemory() if ollama_client is not None else None,
     )
@@ -446,6 +457,8 @@ def main() -> None:
             registry,
             app_config.telegram.bbox_movement_alert_ratio,
             camera_display=namer.display,
+            known_birds=sorted(pronouns),
+            ir_cameras=current_ir_cameras(),
         )
         # Lead with the privacy banner when paused so /status makes it obvious
         # why every camera reads "paused" and nothing is being recorded.
@@ -490,6 +503,17 @@ def main() -> None:
         with stats_lock:
             camera_stats = stats.get(camera_name)
         return latest_frame_jpeg(camera_stats) if camera_stats is not None else None
+
+    def current_ir_cameras() -> set[str]:
+        """Camera ids whose latest frame is in night/IR (grayscale) mode."""
+        with stats_lock:
+            names = list(stats.keys())
+        ir: set[str] = set()
+        for name in names:
+            jpeg = grab_frame(name)
+            if jpeg and is_ir_frame(jpeg):
+                ir.add(name)
+        return ir
 
     # Roster groups (species -> members) for /find expansion, and the reverse
     # (member -> species) to annotate VLM detection context ("Pizza (a cockatiel)").
@@ -611,6 +635,33 @@ def main() -> None:
     def home_provider() -> str:
         return home_report(ptz_manager, supervisor.active_hosts())
 
+    # Auto-find: search for birds missing >10 min while the cameras are in
+    # daylight; auto-disables when all cameras go to night/IR.
+    auto_finder = (
+        AutoFinder(
+            registry,
+            finder,
+            control,
+            notifier,
+            stop_event,
+            ir_cameras=current_ir_cameras,
+            camera_count=lambda: len(stats),
+            known_birds=sorted(pronouns),
+        )
+        if (finder is not None and notifier is not None)
+        else None
+    )
+
+    def autofind_provider(argument: str) -> str:
+        if auto_finder is None:
+            return "Auto-find is unavailable (needs cameras + Telegram)."
+        arg = argument.strip().lower()
+        if arg in ("enable", "on", "start", "yes"):
+            return auto_finder.set_enabled(True)
+        if arg in ("disable", "off", "stop", "no"):
+            return auto_finder.set_enabled(False)
+        return auto_finder.status()
+
     def discover_provider() -> str:
         report = format_discovery_report(supervisor.discover_and_apply())
         # Face the saved viewpoint FIRST so the cameras are aimed right and the
@@ -670,6 +721,8 @@ def main() -> None:
         discover_provider=discover_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_provider,
+        home_provider=home_provider,
+        autofind_provider=autofind_provider,
         activity_responder=activity_responder,
         memory=memory,
     )
@@ -681,6 +734,7 @@ def main() -> None:
         status_provider=status_provider,
         discover_provider=discover_provider,
         home_provider=home_provider,
+        autofind_provider=autofind_provider if auto_finder is not None else None,
         snapshot_provider=snapshot_provider,
         pause_provider=control.pause,
         resume_provider=control.resume,
@@ -689,6 +743,8 @@ def main() -> None:
         photo_provider=photo_provider if ollama_client is not None else None,
         activity_provider=activity_provider if activity_responder is not None else None,
     )
+    if auto_finder is not None:
+        auto_finder.start()
 
     # The caretaker: smart activity reports (immediate on new birds, edit-in-place
     # otherwise) + persistent day memory under data/server/memories. Only when the
