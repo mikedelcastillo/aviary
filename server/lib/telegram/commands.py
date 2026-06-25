@@ -312,189 +312,196 @@ def run_command_bot(
 
         for update in updates:
             offset = update["update_id"] + 1
-            message = update.get("message") or update.get("edited_message")
-            if not message:
-                continue
-
-            # A photo carries its text in "caption", not "text"; treat either as
-            # the message text so a captioned photo's command/question still runs.
-            text_in = message.get("text") or message.get("caption") or ""
-            command = parse_command(text_in)
-
-            user_id = (message.get("from") or {}).get("id")
-            chat_id = (message.get("chat") or {}).get("id")
-            if chat_id is None or user_id is None:
-                continue
-
-            # A photo (with or without a caption): identify the birds + describe
-            # it, for fun. Runs on its own thread (detector + VLM are slow) so
-            # the poll loop keeps moving.
-            photos = message.get("photo")
-            if photos and photo_provider is not None:
-                if str(user_id) not in allowed:
-                    send(chat_id, "Unauthorized.")
-                    continue
-                file_id = photos[-1]["file_id"]  # largest size
-
-                def handle_photo(fid: str = file_id, cid: int = chat_id) -> None:
-                    send(cid, "📷 Taking a look at your photo…")
-                    image = download_telegram_file(base_url, fid)
-                    if image is None:
-                        send(cid, "Hmm, I couldn't download that photo.")
-                        return
-                    try:
-                        reply = photo_provider(image)
-                    except Exception:
-                        LOGGER.exception("Photo analysis failed")
-                        reply = "I couldn't make sense of that photo, sorry!"
-                    send(cid, reply)
-
-                Thread(target=handle_photo, name="photo-analyze", daemon=True).start()
-                LOGGER.info("Handling photo from user %s", user_id)
-                # No caption -> done. With a caption, fall through so the caption
-                # is also handled as a command / natural-language request.
-                if not text_in.strip():
+            # Guard every update: a handler raising (or a malformed update) must
+            # never escape and kill this poll thread — that would silently take the
+            # whole command bot offline until a restart. offset is already advanced,
+            # so a poison update is logged and skipped, not re-fetched forever.
+            try:
+                message = update.get("message") or update.get("edited_message")
+                if not message:
                     continue
 
-            if command is None:
-                # Not a slash command: hand free text to the natural-language
-                # router (if enabled and the sender is allowed). It replies on
-                # its own background thread, so polling is never blocked.
-                if nl_provider is not None and text_in.strip() and str(user_id) in allowed:
-                    try:
-                        nl_provider(chat_id, text_in)
-                    except Exception:
-                        LOGGER.exception("Natural-language routing failed")
-                continue
+                # A photo carries its text in "caption", not "text"; treat either as
+                # the message text so a captioned photo's command/question still runs.
+                text_in = message.get("text") or message.get("caption") or ""
+                command = parse_command(text_in)
 
-            if command == "/discover":
-                # Discovery sweeps the whole subnet and can take a few seconds,
-                # so this is a two-message command: an immediate ack, then the
-                # report once the scan returns. Handled inline (not via the
-                # single shared send below) because of that two-step flow.
-                if str(user_id) not in allowed or discover_provider is None:
-                    send(chat_id, "Unauthorized.")
-                else:
-                    send(chat_id, "Scanning the local network for cameras...")
-                    try:
-                        report = discover_provider()
-                    except Exception as exc:  # never let a scan error kill polling
-                        LOGGER.exception("Discovery failed")
-                        report = f"Discovery failed: {exc}"
-                    send(chat_id, report)
-                LOGGER.info("Handled /discover for user %s", user_id)
-                continue
+                user_id = (message.get("from") or {}).get("id")
+                chat_id = (message.get("chat") or {}).get("id")
+                if chat_id is None or user_id is None:
+                    continue
 
-            if command == "/home":
-                if str(user_id) not in allowed or home_provider is None:
-                    send(chat_id, "Unauthorized.")
-                else:
-                    try:
-                        send(chat_id, home_provider())
-                    except Exception as exc:  # never let a PTZ error kill polling
-                        LOGGER.exception("Home failed")
-                        send(chat_id, f"Homing failed: {exc}")
-                LOGGER.info("Handled /home for user %s", user_id)
-                continue
+                # A photo (with or without a caption): identify the birds + describe
+                # it, for fun. Runs on its own thread (detector + VLM are slow) so
+                # the poll loop keeps moving.
+                photos = message.get("photo")
+                if photos and photo_provider is not None:
+                    if str(user_id) not in allowed:
+                        send(chat_id, "Unauthorized.")
+                        continue
+                    file_id = photos[-1]["file_id"]  # largest size
 
-            if command == "/autofind":
-                if str(user_id) not in allowed or autofind_provider is None:
-                    send(chat_id, "Unauthorized.")
-                else:
-                    try:
-                        send(chat_id, autofind_provider(command_argument(text_in)))
-                    except Exception as exc:
-                        LOGGER.exception("Autofind toggle failed")
-                        send(chat_id, f"Auto-find failed: {exc}")
-                LOGGER.info("Handled /autofind for user %s", user_id)
-                continue
+                    def handle_photo(fid: str = file_id, cid: int = chat_id) -> None:
+                        send(cid, "📷 Taking a look at your photo…")
+                        image = download_telegram_file(base_url, fid)
+                        if image is None:
+                            send(cid, "Hmm, I couldn't download that photo.")
+                            return
+                        try:
+                            reply = photo_provider(image)
+                        except Exception:
+                            LOGGER.exception("Photo analysis failed")
+                            reply = "I couldn't make sense of that photo, sorry!"
+                        send(cid, reply)
 
-            if command == "/snapshot":
-                # Like /discover, a two-message flow: grabbing every camera's
-                # latest frame, saving, and uploading an album takes a moment, so
-                # ack immediately, then deliver. The provider sends the album (it
-                # owns the notifier + chat) and returns a final text summary; the
-                # photos arrive between these two messages.
-                if str(user_id) not in allowed or snapshot_provider is None:
-                    send(chat_id, "Unauthorized.")
-                else:
-                    send(chat_id, "Capturing snapshots from all cameras...")
-                    try:
-                        report = snapshot_provider(chat_id)
-                    except Exception as exc:  # never let a snapshot error kill polling
-                        LOGGER.exception("Snapshot failed")
-                        report = f"Snapshot failed: {exc}"
-                    send(chat_id, report)
-                LOGGER.info("Handled /snapshot for user %s", user_id)
-                continue
+                    Thread(target=handle_photo, name="photo-analyze", daemon=True).start()
+                    LOGGER.info("Handling photo from user %s", user_id)
+                    # No caption -> done. With a caption, fall through so the caption
+                    # is also handled as a command / natural-language request.
+                    if not text_in.strip():
+                        continue
 
-            if command == "/activity":
-                # Reads the day memory + summarises; can take a bird and/or
-                # "today" (/activity percy today). Backgrounded by the provider,
-                # so ack immediately.
-                if str(user_id) not in allowed or activity_provider is None:
-                    send(chat_id, "Unauthorized.")
-                else:
-                    send(chat_id, "📋 Looking back…")
-                    try:
-                        activity_provider(chat_id, command_argument(text_in))
-                    except Exception as exc:  # never let it kill polling
-                        LOGGER.exception("Activity failed")
-                        send(chat_id, f"Activity failed: {exc}")
-                LOGGER.info("Handled /activity for user %s", user_id)
-                continue
+                if command is None:
+                    # Not a slash command: hand free text to the natural-language
+                    # router (if enabled and the sender is allowed). It replies on
+                    # its own background thread, so polling is never blocked.
+                    if nl_provider is not None and text_in.strip() and str(user_id) in allowed:
+                        try:
+                            nl_provider(chat_id, text_in)
+                        except Exception:
+                            LOGGER.exception("Natural-language routing failed")
+                    continue
 
-            if command == "/find":
-                # Validate + launch on a background thread, then ack immediately.
-                # The search (up to 5 min) must never block this poll loop, so it
-                # pushes its own progress + result messages to the chat itself.
-                if str(user_id) not in allowed or find_provider is None:
-                    send(chat_id, "Unauthorized.")
-                else:
-                    target = command_argument(text_in)
-                    try:
-                        ack = find_provider(chat_id, target)
-                    except Exception as exc:  # never let it kill polling
-                        LOGGER.exception("Find failed")
-                        ack = f"Find failed: {exc}"
-                    send(chat_id, ack)
-                LOGGER.info("Handled /find for user %s", user_id)
-                continue
+                if command == "/discover":
+                    # Discovery sweeps the whole subnet and can take a few seconds,
+                    # so this is a two-message command: an immediate ack, then the
+                    # report once the scan returns. Handled inline (not via the
+                    # single shared send below) because of that two-step flow.
+                    if str(user_id) not in allowed or discover_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        send(chat_id, "Scanning the local network for cameras...")
+                        try:
+                            report = discover_provider()
+                        except Exception as exc:  # never let a scan error kill polling
+                            LOGGER.exception("Discovery failed")
+                            report = f"Discovery failed: {exc}"
+                        send(chat_id, report)
+                    LOGGER.info("Handled /discover for user %s", user_id)
+                    continue
 
-            if command == "/userinfo":
-                text = (
-                    f"Your Telegram user ID is: {user_id}\n"
-                    "Add it to TELEGRAM_USER_IDS to enable alerts and /status."
-                )
-            elif command == "/status":
-                if str(user_id) not in allowed or status_provider is None:
-                    text = "Unauthorized."
-                else:
-                    text = status_provider()
-            elif command in PAUSE_COMMANDS:
-                # /pause [duration] / /stop [duration]: enter privacy mode. The
-                # argument is a casual duration ("10m", "1 hour"); absent/garbage
-                # parses to None, i.e. an indefinite pause.
-                if str(user_id) not in allowed or pause_provider is None:
-                    text = "Unauthorized."
-                else:
-                    duration = parse_duration(command_argument(text_in))
-                    try:
-                        text = pause_provider(duration)
-                    except Exception as exc:  # never let it kill polling
-                        LOGGER.exception("Pause failed")
-                        text = f"Pause failed: {exc}"
-            elif command in RESUME_COMMANDS:
-                if str(user_id) not in allowed or resume_provider is None:
-                    text = "Unauthorized."
-                else:
-                    try:
-                        text = resume_provider()
-                    except Exception as exc:  # never let it kill polling
-                        LOGGER.exception("Resume failed")
-                        text = f"Resume failed: {exc}"
-            else:
-                continue
+                if command == "/home":
+                    if str(user_id) not in allowed or home_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, home_provider())
+                        except Exception as exc:  # never let a PTZ error kill polling
+                            LOGGER.exception("Home failed")
+                            send(chat_id, f"Homing failed: {exc}")
+                    LOGGER.info("Handled /home for user %s", user_id)
+                    continue
 
-            send(chat_id, text)
-            LOGGER.info("Replied %s for user %s", command, user_id)
+                if command == "/autofind":
+                    if str(user_id) not in allowed or autofind_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, autofind_provider(command_argument(text_in)))
+                        except Exception as exc:
+                            LOGGER.exception("Autofind toggle failed")
+                            send(chat_id, f"Auto-find failed: {exc}")
+                    LOGGER.info("Handled /autofind for user %s", user_id)
+                    continue
+
+                if command == "/snapshot":
+                    # Like /discover, a two-message flow: grabbing every camera's
+                    # latest frame, saving, and uploading an album takes a moment, so
+                    # ack immediately, then deliver. The provider sends the album (it
+                    # owns the notifier + chat) and returns a final text summary; the
+                    # photos arrive between these two messages.
+                    if str(user_id) not in allowed or snapshot_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        send(chat_id, "Capturing snapshots from all cameras...")
+                        try:
+                            report = snapshot_provider(chat_id)
+                        except Exception as exc:  # never let a snapshot error kill polling
+                            LOGGER.exception("Snapshot failed")
+                            report = f"Snapshot failed: {exc}"
+                        send(chat_id, report)
+                    LOGGER.info("Handled /snapshot for user %s", user_id)
+                    continue
+
+                if command == "/activity":
+                    # Reads the day memory + summarises; can take a bird and/or
+                    # "today" (/activity percy today). Backgrounded by the provider,
+                    # so ack immediately.
+                    if str(user_id) not in allowed or activity_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        send(chat_id, "📋 Looking back…")
+                        try:
+                            activity_provider(chat_id, command_argument(text_in))
+                        except Exception as exc:  # never let it kill polling
+                            LOGGER.exception("Activity failed")
+                            send(chat_id, f"Activity failed: {exc}")
+                    LOGGER.info("Handled /activity for user %s", user_id)
+                    continue
+
+                if command == "/find":
+                    # Validate + launch on a background thread, then ack immediately.
+                    # The search (up to 5 min) must never block this poll loop, so it
+                    # pushes its own progress + result messages to the chat itself.
+                    if str(user_id) not in allowed or find_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        target = command_argument(text_in)
+                        try:
+                            ack = find_provider(chat_id, target)
+                        except Exception as exc:  # never let it kill polling
+                            LOGGER.exception("Find failed")
+                            ack = f"Find failed: {exc}"
+                        send(chat_id, ack)
+                    LOGGER.info("Handled /find for user %s", user_id)
+                    continue
+
+                if command == "/userinfo":
+                    text = (
+                        f"Your Telegram user ID is: {user_id}\n"
+                        "Add it to TELEGRAM_USER_IDS to enable alerts and /status."
+                    )
+                elif command == "/status":
+                    if str(user_id) not in allowed or status_provider is None:
+                        text = "Unauthorized."
+                    else:
+                        text = status_provider()
+                elif command in PAUSE_COMMANDS:
+                    # /pause [duration] / /stop [duration]: enter privacy mode. The
+                    # argument is a casual duration ("10m", "1 hour"); absent/garbage
+                    # parses to None, i.e. an indefinite pause.
+                    if str(user_id) not in allowed or pause_provider is None:
+                        text = "Unauthorized."
+                    else:
+                        duration = parse_duration(command_argument(text_in))
+                        try:
+                            text = pause_provider(duration)
+                        except Exception as exc:  # never let it kill polling
+                            LOGGER.exception("Pause failed")
+                            text = f"Pause failed: {exc}"
+                elif command in RESUME_COMMANDS:
+                    if str(user_id) not in allowed or resume_provider is None:
+                        text = "Unauthorized."
+                    else:
+                        try:
+                            text = resume_provider()
+                        except Exception as exc:  # never let it kill polling
+                            LOGGER.exception("Resume failed")
+                            text = f"Resume failed: {exc}"
+                else:
+                    continue
+
+                send(chat_id, text)
+                LOGGER.info("Replied %s for user %s", command, user_id)
+            except Exception:
+                LOGGER.exception("Error handling update %s; skipping", update.get("update_id"))

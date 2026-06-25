@@ -717,6 +717,52 @@ def test_status_shows_ir_species_label_during_night() -> None:
     assert "Cockatiel" in message  # the seen species shows, not just "nothing seen"
 
 
+def test_command_bot_survives_a_handler_exception(monkeypatch) -> None:
+    """A handler raising must not kill the poll thread; the bot keeps serving.
+
+    Regression: status_provider() (and any other handler) raising escaped the
+    per-update loop and tore down run_command_bot entirely, taking the whole
+    command bot offline until a restart.
+    """
+    stop_event = threading.Event()
+    sent: list[str] = []
+    batches = [
+        [{"update_id": 1, "message": {"text": "/status", "from": {"id": 111}, "chat": {"id": 123}}}],
+        [{"update_id": 2, "message": {"text": "/userinfo", "from": {"id": 111}, "chat": {"id": 123}}}],
+    ]
+    calls = {"n": 0}
+
+    def get(_url, params, timeout):
+        index = calls["n"]
+        calls["n"] += 1
+        return Response({"result": batches[index] if index < len(batches) else []})
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent.append(json["text"])
+        if "user ID" in json["text"]:
+            stop_event.set()
+        return Response()
+
+    def status_provider() -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        status_provider=status_provider,
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+    )
+
+    # The /status handler raised, but the bot kept polling and answered /userinfo.
+    assert any("user ID" in message for message in sent)
+
+
 def test_captioned_photo_command_keeps_its_argument(monkeypatch) -> None:
     """A photo captioned '/find percy' must pass 'percy' to the find provider.
 
