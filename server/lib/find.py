@@ -299,15 +299,16 @@ class BirdFinder:
             found_labels = [label for label in targets if label in visible]
             if found_labels:
                 cameras = sorted({cam for label in found_labels for cam in visible[label]})
-                # Announce + send the proof photo FIRST: it's fast and reliable,
-                # and must not depend on the slow VLM. The scene description is a
-                # best-effort follow-up so a slow/cold vision model never costs us
-                # the photo.
-                self._notify(
-                    chat_id,
-                    format_found_message(found_labels, visible, None, self._camera_display),
+                # The found announcement IS the photo's caption — one message with
+                # the proof image, not a text then a loose photo. Sent first/fast;
+                # the slow VLM description follows as a separate note so it never
+                # holds up (or replaces) the photo.
+                headline = format_found_message(
+                    found_labels, visible, None, self._camera_display
                 )
-                self._send_found_photos(chat_id, found_labels, visible)
+                sent = self._send_found_photos(chat_id, found_labels, visible, headline)
+                if sent == 0:
+                    self._notify(chat_id, headline)  # no frame to attach: text only
                 description = self._describe_camera(cameras[0]) if cameras else None
                 if description:
                     self._notify(chat_id, f"📝 {description}")
@@ -361,12 +362,13 @@ class BirdFinder:
             LOGGER.exception("Scene description failed for %s", camera)
             return None
 
-    def _send_found_photos(self, chat_id, found_labels, visible) -> int:
+    def _send_found_photos(self, chat_id, found_labels, visible, headline) -> int:
         """Send each camera-that-saw-the-bird's frame as proof — one photo at a time.
 
-        Individual sends (not a media-group album) so a single slow upload can't
-        drop the whole batch on a flaky uplink. Returns how many were sent;
-        logged so a missing photo is diagnosable.
+        The FIRST photo carries ``headline`` ("🔎 Found Pizza on Big Cage!") as its
+        caption, so the found announcement and the image are a SINGLE message.
+        Individual sends (not a media-group album) so one slow upload can't drop
+        the batch on a flaky uplink. Returns how many were sent.
         """
         if self._grab_frame is None or self._send_photo is None:
             LOGGER.warning("Find: no grab_frame/send_photo wired; cannot send proof photo")
@@ -385,8 +387,11 @@ class BirdFinder:
             here = ", ".join(
                 pretty(label) for label in found_labels if camera in visible.get(label, [])
             )
+            # First successful photo gets the headline caption; the rest get a
+            # short per-camera caption.
+            caption = headline if sent == 0 else f"{here} — {self._camera_display(camera)}"
             try:
-                if self._send_photo(chat_id, image, f"{here} — {self._camera_display(camera)}"):
+                if self._send_photo(chat_id, image, caption):
                     sent += 1
             except Exception:
                 LOGGER.exception("Sending proof photo for %s failed", camera)
