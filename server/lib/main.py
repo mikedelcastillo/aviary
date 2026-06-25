@@ -51,9 +51,11 @@ from lib.telegram.notifier import TelegramNotifier
 
 LOGGER = logging.getLogger("lib")
 
-# Upper bound on a single /find scene-description VLM call. Generous enough for a
-# cold vision model, short enough that a stuck one doesn't delay the find reply.
-VLM_DESCRIBE_TIMEOUT_SECONDS = 60.0
+# Upper bound on a single /find scene-description VLM call. Generous because a
+# cold vision model under GPU contention (YOLO + a live search) can take well
+# over a minute on its first call; the photo is already sent before this runs,
+# so a long description never delays the find reply itself.
+VLM_DESCRIBE_TIMEOUT_SECONDS = 150.0
 
 
 def parse_args() -> argparse.Namespace:
