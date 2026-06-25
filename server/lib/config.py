@@ -253,7 +253,16 @@ def _ollama_config() -> OllamaConfig:
     of truth — so an empty value in .env behaves like "unset".
     """
     enabled = os.environ.get("OLLAMA_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
-    base_url = os.environ.get("OLLAMA_BASE_URL", "").strip() or OllamaConfig.base_url
+    # OLLA_ENDPOINT points at an Olla load balancer (Ollama-compatible proxy,
+    # e.g. http://host:40114/olla/ollama) that spreads chat/vision calls across
+    # several Ollama machines by priority — so the local 8GB GPU mostly runs YOLO
+    # while the VLM/LLM run on bigger boxes. Falls back to a direct OLLAMA_BASE_URL,
+    # then the default localhost.
+    base_url = (
+        os.environ.get("OLLA_ENDPOINT", "").strip()
+        or os.environ.get("OLLAMA_BASE_URL", "").strip()
+        or OllamaConfig.base_url
+    )
     llm_model = os.environ.get("OLLAMA_LLM_MODEL", "").strip() or OllamaConfig.llm_model
     vlm_model = os.environ.get("OLLAMA_VLM_MODEL", "").strip() or OllamaConfig.vlm_model
     vision_concurrency = max(1, int(_as_float("OLLAMA_VISION_CONCURRENCY", OllamaConfig.vision_concurrency)))
