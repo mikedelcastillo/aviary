@@ -12,12 +12,13 @@ class FakeNotifier:
 
     def __init__(self) -> None:
         self.tracked: list[str] = []
+        self.albums: list = []
         self.edits: list[tuple] = []
-        self.photos: list = []
+        self.caption_edits: list[tuple] = []
 
-    def send_photo(self, uid, image, caption):
-        self.photos.append(caption)
-        return True
+    def broadcast_album_tracked(self, items):
+        self.albums.append(items)
+        return {"A": 100}
 
     def broadcast_text_tracked(self, text):
         self.tracked.append(text)
@@ -25,6 +26,10 @@ class FakeNotifier:
 
     def edit_message_text(self, chat_id, message_id, text):
         self.edits.append((chat_id, message_id, text))
+        return True
+
+    def edit_message_caption(self, chat_id, message_id, caption):
+        self.caption_edits.append((chat_id, message_id, caption))
         return True
 
 
@@ -72,8 +77,10 @@ def test_report_saves_images_writes_memory_and_broadcasts(tmp_path) -> None:
 
     assert maker._report({"percy": ["camera-192.168.1.8"]}) is True
 
-    # Photo(s) sent, image(s) saved to the memory image store, memory written.
-    assert notifier.photos and notifier.tracked
+    # One album sent (summary as first caption), image saved, memory written.
+    assert notifier.albums and not notifier.tracked
+    items = notifier.albums[0]
+    assert items[0][1] and "Percy" in items[0][1]  # caption on the first item
     images = list((memories / "images").glob("*.jpg"))
     assert images, "expected a memory image to be saved"
     entries = load_entries(memories, now_dt.date())
@@ -87,7 +94,7 @@ def test_tick_reports_on_new_bird(tmp_path) -> None:
     notifier = FakeNotifier()
     maker = _maker(memories, FakeRegistry([row("percy")]), notifier, now_dt, 1000.0)
     maker._tick()
-    assert notifier.tracked
+    assert notifier.albums
 
 
 def test_tick_edits_in_place_when_quiet(tmp_path) -> None:

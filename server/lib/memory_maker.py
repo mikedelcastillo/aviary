@@ -34,10 +34,16 @@ from lib.labels import pretty
 LOGGER = logging.getLogger("lib.memory_maker")
 
 SUMMARY_TIMEOUT_SECONDS = 60.0
+# Telegram caps a photo/album caption at 1024 chars.
+CAPTION_LIMIT = 1024
 
 
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+
+
+def _clip_caption(text: str) -> str:
+    return text if len(text) <= CAPTION_LIMIT else text[: CAPTION_LIMIT - 1] + "…"
 
 
 class MemoryMaker:
@@ -83,6 +89,9 @@ class MemoryMaker:
         self._activity_since: datetime | None = None
         self._last_summary = ""
         self._activity_msgs: dict[str, int] = {}
+        # Whether the last tracked message is an album/photo (edit its caption) or
+        # plain text (edit its text).
+        self._last_is_caption = False
 
     def start(self) -> None:
         threading.Thread(target=self._run, name="memory-maker", daemon=True).start()
@@ -134,7 +143,7 @@ class MemoryMaker:
         cameras = sorted(cam_birds, key=lambda c: (-len(cam_birds[c]), c))[: self._max_cameras]
         when = self._now()
 
-        # 1) Grab + save + send the photos first (fast, reliable).
+        # 1) Grab + save the frames.
         shots: list[tuple[bytes, str, list[str]]] = []  # (image, camera, birds)
         saved_paths: list[str] = []
         for camera in cameras:
@@ -155,12 +164,7 @@ class MemoryMaker:
         if not shots:
             return False
 
-        for image, camera, birds in shots:
-            caption = f"{', '.join(pretty(b) for b in birds)} — {self._camera_display(camera)}"
-            for user_id in self._notifier.user_ids:
-                self._notifier.send_photo(user_id, image, caption)
-
-        # 2) Describe each frame (VLM, slower), summarise, remember, post the text.
+        # 2) Describe each frame (VLM), summarise, remember.
         observations = []
         for image, camera, birds in shots:
             try:
@@ -185,11 +189,21 @@ class MemoryMaker:
         except Exception:
             LOGGER.exception("Writing memory entry failed")
 
+        # 3) Send it as ONE album — photos grouped, summary as the first caption —
+        #    instead of N separate photos plus a text (which spammed the chat).
         self._activity_since = when
         self._last_summary = summary
         self._reported_set = frozenset(visible)
         header = f"🐦 {when.strftime('%H:%M')} — " + ", ".join(pretty(b) for b in all_birds)
-        self._activity_msgs = self._notifier.broadcast_text_tracked(f"{header}\n{summary}".strip())
+        caption = _clip_caption(f"{header}\n{summary}".strip())
+        items = [(img, caption if i == 0 else None) for i, (img, _, _) in enumerate(shots)]
+        self._activity_msgs = self._notifier.broadcast_album_tracked(items)
+        self._last_is_caption = True
+        if not self._activity_msgs:
+            # Album delivery failed for everyone; fall back to a tracked text so
+            # the refresh path still has something to edit.
+            self._activity_msgs = self._notifier.broadcast_text_tracked(f"{header}\n{summary}".strip())
+            self._last_is_caption = False
         LOGGER.info("Memory report sent (%d photo(s), birds=%s)", len(shots), ",".join(all_birds))
         return True
 
@@ -202,7 +216,10 @@ class MemoryMaker:
             since = self._activity_since.strftime("%H:%M") if self._activity_since else stamp
             body = f"😴 All quiet since {since}. Last checked {stamp}."
         for user_id, message_id in list(self._activity_msgs.items()):
-            self._notifier.edit_message_text(user_id, message_id, body)
+            if self._last_is_caption:
+                self._notifier.edit_message_caption(user_id, message_id, _clip_caption(body))
+            else:
+                self._notifier.edit_message_text(user_id, message_id, body)
 
     def _last_message_base(self) -> str:
         if self._activity_since and self._last_summary:

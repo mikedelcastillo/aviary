@@ -272,7 +272,7 @@ class TelegramNotifier:
 
     def _send_media_group(
         self, chat_id: int | str, chunk: list[tuple[bytes, str | None]]
-    ) -> None:
+    ) -> int | None:
         # Telegram media groups attach each image as a multipart file and
         # reference it from the JSON ``media`` array via ``attach://<key>``.
         media: list[dict[str, str]] = []
@@ -291,10 +291,53 @@ class TelegramNotifier:
             timeout=self.photo_timeout_seconds,
         )
         response.raise_for_status()
+        return self._extract_first_message_id(response)
+
+    def broadcast_album_tracked(
+        self, items: Sequence[tuple[bytes, str | None]]
+    ) -> dict[str, int]:
+        """Send ONE album per recipient, returning ``{user_id: first_message_id}``.
+
+        The caretaker uses this so a report is a single grouped album (photos +
+        the summary as the first item's caption) instead of N photos plus a
+        separate text — and it can later EDIT that first item's caption in place.
+        """
+        if not self.bot_token or not self.user_ids or not items:
+            return {}
+        chunk = list(items)[:MEDIA_GROUP_LIMIT]
+        sent: dict[str, int] = {}
+        for user_id in self.user_ids:
+            try:
+                if len(chunk) == 1:
+                    message_id = self._send_photo_to_chat(
+                        user_id, chunk[0][0], chunk[0][1], track=True
+                    )
+                else:
+                    message_id = self._send_media_group(user_id, chunk)
+            except requests.RequestException as exc:
+                LOGGER.warning("Tracked album to %s failed: %s", user_id, exc)
+                continue
+            if message_id is not None:
+                sent[user_id] = message_id
+        return sent
+
+    def edit_message_caption(self, chat_id: int | str, message_id: int, caption: str) -> bool:
+        """Edit the caption of an already-sent photo/album (the activity refresh)."""
+        try:
+            response = self._post(
+                f"{self.base_url}/editMessageCaption",
+                json={"chat_id": chat_id, "message_id": message_id, "caption": caption},
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as exc:
+            LOGGER.debug("editMessageCaption for %s/%s failed: %s", chat_id, message_id, exc)
+            return False
 
     def _send_photo_to_chat(
-        self, chat_id: int | str, image_bytes: bytes, caption: str | None
-    ) -> None:
+        self, chat_id: int | str, image_bytes: bytes, caption: str | None, *, track: bool = False
+    ) -> int | None:
         # A single image can't be a media group, so it ships as a plain upload.
         data: dict[str, int | str] = {"chat_id": chat_id}
         if caption:
@@ -306,6 +349,7 @@ class TelegramNotifier:
             timeout=self.photo_timeout_seconds,
         )
         response.raise_for_status()
+        return self._extract_message_id(response) if track else None
 
     def _send_photo_by_file_id(self, user_id: str, caption: str, file_id: str) -> None:
         # No upload: Telegram already holds the bytes, so this is a small form
@@ -389,6 +433,17 @@ class TelegramNotifier:
         except ValueError:
             return None
         return result.get("message_id") if isinstance(result, dict) else None
+
+    @staticmethod
+    def _extract_first_message_id(response) -> int | None:
+        # sendMediaGroup returns a LIST of messages; edit the first one's caption.
+        try:
+            result = response.json().get("result")
+        except ValueError:
+            return None
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return result[0].get("message_id")
+        return None
 
     @staticmethod
     def _extract_file_id(response) -> str | None:

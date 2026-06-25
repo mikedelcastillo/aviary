@@ -210,8 +210,11 @@ _ACTIVITY_SUMMARY_PROMPT = (
     "species. Write NATURALLY: use a pronoun (she/he, per the pronouns given) only "
     "where one naturally fits in a sentence — NEVER write a pronoun in parentheses "
     "or right after a name (no 'Percy (she)', no 'Percy, she,'); the pronouns are "
-    "given for your reference, not to be quoted. Be warm and concrete; don't invent "
-    "anything not in the notes. No preamble or closing line — just the bullets."
+    "given for your reference, not to be quoted. When a note begins with how long "
+    "ago it was (e.g. '2 hours ago', '12 minutes ago'), include that timing in the "
+    "bullet naturally (e.g. 'Percy preened on the perch 2 hours ago'). Be warm and "
+    "concrete; don't invent anything not in the notes. No preamble or closing line "
+    "— just the bullets."
 )
 
 

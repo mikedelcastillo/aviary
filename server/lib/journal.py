@@ -99,3 +99,18 @@ def load_recent(
         entries = [e for e in entries if any(b in birds for b in e.birds)]
     entries.sort(key=lambda e: e.time)
     return entries
+
+
+def humanize_ago(then: datetime, now: datetime) -> str:
+    """A relative phrase for how long ago ``then`` was: "12 minutes ago", "2 hours ago"."""
+    seconds = (now - then).total_seconds()
+    if seconds < 60:
+        return "just now"
+    minutes = int(round(seconds / 60))
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = int(round(minutes / 60))
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = int(round(hours / 24))
+    return f"{days} day{'s' if days != 1 else ''} ago"

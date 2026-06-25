@@ -271,7 +271,7 @@ def make_console_dispatcher(
             app_config.ollama.llm_model,
             detector.known_labels,
             notify=console_notifier.send_text,
-            send_photo=None,
+            send_album=None,
             find=lambda cid, arg: emit(console_find(cid, arg)),
             pronoun_note=pronoun_sentence(pronouns),
         )
@@ -611,7 +611,7 @@ def main() -> None:
             app_config.ollama.llm_model,
             detector.known_labels,
             notify=notifier.send_text,
-            send_photo=notifier.send_photo,
+            send_album=notifier.send_album,
             # A "what is X doing now?" with no logged memory kicks off a live
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),

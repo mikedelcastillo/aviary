@@ -13,7 +13,7 @@ class FakeClient:
         return "Percy preened on the perch while Matcha napped nearby."
 
 
-def _responder(memories_dir, notify, find=None, send_photo=None, now=None):
+def _responder(memories_dir, notify, find=None, send_album=None, now=None):
     # Fix "now" so the window is deterministic.
     clock_value = (now or datetime(2026, 6, 25, 15, 0)).timestamp()
     return ActivityResponder(
@@ -22,7 +22,7 @@ def _responder(memories_dir, notify, find=None, send_photo=None, now=None):
         "qwen3:4b",
         lambda: KNOWN,
         notify=notify,
-        send_photo=send_photo,
+        send_album=send_album,
         find=find,
         clock=lambda: clock_value,
     )
@@ -39,13 +39,15 @@ def test_respond_summarises_recent_memory(tmp_path) -> None:
     photo = tmp_path / "p.jpg"
     photo.write_bytes(b"\xff\xd8jpeg")
     append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy", "matcha"], "Percy preens.", [str(photo)]))
-    sent: list = []
-    photos: list = []
-    _responder(tmp_path, lambda c, t: sent.append(t), send_photo=lambda c, img, cap: photos.append(img)).respond(
+    albums: list = []
+    _responder(tmp_path, lambda c, t: None, send_album=lambda c, items: albums.append(items)).respond(
         7, "/activity percy", "percy"
     )
-    assert any("preened" in t for t in sent)
-    assert len(photos) == 1
+    # One album sent, summary is the first item's caption, photo included.
+    assert len(albums) == 1
+    items = albums[0]
+    assert len(items) == 1
+    assert "preened" in items[0][1]
 
 
 def test_respond_today_window(tmp_path) -> None:

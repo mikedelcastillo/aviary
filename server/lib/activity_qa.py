@@ -18,7 +18,7 @@ from typing import Callable
 
 from lib.activity import summarise_activity
 from lib.find import pretty_phrase
-from lib.journal import load_recent
+from lib.journal import humanize_ago, load_recent
 from lib.roster import expand_targets
 
 
@@ -26,6 +26,7 @@ LOGGER = logging.getLogger("lib.activity_qa")
 
 MAX_QA_PHOTOS = 4
 SUMMARY_TIMEOUT_SECONDS = 60.0
+CAPTION_LIMIT = 1024  # Telegram album/photo caption cap.
 
 # Words that make an empty result trigger a live search instead of "haven't seen".
 _LIVE_WORDS = ("now", "right now", "currently", "doing", "up to", "where")
@@ -48,7 +49,7 @@ class ActivityResponder:
         known_labels: Callable[[], list[str]],
         *,
         notify: Callable[[int, str], None],
-        send_photo: Callable[[int, bytes, str | None], object] | None = None,
+        send_album: Callable[[int, list[tuple[bytes, str | None]]], object] | None = None,
         find: Callable[[int, str], None] | None = None,
         pronoun_note: str = "",
         clock: Callable[[], float] = time.time,
@@ -58,7 +59,7 @@ class ActivityResponder:
         self._llm_model = llm_model
         self._known_labels = known_labels
         self._notify = notify
-        self._send_photo = send_photo
+        self._send_album = send_album
         self._find = find
         self._pronoun_note = pronoun_note
         self._clock = clock
@@ -87,7 +88,9 @@ class ActivityResponder:
             self._notify(chat_id, f"I haven't logged any activity for {who} {window_phrase}.")
             return
 
-        notes = [f"{entry.time.strftime('%H:%M')} — {entry.note}" for entry in entries]
+        # Each note carries when it happened, relatively ("2 hours ago"), so the
+        # summary's bullets can say when.
+        notes = [f"{humanize_ago(entry.time, now)} — {entry.note}" for entry in entries]
         subject = pretty_phrase(bird_text) if bird_text.strip() else ""
         try:
             summary = summarise_activity(
@@ -97,23 +100,33 @@ class ActivityResponder:
         except Exception:
             LOGGER.exception("Activity summary failed")
             summary = notes[-1]
-        self._notify(chat_id, summary or notes[-1])
+        summary = summary or notes[-1]
 
-        # A few of the most recent distinct photos (newest entries first).
-        if self._send_photo is not None:
-            chosen: list[str] = []
-            seen: set[str] = set()
-            for entry in reversed(entries):
-                for photo in entry.photos:
-                    if photo not in seen and Path(photo).exists():
-                        seen.add(photo)
-                        chosen.append(photo)
-                    if len(chosen) >= MAX_QA_PHOTOS:
-                        break
+        # The most recent distinct photos (newest entries first).
+        chosen: list[str] = []
+        seen: set[str] = set()
+        for entry in reversed(entries):
+            for photo in entry.photos:
+                if photo not in seen and Path(photo).exists():
+                    seen.add(photo)
+                    chosen.append(photo)
                 if len(chosen) >= MAX_QA_PHOTOS:
                     break
-            for photo in reversed(chosen):
+            if len(chosen) >= MAX_QA_PHOTOS:
+                break
+
+        # Send ONE album — photos grouped with the summary as the first caption —
+        # rather than a text plus a burst of separate photos.
+        if self._send_album is not None and chosen:
+            items: list[tuple[bytes, str | None]] = []
+            caption = summary if len(summary) <= CAPTION_LIMIT else summary[: CAPTION_LIMIT - 1] + "…"
+            for index, photo in enumerate(reversed(chosen)):
                 try:
-                    self._send_photo(chat_id, Path(photo).read_bytes(), None)
+                    items.append((Path(photo).read_bytes(), caption if index == 0 else None))
                 except Exception:
-                    LOGGER.exception("Sending activity photo failed")
+                    LOGGER.exception("Reading activity photo failed")
+            if items:
+                self._send_album(chat_id, items)
+                return
+        # No photos (or no album sender) — just the text.
+        self._notify(chat_id, summary)
