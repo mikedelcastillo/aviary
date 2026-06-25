@@ -20,8 +20,9 @@ from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
 from lib.find import BirdFinder
+from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
-from lib.snapshot import capture_snapshots, snapshot_caption
+from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_report
 from lib.telegram.commands import build_status_message, run_command_bot
@@ -204,8 +205,24 @@ def main() -> None:
 
     # /find runs a background search (it pushes its own progress to the chat),
     # so it needs a notifier to talk to. Wired only when one exists.
+    # PTZ manager discovers (and caches) which cameras are pan-tilt and builds a
+    # patrol over the ones live right now; the search restores their facing after.
+    ptz_manager = PtzManager(app_config.credentials)
+
+    def grab_frame(camera_name: str) -> bytes | None:
+        with stats_lock:
+            camera_stats = stats.get(camera_name)
+        return latest_frame_jpeg(camera_stats) if camera_stats is not None else None
+
     finder = (
-        BirdFinder(registry, detector.known_labels, notify=notifier.send_text)
+        BirdFinder(
+            registry,
+            detector.known_labels,
+            notify=notifier.send_text,
+            grab_frame=grab_frame,
+            send_album=notifier.send_album,
+            make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
+        )
         if notifier is not None
         else None
     )

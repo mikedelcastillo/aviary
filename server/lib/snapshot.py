@@ -92,6 +92,21 @@ def capture_snapshots(
     return saved
 
 
+def latest_frame_jpeg(camera_stats: CameraStats) -> bytes | None:
+    """Encode a camera's most-recent decoded frame as JPEG bytes, or ``None``.
+
+    Used by ``/find`` to attach proof photos without writing to disk. Returns
+    ``None`` when the camera has never produced a frame or the encode fails.
+    """
+    frame, _ = camera_stats.latest_frame()
+    if frame is None:
+        return None
+    ok, buffer = cv2.imencode(".jpg", frame)
+    if not ok:
+        return None
+    return buffer.tobytes()
+
+
 def snapshot_caption(snap: CameraSnapshot) -> str:
     """Per-photo album caption: the camera name, flagged when the frame is stale."""
     if snap.age_seconds is not None and snap.age_seconds > SNAPSHOT_STALE_SECONDS:

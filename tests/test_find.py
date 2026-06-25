@@ -130,6 +130,30 @@ def test_run_reports_when_target_is_visible() -> None:
     assert any("Found percy" in text for _, text in sent)
 
 
+def test_run_sends_proof_photos_when_found() -> None:
+    sent: list[tuple[int, str]] = []
+    albums: list[tuple[int, list]] = []
+    registry = FakeRegistry([row("camera-192.168.1.8", "percy", 1.0)])
+    finder = BirdFinder(
+        registry,
+        lambda: ["percy"],
+        notify=lambda chat_id, text: sent.append((chat_id, text)),
+        grab_frame=lambda camera: b"jpeg-bytes-for-" + camera.encode(),
+        send_album=lambda chat_id, items: albums.append((chat_id, list(items))),
+        clock=lambda: 0.0,
+        poll_seconds=0.0,
+        timeout_seconds=300.0,
+    )
+    outcome = finder._run(123, "percy", threading.Event())
+    assert outcome.found is True
+    # A proof album of the camera that saw the bird is sent to the chat.
+    assert len(albums) == 1
+    chat_id, items = albums[0]
+    assert chat_id == 123
+    assert items[0][0] == b"jpeg-bytes-for-camera-192.168.1.8"
+    assert "percy" in items[0][1]
+
+
 def test_run_times_out_when_target_absent() -> None:
     sent: list[tuple[int, str]] = []
     registry = FakeRegistry([row("camera-192.168.1.42", "matcha", 1.0)])

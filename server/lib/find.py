@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import Callable, Protocol, Sequence
 
 
 LOGGER = logging.getLogger("lib.find")
@@ -122,7 +122,9 @@ class BirdFinder:
         known_labels: Callable[[], list[str]],
         *,
         notify: Callable[[int, str], None],
-        ptz_patrol: "PtzPatrol | None" = None,
+        grab_frame: "Callable[[str], bytes | None] | None" = None,
+        send_album: "Callable[[int, Sequence[tuple[bytes, str | None]]], None] | None" = None,
+        make_patrol: "Callable[[], PtzPatrol | None] | None" = None,
         fresh_seconds: float = DEFAULT_FRESH_SECONDS,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -133,7 +135,14 @@ class BirdFinder:
         self._registry = registry
         self._known_labels = known_labels
         self._notify = notify
-        self._ptz_patrol = ptz_patrol
+        # Grabs a camera's latest frame as JPEG bytes (proof photos on a hit),
+        # and sends an album to a chat. Both optional — without them /find still
+        # reports in text. Reuses the notifier's rate-limited album sender.
+        self._grab_frame = grab_frame
+        self._send_album = send_album
+        # Builds a fresh patrol per search (reflecting the cameras live right
+        # now), or None to search without moving anything. Best-effort.
+        self._make_patrol = make_patrol
         self._fresh_seconds = fresh_seconds
         self._timeout_seconds = timeout_seconds
         self._poll_seconds = poll_seconds
@@ -203,15 +212,28 @@ class BirdFinder:
         finally:
             with self._active_lock:
                 self._active_target = None
-            if self._ptz_patrol is not None:
-                try:
-                    self._ptz_patrol.stop()
-                except Exception:
-                    LOGGER.exception("PTZ patrol stop failed")
 
     # -- the search loop ---------------------------------------------------
 
     def _run(self, chat_id: int, target: str, stop_event: threading.Event) -> FindOutcome:
+        # Build the patrol for THIS search so it reflects the cameras live right
+        # now; tear it down in the finally so movement always halts.
+        patrol = None
+        if self._make_patrol is not None:
+            try:
+                patrol = self._make_patrol()
+            except Exception:
+                LOGGER.exception("Building PTZ patrol failed; searching without it")
+        try:
+            return self._search(chat_id, target, stop_event, patrol)
+        finally:
+            if patrol is not None:
+                try:
+                    patrol.stop()
+                except Exception:
+                    LOGGER.exception("PTZ patrol stop failed")
+
+    def _search(self, chat_id, target, stop_event, patrol) -> FindOutcome:
         start = self._clock()
         deadline = start + self._timeout_seconds
         next_tick = start + self._tick_seconds
@@ -219,9 +241,9 @@ class BirdFinder:
         last_message_at = start
         ever_seen: dict[str, list[str]] = {}
 
-        if self._ptz_patrol is not None:
+        if patrol is not None:
             try:
-                self._ptz_patrol.start()
+                patrol.start()
             except Exception:
                 LOGGER.exception("PTZ patrol start failed; searching without it")
 
@@ -235,6 +257,7 @@ class BirdFinder:
             if target in visible:
                 cameras = visible[target]
                 self._notify(chat_id, format_found_message(target, cameras))
+                self._send_found_photos(chat_id, target, cameras)
                 return FindOutcome(target, True, cameras, self._clock() - start)
 
             now = self._clock()
@@ -248,9 +271,9 @@ class BirdFinder:
                     last_visible_keys = keys
                     last_message_at = now
 
-            if self._ptz_patrol is not None:
+            if patrol is not None:
                 try:
-                    self._ptz_patrol.step()
+                    patrol.step()
                 except Exception:
                     LOGGER.exception("PTZ patrol step failed")
 
@@ -259,6 +282,30 @@ class BirdFinder:
         elapsed = self._clock() - start
         self._notify(chat_id, format_not_found_message(target, elapsed, ever_seen))
         return FindOutcome(target, False, [], elapsed)
+
+    def _send_found_photos(self, chat_id: int, target: str, cameras: list[str]) -> None:
+        """Send the latest frame of each camera that saw the target, as proof.
+
+        Best-effort: a camera without a current frame is skipped, and any send
+        error is swallowed so it never turns a successful find into a failure.
+        """
+        if self._grab_frame is None or self._send_album is None:
+            return
+        items: list[tuple[bytes, str | None]] = []
+        for camera in cameras:
+            try:
+                image = self._grab_frame(camera)
+            except Exception:
+                LOGGER.exception("Grabbing proof frame for %s failed", camera)
+                image = None
+            if image:
+                items.append((image, f"{target} — camera {short_camera(camera)}"))
+        if not items:
+            return
+        try:
+            self._send_album(chat_id, items)
+        except Exception:
+            LOGGER.exception("Sending found photos failed")
 
 
 class PtzPatrol(Protocol):
