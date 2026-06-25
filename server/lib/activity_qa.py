@@ -154,14 +154,10 @@ class ActivityResponder:
         )
         if not entries:
             who = pretty_phrase(bird_text) if bird_text.strip() else "the birds"
-            wants_live = _wants_live(text)
-            if targets and self._find is not None and wants_live:
-                self._notify(chat_id, f"I haven't logged {who} {window_phrase} — let me check the cameras…")
-                self._find(chat_id, bird_text)
-                return
-            # This may actually be a care question that got routed to the activity
-            # path ("is it too cold for percy?"). Answer it from care knowledge
-            # rather than dead-ending on "I haven't logged that".
+            # A care question routed to the activity path ("is it too cold for percy
+            # now?") is answered from care knowledge FIRST — before the live-find
+            # branch, so a care question carrying a live word ("now") isn't sent off
+            # to the cameras instead of being answered.
             if self._care_answer is not None:
                 try:
                     answer = self._care_answer(text)
@@ -171,6 +167,10 @@ class ActivityResponder:
                 if answer:
                     self._notify(chat_id, answer)
                     return
+            if targets and self._find is not None and _wants_live(text):
+                self._notify(chat_id, f"I haven't logged {who} {window_phrase} — let me check the cameras…")
+                self._find(chat_id, bird_text)
+                return
             self._notify(chat_id, f"I haven't logged any activity for {who} {window_phrase}.")
             return
 

@@ -103,6 +103,25 @@ def test_care_fallback_answers_unlogged_care_question(tmp_path) -> None:
     assert not any("haven't logged" in s.lower() for s in sent)
 
 
+def test_care_question_with_now_answers_care_not_camera_search(tmp_path) -> None:
+    # A care question carrying a live word ("now") must be answered from care
+    # knowledge, NOT sent off to a camera search before the care fallback runs.
+    sent: list = []
+    found: list = []
+
+    def care_answer(text: str):
+        return "Keep them at 65–80°F." if "cold" in text else None
+
+    _responder(
+        tmp_path,
+        lambda c, t: sent.append(t),
+        find=lambda cid, arg: found.append(arg),
+        care_answer=care_answer,
+    ).respond(7, "is it too cold for percy now", "percy")
+    assert any("65–80" in s for s in sent)
+    assert found == []  # not handed to the cameras
+
+
 def test_question_uses_qa_path_with_birds_and_question(tmp_path) -> None:
     # Whole-day co-occurrence question -> QA prompt, notes carry each entry's birds.
     append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 9, 0), ["jynx", "matcha"], "Together on the perch."))
