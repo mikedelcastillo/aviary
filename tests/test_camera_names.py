@@ -196,3 +196,45 @@ def test_force_rename_still_names_unnamed_fixed_camera() -> None:
         is_movable=lambda cam: False,
     )
     assert namer.display("camera-192.168.1.44") == "Window Sill"
+
+
+def test_claim_assigns_and_dedups() -> None:
+    namer = CameraNamer()
+    assert namer.claim("camera-1", "Big Cage") == "Big Cage"
+    # A second camera claiming the same base gets a numeric suffix.
+    assert namer.claim("camera-2", "Big Cage") == "Big Cage 2"
+    assert namer.display("camera-1") == "Big Cage"
+    assert namer.display("camera-2") == "Big Cage 2"
+
+
+def test_claim_same_camera_same_base_keeps_name() -> None:
+    namer = CameraNamer()
+    namer.set("camera-1", "Big Cage")
+    # Re-claiming the same descriptive name for the SAME camera keeps it (the
+    # camera's own current name is excluded from the collision check).
+    assert namer.claim("camera-1", "Big Cage") == "Big Cage"
+
+
+def test_claim_is_atomic_under_concurrency() -> None:
+    # Many naming passes claiming the SAME base for DIFFERENT cameras at once must
+    # never hand out a duplicate display name (the boot + /discover race).
+    namer = CameraNamer()
+    results: list[str] = []
+    results_lock = threading.Lock()
+    start = threading.Event()
+
+    def claim(index: int) -> None:
+        start.wait()  # line everyone up to maximise contention
+        display = namer.claim(f"camera-{index}", "Perch")
+        with results_lock:
+            results.append(display)
+
+    threads = [threading.Thread(target=claim, args=(i,)) for i in range(16)]
+    for thread in threads:
+        thread.start()
+    start.set()
+    for thread in threads:
+        thread.join()
+
+    assert len(results) == 16
+    assert len(set(results)) == 16  # every camera got a distinct name
