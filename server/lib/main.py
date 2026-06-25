@@ -57,6 +57,10 @@ LOGGER = logging.getLogger("lib")
 # so a long description never delays the find reply itself.
 VLM_DESCRIBE_TIMEOUT_SECONDS = 150.0
 
+# Silent background re-discovery cadence, so cameras that come online later get
+# picked up without a manual /discover.
+AUTO_DISCOVER_SECONDS = 30 * 60.0
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -697,24 +701,30 @@ def main() -> None:
     # Name the freshly-discovered cameras from a live frame (background, VLM).
     trigger_camera_naming()
 
-    # Retry discovery a couple of times shortly after boot. A camera whose RTSP
-    # session was still busy from a previous run (e.g. right after a restart)
-    # won't answer the single initial sweep; these retries pick it up without the
-    # user needing to /discover. Idempotent — start_camera dedups by host.
-    def _discovery_retry() -> None:
+    # Keep discovering in the background: two quick retries after boot (to catch
+    # cameras whose RTSP was still busy from a previous run — common right after a
+    # restart), then a silent sweep every AUTO_DISCOVER_SECONDS so cameras that
+    # come online later are picked up without the user running /discover.
+    # Idempotent — start_camera dedups by host.
+    def _rediscover() -> None:
+        try:
+            applied = supervisor.discover_and_apply()
+        except Exception:
+            LOGGER.exception("Auto-discovery sweep failed")
+            return
+        if applied.added:
+            LOGGER.info("Auto-discovery started %d more camera(s)", len(applied.added))
+            trigger_camera_naming()
+
+    def _discovery_background() -> None:
         for delay in (15.0, 45.0):
             if stop_event.wait(delay):
                 return
-            try:
-                applied = supervisor.discover_and_apply()
-            except Exception:
-                LOGGER.exception("Retry discovery failed")
-                continue
-            if applied.added:
-                LOGGER.info("Retry discovery started %d more camera(s)", len(applied.added))
-                trigger_camera_naming()
+            _rediscover()
+        while not stop_event.wait(AUTO_DISCOVER_SECONDS):
+            _rediscover()
 
-    threading.Thread(target=_discovery_retry, name="discovery-retry", daemon=True).start()
+    threading.Thread(target=_discovery_background, name="auto-discovery", daemon=True).start()
 
     # Announce we're live (with the camera count) so the user knows monitoring
     # has resumed — e.g. after a restart. Best-effort; never block startup.
