@@ -21,6 +21,7 @@ from lib.ai.router import NaturalLanguageRouter
 from lib.ai.vlm import build_detection_context, describe_scene
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
+from lib.camera_names import CameraNamer, name_cameras
 from lib.config import AppConfig, _as_user_ids, build_config
 from lib.control import RuntimeControl, parse_duration
 from lib.dashboard import Dashboard
@@ -234,6 +235,9 @@ def main() -> None:
     # can drive it.
     control = RuntimeControl()
 
+    # Friendly, VLM-derived display names per camera (identity stays IP-based).
+    namer = CameraNamer()
+
     # The shared, dynamically-grown camera state. The supervisor is the sole
     # writer of `stats`; the dashboard render thread and the /status provider are
     # readers. Every read snapshots under `stats_lock` so a camera appearing
@@ -273,7 +277,10 @@ def main() -> None:
         with stats_lock:
             snap = dict(stats)
         message = build_status_message(
-            snap, registry, app_config.telegram.bbox_movement_alert_ratio
+            snap,
+            registry,
+            app_config.telegram.bbox_movement_alert_ratio,
+            camera_display=namer.display,
         )
         # Lead with the privacy banner when paused so /status makes it obvious
         # why every camera reads "paused" and nothing is being recorded.
@@ -297,7 +304,10 @@ def main() -> None:
         if not saved:
             return "No camera frames available yet; send /discover once cameras are online."
         if notifier is not None:
-            items = [(snap.path.read_bytes(), snapshot_caption(snap)) for snap in saved]
+            items = [
+                (snap.path.read_bytes(), snapshot_caption(snap, namer.display(snap.camera_name)))
+                for snap in saved
+            ]
             notifier.send_album(chat_id, items)
         return f"Sent {len(saved)} snapshot(s); saved to {snapshot_collect_dir}."
 
@@ -350,6 +360,7 @@ def main() -> None:
             send_album=notifier.send_album,
             describe_frame=describe_frame if ollama_client is not None else None,
             make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
+            camera_display=namer.display,
             species_members=species_members,
         )
         if notifier is not None
@@ -367,8 +378,26 @@ def main() -> None:
             return f"{control.status()} Can't search while paused — /play first."
         return finder.start(chat_id, target, stop_event)
 
+    def trigger_camera_naming() -> None:
+        # Name any not-yet-named cameras from a live frame, on a background
+        # thread (the VLM is slow). Only when the AI is enabled; otherwise the
+        # fallback "Cam N" names stand.
+        if ollama_client is None:
+            return
+        with stats_lock:
+            cameras = list(stats.keys())
+        threading.Thread(
+            target=name_cameras,
+            args=(namer, cameras, grab_frame, ollama_client, app_config.ollama.vlm_model),
+            kwargs={"stop_event": stop_event, "timeout_seconds": VLM_DESCRIBE_TIMEOUT_SECONDS},
+            name="camera-naming",
+            daemon=True,
+        ).start()
+
     def discover_provider() -> str:
-        return format_discovery_report(supervisor.discover_and_apply())
+        report = format_discovery_report(supervisor.discover_and_apply())
+        trigger_camera_naming()  # name any newly-found cameras
+        return report
 
     # Natural-language routing: free-text Telegram messages ("stop the cams",
     # "where's percy?") are classified by Ollama and dispatched to the same

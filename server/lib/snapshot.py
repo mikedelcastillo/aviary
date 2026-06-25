@@ -107,8 +107,9 @@ def latest_frame_jpeg(camera_stats: CameraStats) -> bytes | None:
     return buffer.tobytes()
 
 
-def snapshot_caption(snap: CameraSnapshot) -> str:
-    """Per-photo album caption: the camera name, flagged when the frame is stale."""
+def snapshot_caption(snap: CameraSnapshot, display_name: str | None = None) -> str:
+    """Per-photo album caption: the camera's friendly name, flagged when stale."""
+    name = display_name or snap.camera_name
     if snap.age_seconds is not None and snap.age_seconds > SNAPSHOT_STALE_SECONDS:
-        return f"{snap.camera_name} (stale, {snap.age_seconds:.0f}s ago)"
-    return snap.camera_name
+        return f"{name} (stale, {snap.age_seconds:.0f}s ago)"
+    return name

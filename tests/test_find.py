@@ -133,9 +133,10 @@ def test_run_includes_vlm_description_and_photos_on_hit() -> None:
     )
     outcome = finder._run(7, "percy", ["percy"], threading.Event(), threading.Event())
     assert outcome.found is True
-    # The scene description rides along in the message and the photo caption.
+    # Photo is sent (caption names the bird); the VLM description arrives as a
+    # separate follow-up message so a slow vision model never blocks the photo.
+    assert albums and "Percy" in albums[0][1][0][1]
     assert any("Percy is preening" in text for _, text in sent)
-    assert albums and "Percy is preening" in albums[0][1][0][1]
 
 
 def test_run_times_out_when_absent() -> None:

@@ -106,8 +106,13 @@ def build_status_message(
     stats: dict[str, CameraStats],
     registry: ObjectRegistry | None,
     movement_alert_ratio: float,
+    camera_display: Callable[[str], str] = lambda name: name,
 ) -> str:
-    """Build a plain-text status message from dashboard data, excluding logs."""
+    """Build a plain-text status message from dashboard data, excluding logs.
+
+    ``camera_display`` maps a camera's identity to its friendly name (e.g.
+    ``camera-192.168.1.8`` -> ``Window Perch``); it defaults to identity.
+    """
     # Copy the mapping up front: the live ``stats`` dict is shared with the
     # camera supervisor, which adds entries from another thread. Iterating a
     # local copy makes this safe no matter how the caller obtained the dict
@@ -152,7 +157,7 @@ def build_status_message(
         frame_text = "never" if frame_age == "never" else f"{frame_age} ago"
         lines.extend(
             [
-                f"- {snap['name']}: {_camera_status_text(snap)}",
+                f"- {camera_display(snap['name'])}: {_camera_status_text(snap)}",
                 f"  FPS: {snap['fps']:.2f} / {snap['sample_fps']:g}",
                 f"  Last frame: {frame_text}; last detection: {detection}",
                 (
@@ -181,7 +186,7 @@ def build_status_message(
             )
             flag = " alert-move" if moved_enough else ""
             lines.append(
-                f"- {pretty(row['label'])} on {row['camera']}: "
+                f"- {pretty(row['label'])} on {camera_display(row['camera'])}: "
                 f"seen {_format_duration(row['since'])} ago, "
                 f"alert {alert}, move {movement}{flag}, "
                 f"count {_format_count(row['count'])}"

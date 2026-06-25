@@ -63,13 +63,13 @@ def currently_visible(rows: list[dict], fresh_seconds: float) -> dict[str, list[
     return {label: sorted(cameras) for label, cameras in visible.items()}
 
 
-def format_visible(visible: dict[str, list[str]]) -> str:
-    """Render the visible map as ``Percy (.8), Matcha (.42, .44)`` (capitalised)."""
+def format_visible(visible: dict[str, list[str]], display=short_camera) -> str:
+    """Render the visible map as ``Percy (Window Perch), Matcha (Food Bowl)``."""
     if not visible:
         return "no birds in view"
     parts = []
     for label in sorted(visible):
-        cams = ", ".join(short_camera(camera) for camera in visible[label])
+        cams = ", ".join(display(camera) for camera in visible[label])
         parts.append(f"{pretty(label)} ({cams})")
     return "; ".join(parts)
 
@@ -78,10 +78,11 @@ def format_found_message(
     found_labels: list[str],
     visible: dict[str, list[str]],
     description: str | None = None,
+    display=short_camera,
 ) -> str:
     parts = []
     for label in found_labels:
-        cams = ", ".join(short_camera(camera) for camera in visible.get(label, []))
+        cams = ", ".join(display(camera) for camera in visible.get(label, []))
         parts.append(f"{pretty(label)} on {cams}")
     message = f"🔎 Found {'; '.join(parts)}!"
     if description:
@@ -89,21 +90,23 @@ def format_found_message(
     return message
 
 
-def format_progress_message(requested: str, visible: dict[str, list[str]]) -> str:
+def format_progress_message(requested: str, visible: dict[str, list[str]], display=short_camera) -> str:
     return (
         f"Still looking for {pretty_phrase(requested)}. "
-        f"Right now I can see: {format_visible(visible)}."
+        f"Right now I can see: {format_visible(visible, display)}."
     )
 
 
-def format_not_found_message(requested: str, elapsed: float, ever_seen: dict[str, list[str]]) -> str:
+def format_not_found_message(
+    requested: str, elapsed: float, ever_seen: dict[str, list[str]], display=short_camera
+) -> str:
     minutes = max(1, int(round(elapsed / 60)))
     base = (
         f"😕 Couldn't find {pretty_phrase(requested)} after {minutes} min. "
         "They may be out of frame, behind something, or resting."
     )
     if ever_seen:
-        base += f" While searching I did see: {format_visible(ever_seen)}."
+        base += f" While searching I did see: {format_visible(ever_seen, display)}."
     return base
 
 
@@ -129,6 +132,7 @@ class BirdFinder:
         send_album: "Callable[[int, Sequence[tuple[bytes, str | None]]], None] | None" = None,
         describe_frame: "Callable[[bytes], str | None] | None" = None,
         make_patrol: "Callable[[], PtzPatrol | None] | None" = None,
+        camera_display: Callable[[str], str] = short_camera,
         species_members: dict[str, tuple[str, ...]] | None = None,
         fresh_seconds: float = DEFAULT_FRESH_SECONDS,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
@@ -146,6 +150,7 @@ class BirdFinder:
         # description ("Percy is on the perch with Matcha"). Best-effort.
         self._describe_frame = describe_frame
         self._make_patrol = make_patrol
+        self._camera_display = camera_display
         self._species_members = species_members or DEFAULT_SPECIES_MEMBERS
         self._fresh_seconds = fresh_seconds
         self._timeout_seconds = timeout_seconds
@@ -292,9 +297,18 @@ class BirdFinder:
             found_labels = [label for label in targets if label in visible]
             if found_labels:
                 cameras = sorted({cam for label in found_labels for cam in visible[label]})
+                # Announce + send the proof photo FIRST: it's fast and reliable,
+                # and must not depend on the slow VLM. The scene description is a
+                # best-effort follow-up so a slow/cold vision model never costs us
+                # the photo.
+                self._notify(
+                    chat_id,
+                    format_found_message(found_labels, visible, None, self._camera_display),
+                )
+                self._send_found_photos(chat_id, found_labels, visible)
                 description = self._describe_camera(cameras[0]) if cameras else None
-                self._notify(chat_id, format_found_message(found_labels, visible, description))
-                self._send_found_photos(chat_id, found_labels, visible, description)
+                if description:
+                    self._notify(chat_id, f"📝 {description}")
                 return FindOutcome(requested, True, found_labels, cameras, self._clock() - start)
 
             now = self._clock()
@@ -302,7 +316,9 @@ class BirdFinder:
                 next_tick = now + self._tick_seconds
                 keys = frozenset(visible)
                 if keys != last_visible_keys or (now - last_message_at) >= self._heartbeat_seconds:
-                    self._notify(chat_id, format_progress_message(requested, visible))
+                    self._notify(
+                        chat_id, format_progress_message(requested, visible, self._camera_display)
+                    )
                     last_visible_keys = keys
                     last_message_at = now
 
@@ -323,7 +339,9 @@ class BirdFinder:
         if cancel.is_set() or stop_event.is_set():
             return FindOutcome(requested, False, [], [], self._clock() - start)
         elapsed = self._clock() - start
-        self._notify(chat_id, format_not_found_message(requested, elapsed, ever_seen))
+        self._notify(
+            chat_id, format_not_found_message(requested, elapsed, ever_seen, self._camera_display)
+        )
         return FindOutcome(requested, False, [], [], elapsed)
 
     # -- vision + photo helpers -------------------------------------------
@@ -341,35 +359,39 @@ class BirdFinder:
             LOGGER.exception("Scene description failed for %s", camera)
             return None
 
-    def _send_found_photos(self, chat_id, found_labels, visible, description) -> None:
-        """Send the latest frame of each camera that saw a found bird, as proof."""
+    def _send_found_photos(self, chat_id, found_labels, visible) -> int:
+        """Send the latest frame of each camera that saw a found bird, as proof.
+
+        Returns how many photos were sent (0 if vision/album wiring is absent or
+        no camera had a current frame). Logged so a missing photo is diagnosable.
+        """
         if self._grab_frame is None or self._send_album is None:
-            return
+            LOGGER.warning("Find: no grab_frame/send_album wired; cannot send proof photo")
+            return 0
         cameras = sorted({cam for label in found_labels for cam in visible.get(label, [])})
         items: list[tuple[bytes, str | None]] = []
-        for index, camera in enumerate(cameras):
+        for camera in cameras:
             try:
                 image = self._grab_frame(camera)
             except Exception:
                 LOGGER.exception("Grabbing proof frame for %s failed", camera)
                 image = None
             if not image:
+                LOGGER.warning("Find: no current frame for %s; skipping its photo", camera)
                 continue
-            # Birds known to be on this camera, capitalised, plus the scene
-            # description on the first photo.
             here = ", ".join(
                 pretty(label) for label in found_labels if camera in visible.get(label, [])
             )
-            caption = f"{here} — camera {short_camera(camera)}"
-            if index == 0 and description:
-                caption += f"\n{description}"
-            items.append((image, caption))
+            items.append((image, f"{here} — {self._camera_display(camera)}"))
         if not items:
-            return
+            return 0
         try:
             self._send_album(chat_id, items)
+            LOGGER.info("Find: sent %d proof photo(s) to chat %s", len(items), chat_id)
+            return len(items)
         except Exception:
             LOGGER.exception("Sending found photos failed")
+            return 0
 
 
 class PtzPatrol(Protocol):
