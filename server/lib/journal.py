@@ -27,6 +27,9 @@ _ENTRY_RE = re.compile(
     re.DOTALL,
 )
 _PHOTO_RE = re.compile(r"^> photo: (.+)$", re.MULTILINE)
+# Leading markdown header hashes on a note line ("## ", "# ") — stripped on write
+# so a note can't forge an entry header (see append_entry).
+_HEADER_HASHES = re.compile(r"(?m)^#+[ \t]+")
 
 
 @dataclass
@@ -47,7 +50,11 @@ def append_entry(memories_dir: Path, entry: MemoryEntry) -> Path:
     path = memory_path(memories_dir, entry.time.date())
     new_file = not path.exists()
     birds = ", ".join(entry.birds) if entry.birds else "quiet"
-    block = f"## {entry.time.strftime('%H:%M')} | {birds}\n{entry.note.strip()}\n"
+    # A VLM note whose line starts with "## " would imitate an entry header and
+    # corrupt parsing on read-back (it could be misread as a new entry). Strip
+    # leading markdown header hashes per line so a note can never forge a header.
+    note = _HEADER_HASHES.sub("", entry.note.strip())
+    block = f"## {entry.time.strftime('%H:%M')} | {birds}\n{note}\n"
     for photo in entry.photos:
         block += f"> photo: {photo}\n"
     with path.open("a", encoding="utf-8") as handle:

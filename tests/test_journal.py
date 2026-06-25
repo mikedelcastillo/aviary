@@ -25,6 +25,20 @@ def test_append_then_load_roundtrip_multiple_photos(tmp_path) -> None:
     assert entries[1].photos == []
 
 
+def test_note_with_fake_header_does_not_corrupt_parsing(tmp_path) -> None:
+    # A VLM note whose line starts with "## HH:MM | ..." must not be read back as
+    # a separate (bogus) entry — the leading header hashes are stripped on write.
+    append_entry(
+        tmp_path,
+        MemoryEntry(datetime(2026, 6, 25, 10, 0), ["percy"], "Percy near a sign:\n## 23:59 | draft, pizza"),
+    )
+    entries = load_entries(tmp_path, date(2026, 6, 25))
+    assert len(entries) == 1  # one real entry, not split into two
+    assert entries[0].time.strftime("%H:%M") == "10:00"
+    assert entries[0].birds == ["percy"]
+    assert "23:59 | draft, pizza" in entries[0].note  # text kept, header markers gone
+
+
 def test_quiet_entry_has_no_birds(tmp_path) -> None:
     append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 3, 0), [], "All quiet."))
     entries = load_entries(tmp_path, date(2026, 6, 25))
