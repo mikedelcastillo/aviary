@@ -19,7 +19,7 @@ class FakeClient:
         return "Percy preened on the perch while Matcha napped nearby."
 
 
-def _responder(memories_dir, notify, find=None, send_album=None, now=None, client=None):
+def _responder(memories_dir, notify, find=None, send_album=None, now=None, client=None, care_answer=None):
     # Fix "now" so the window is deterministic.
     when = now or datetime(2026, 6, 25, 15, 0)
     return ActivityResponder(
@@ -32,6 +32,7 @@ def _responder(memories_dir, notify, find=None, send_album=None, now=None, clien
         find=find,
         pronoun_note="Percy and Bambi are female (use she/her for them).",
         now=lambda: when,
+        care_answer=care_answer,
     )
 
 
@@ -82,6 +83,24 @@ def test_respond_says_unlogged_when_not_live(tmp_path) -> None:
         7, "/activity matcha", "matcha"
     )
     assert sent and "haven't logged" in sent[0].lower()
+
+
+def test_care_fallback_answers_unlogged_care_question(tmp_path) -> None:
+    # A care question routed to the activity path with no logged memory should be
+    # answered from care knowledge, not dead-end on "I haven't logged that".
+    sent: list = []
+    asked: list = []
+
+    def care_answer(text: str) -> str:
+        asked.append(text)
+        return "Keep them at a steady 65–80°F and out of drafts."
+
+    _responder(tmp_path, lambda c, t: sent.append(t), care_answer=care_answer).respond(
+        7, "is it too cold for percy", "percy"
+    )
+    assert asked == ["is it too cold for percy"]
+    assert any("65–80" in s for s in sent)
+    assert not any("haven't logged" in s.lower() for s in sent)
 
 
 def test_question_uses_qa_path_with_birds_and_question(tmp_path) -> None:

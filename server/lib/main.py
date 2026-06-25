@@ -733,6 +733,20 @@ def main() -> None:
     # Activity Q&A ("what did percy do today?") reads the collected-photos log;
     # conversation memory keeps ~20 turns per chat for coherent follow-ups.
     memory = ConversationMemory() if ollama_client is not None else None
+    def care_answer(text: str) -> str | None:
+        # A grounded care answer when ``text`` is actually a care question, else
+        # None — so a care Q routed to the activity path doesn't dead-end.
+        if ollama_client is None:
+            return None
+        context = build_chat_context(text, member_species=member_species)
+        if context is None:
+            return None
+        try:
+            return chat_reply(ollama_client, app_config.ollama.llm_model, text, context=context)
+        except Exception:
+            LOGGER.exception("Care answer failed")
+            return None
+
     activity_responder = (
         ActivityResponder(
             memories_dir,
@@ -745,6 +759,7 @@ def main() -> None:
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),
             pronoun_note=pronoun_note,
+            care_answer=care_answer,
         )
         if (ollama_client is not None and notifier is not None and finder is not None)
         else None

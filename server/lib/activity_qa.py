@@ -76,6 +76,7 @@ class ActivityResponder:
         find: Callable[[int, str], None] | None = None,
         pronoun_note: str = "",
         now: Callable[[], datetime] = now_ph,
+        care_answer: Callable[[str], str | None] | None = None,
     ) -> None:
         self._memories_dir = Path(memories_dir)
         self._client = client
@@ -86,6 +87,10 @@ class ActivityResponder:
         self._find = find
         self._pronoun_note = pronoun_note
         self._now = now
+        # Given the message text, returns a grounded care answer if it's actually
+        # a care question (else None) — so a care Q that got routed here instead of
+        # to chat still gets a real answer rather than "I haven't logged that".
+        self._care_answer = care_answer
 
     def _window(self, text: str, argument: str, now: datetime, question: bool) -> tuple[datetime, datetime, str]:
         """Resolve the lookback window ``(since, until, phrase)``, honouring
@@ -154,6 +159,18 @@ class ActivityResponder:
                 self._notify(chat_id, f"I haven't logged {who} {window_phrase} — let me check the cameras…")
                 self._find(chat_id, bird_text)
                 return
+            # This may actually be a care question that got routed to the activity
+            # path ("is it too cold for percy?"). Answer it from care knowledge
+            # rather than dead-ending on "I haven't logged that".
+            if self._care_answer is not None:
+                try:
+                    answer = self._care_answer(text)
+                except Exception:
+                    LOGGER.exception("Care fallback failed")
+                    answer = None
+                if answer:
+                    self._notify(chat_id, answer)
+                    return
             self._notify(chat_id, f"I haven't logged any activity for {who} {window_phrase}.")
             return
 
