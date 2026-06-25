@@ -717,6 +717,35 @@ def test_status_shows_ir_species_label_during_night() -> None:
     assert "Cockatiel" in message  # the seen species shows, not just "nothing seen"
 
 
+def test_sleep_command_passes_argument_to_provider(monkeypatch) -> None:
+    from lib.telegram.commands import COMMAND_DESCRIPTIONS
+
+    assert "/sleep" in COMMAND_DESCRIPTIONS  # registered in the slash menu
+
+    stop_event = threading.Event()
+    seen: list[tuple[int, str]] = []
+
+    def post(_url, json, timeout):
+        return Response()
+
+    def sleep_provider(chat_id: int, argument: str) -> None:
+        seen.append((chat_id, argument))
+        stop_event.set()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/sleep week"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        sleep_provider=sleep_provider,
+    )
+
+    assert seen == [(123, "week")]
+
+
 def test_command_bot_survives_a_handler_exception(monkeypatch) -> None:
     """A handler raising must not kill the poll thread; the bot keeps serving.
 

@@ -166,6 +166,10 @@ class AppConfig:
     # Location for sunrise/sunset, defaulting to Manila (the host runs PH time).
     latitude: float = 14.5995
     longitude: float = 120.9842
+    # The optional post-wake "how the birds slept" report. Off by default — the
+    # /sleep command and the /status night-in-progress line work regardless;
+    # SLEEP_MORNING_REPORT=1 also pushes a summary each morning when they wake.
+    sleep_morning_report: bool = False
 
 
 def _require_env(name: str) -> str:
@@ -321,4 +325,5 @@ def build_config() -> AppConfig:
         care_reminders=_as_bool("CARE_REMINDERS", True),
         latitude=_as_float("AVIARY_LATITUDE", 14.5995),
         longitude=_as_float("AVIARY_LONGITUDE", 120.9842),
+        sleep_morning_report=_as_bool("SLEEP_MORNING_REPORT", False),
     )

@@ -49,6 +49,7 @@ from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
 from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_sentence
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
+from lib.sleep import SleepTracker, format_status_line
 from lib.stats import CameraStats
 from lib.suntimes import sun_times
 from lib.supervisor import CameraSupervisor, format_discovery_report
@@ -111,6 +112,7 @@ def start_command_thread(
     nl_provider: Callable[[int, str], None] | None = None,
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
+    sleep_provider: Callable[[int, str], None] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -127,6 +129,7 @@ def start_command_thread(
             "nl_provider": nl_provider,
             "photo_provider": photo_provider,
             "activity_provider": activity_provider,
+            "sleep_provider": sleep_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -462,6 +465,9 @@ def main() -> None:
     # Per-camera IR/night state, stamped by each camera loop from the frame it
     # already decoded; /status, auto-find and the activity feed read it cheaply.
     ir_state = IRState()
+    # Flock sleep tracker — assigned later (needs a notifier). The /status line
+    # below reads it lazily, so the placeholder keeps the closure valid.
+    sleep_tracker: SleepTracker | None = None
     stats: dict[str, CameraStats] = {}
     stats_lock = threading.Lock()
     # Shared live state of the current discovery sweep. The supervisor's workers
@@ -508,6 +514,11 @@ def main() -> None:
         # why every camera reads "paused" and nothing is being recorded.
         if control.is_paused():
             return f"{control.status()}\n\n{message}"
+        # While the flock is asleep, show the night-in-progress line.
+        if sleep_tracker is not None:
+            night_line = format_status_line(sleep_tracker.in_progress(), now_ph())
+            if night_line:
+                message = f"{message}\n\n{night_line}"
         return message
 
     # /snapshot grabs every camera's latest live frame, saves it under the
@@ -745,6 +756,64 @@ def main() -> None:
             daemon=True,
         ).start()
 
+    # Flock sleep tracker: watches the IR light cycle to record each night's dark
+    # window, scores it (10-12h target + consistency + disturbances), and answers
+    # /sleep. Independent of the AI — only needs a notifier; the morning report is
+    # env-gated off. The motion signal is the peak fresh-bird movement (the same
+    # measure the caretaker's night-motion check uses).
+    def _max_fresh_movement(fresh_seconds: float = 15.0) -> float:
+        best = 0.0
+        for row in registry.snapshot():
+            since = row.get("since")
+            if since is None or since > fresh_seconds:
+                continue
+            best = max(best, row.get("movement_percent") or 0.0)
+        return best
+
+    if notifier is not None:
+        sleep_tracker = SleepTracker(
+            notifier.broadcast_text,
+            stop_event,
+            all_ir=ir_state.all_ir,
+            camera_count=lambda: len(ir_state.known()),
+            movement=_max_fresh_movement,
+            sleep_dir=app_config.collect.directory.parent / "sleep",
+            morning_report=app_config.sleep_morning_report,
+            client=ollama_client,
+            llm_model=app_config.ollama.llm_model,
+        )
+        ir_state.add_listener(sleep_tracker.on_ir)
+        sleep_tracker.start()
+        LOGGER.info("Sleep tracker on (morning report %s)", app_config.sleep_morning_report)
+
+    def sleep_provider(chat_id: int, argument: str) -> None:
+        # Backgrounded (reads the night store off disk) so the poll loop is free.
+        if sleep_tracker is None:
+            notifier.send_text(chat_id, "Sleep tracking is unavailable.")
+            return
+
+        def work() -> None:
+            from lib.sleep import NO_COVERAGE, format_last, format_week
+
+            arg = (argument or "").strip().lower()
+            if arg in ("week", "trend", "7", "this week", "lately"):
+                notifier.send_text(chat_id, format_week(sleep_tracker.recent(7)))
+                return
+            last = sleep_tracker.last_finalized()
+            if last is not None:
+                notifier.send_text(chat_id, format_last(last))
+                return
+            in_progress = sleep_tracker.in_progress()
+            line = format_status_line(in_progress, now_ph()) if in_progress is not None else None
+            if line is not None:
+                notifier.send_text(chat_id, f"{line} — I'll have a full report after they wake. 🌙")
+            elif len(ir_state.known()) == 0:
+                notifier.send_text(chat_id, NO_COVERAGE)
+            else:
+                notifier.send_text(chat_id, "No finished nights tracked yet — I'll report after the birds' first full night. 🌙")
+
+        threading.Thread(target=work, name="sleep", daemon=True).start()
+
     # Natural-language routing: free-text Telegram messages ("stop the cams",
     # "where's percy?") are classified by Ollama and dispatched to the same
     # providers as the slash commands. Wired only when a notifier exists (to
@@ -813,6 +882,7 @@ def main() -> None:
         nl_provider=nl_router.handle_async if nl_router is not None else None,
         photo_provider=photo_provider if ollama_client is not None else None,
         activity_provider=activity_provider if activity_responder is not None else None,
+        sleep_provider=sleep_provider if sleep_tracker is not None else None,
     )
     if auto_finder is not None:
         auto_finder.start()
