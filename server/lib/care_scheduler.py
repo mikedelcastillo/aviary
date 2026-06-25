@@ -100,6 +100,8 @@ class CareScheduler:
         midday: time = time(13, 0),
         window_minutes: int = 90,
         weekly_day: int = 6,  # Sunday (Mon=0 .. Sun=6)
+        sleep_summary: Callable[[], str | None] | None = None,
+        weekly_tip: Callable[[], str | None] | None = None,
     ) -> None:
         self._notify_all = notify_all
         self._stop = stop_event
@@ -113,6 +115,11 @@ class CareScheduler:
         self._midday = midday
         self._window = window_minutes
         self._weekly_day = weekly_day
+        # Optional providers folded into a reminder: last night's sleep one-liner
+        # appended to the morning nudge (when finalized), and a rotating care tip
+        # appended to the weekly deep-clean nudge.
+        self._sleep_summary = sleep_summary
+        self._weekly_tip = weekly_tip
 
         self._fired: dict[str, str] = {}  # reminder key -> period key it last fired for
         self._was_dark: bool | None = None
@@ -139,10 +146,28 @@ class CareScheduler:
     def _fire(self, key: str, period: str) -> None:
         self._fired[key] = period
         try:
-            self._notify_all(MESSAGES[key])
+            self._notify_all(self._compose(key))
         except Exception:
             LOGGER.exception("Care reminder %s failed to send", key)
         LOGGER.info("Care reminder sent: %s", key)
+
+    def _compose(self, key: str) -> str:
+        """The reminder text, with the optional sleep/tip extra folded in."""
+        message = MESSAGES[key]
+        provider = None
+        if key == "morning":
+            provider = self._sleep_summary
+        elif key == "weekly_clean":
+            provider = self._weekly_tip
+        if provider is not None:
+            try:
+                extra = provider()
+            except Exception:
+                LOGGER.exception("Care reminder extra for %s failed", key)
+                extra = None
+            if extra:
+                message = f"{message}\n\n{extra}"
+        return message
 
     # -- the schedule ------------------------------------------------------
 

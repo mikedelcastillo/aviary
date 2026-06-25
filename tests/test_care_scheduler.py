@@ -95,6 +95,20 @@ def test_winddown_fires_before_sunset_not_after() -> None:
     assert not any("Winding down" in m for m in sent_late)
 
 
+def test_morning_folds_in_last_night_sleep() -> None:
+    scheduler, sent, _ = _make(sleep_summary=lambda: "😴 They slept 11h of dark, score 90.")
+    scheduler._tick(THURSDAY.replace(hour=5, minute=45))  # morning fires
+    morning = next(m for m in sent if "Good morning" in m)
+    assert "They slept 11h" in morning
+
+
+def test_weekly_clean_folds_in_care_tip() -> None:
+    scheduler, sent, _ = _make(weekly_tip=lambda: "💡 Care tip: wash dishes daily.")
+    scheduler._tick(SUNDAY.replace(hour=13, minute=10))
+    clean = next(m for m in sent if "deep-clean" in m)
+    assert "Care tip" in clean
+
+
 def test_weekly_clean_fires_on_weekly_day_only() -> None:
     scheduler, sent, _ = _make()
     scheduler._tick(THURSDAY.replace(hour=13, minute=10))  # not the weekly day

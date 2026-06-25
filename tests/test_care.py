@@ -6,6 +6,7 @@ from lib.care import (
     TOXIC_FOODS,
     care_context,
     care_reply,
+    care_tip,
     detect_species,
     detected_topics,
     relevant_facts,
@@ -165,3 +166,9 @@ def test_care_reply_permission_question_is_not_a_toxic_warning() -> None:
 
 def test_care_reply_safe_is_not_the_toxic_list() -> None:
     assert "keep AWAY" not in care_reply("safe")
+
+
+def test_care_tip_rotates_deterministically() -> None:
+    assert care_tip(0).startswith("💡 Care tip of the week")
+    assert care_tip(len(CARE_FACTS)) == care_tip(0)  # wraps around
+    assert care_tip(1) != care_tip(0)  # rotates

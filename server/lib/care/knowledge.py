@@ -328,3 +328,11 @@ def care_reply(query: str, *, member_species: dict[str, str] | None = None, limi
         tag = " ⚠️" if fact.safety_critical else ""
         parts.append(f"• {scope}{fact.fact}{tag}")
     return "\n".join(parts)
+
+
+def care_tip(index: int) -> str:
+    """A single rotating care tip (by ``index``, e.g. the ISO week) for a digest."""
+    fact = CARE_FACTS[index % len(CARE_FACTS)]
+    scope = "" if fact.species == "general" else f"({fact.species}) "
+    flag = " ⚠️" if fact.safety_critical else ""
+    return f"💡 Care tip of the week: {scope}{fact.fact}{flag}"

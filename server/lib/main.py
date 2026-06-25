@@ -8,6 +8,7 @@ import os
 import shutil
 import signal
 import threading
+from datetime import timedelta
 from collections.abc import Callable
 
 import cv2
@@ -25,7 +26,7 @@ from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
-from lib.care import care_reply, toxic_food_in
+from lib.care import care_reply, care_tip, toxic_food_in
 from lib.care_scheduler import CareScheduler
 from lib.clock import now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
@@ -953,12 +954,27 @@ def main() -> None:
     # light (cameras leaving/entering IR) and PH sunrise/sunset. Independent of
     # the AI — it only needs a notifier to talk to.
     if notifier is not None and app_config.care_reminders:
+        def last_night_sleep() -> str | None:
+            # Last night's sleep one-liner folded into the morning nudge — only
+            # when it's genuinely LAST night (its evening was yesterday) and
+            # already finalized, never a stale older night.
+            if sleep_tracker is None:
+                return None
+            night = sleep_tracker.last_finalized()
+            if night is None or night.night_of != now_ph().date() - timedelta(days=1):
+                return None
+            from lib.sleep import format_morning
+
+            return format_morning(night)
+
         CareScheduler(
             notifier.broadcast_text,
             stop_event,
             all_ir=ir_state.all_ir,
             camera_count=lambda: len(ir_state.known()),
             sun_times=lambda day: sun_times(day, app_config.latitude, app_config.longitude),
+            sleep_summary=last_night_sleep,
+            weekly_tip=lambda: care_tip(now_ph().isocalendar()[1]),
         ).start()
         LOGGER.info(
             "Care reminders on (lat=%.4f lon=%.4f)", app_config.latitude, app_config.longitude
