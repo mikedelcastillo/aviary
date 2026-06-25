@@ -154,7 +154,11 @@ class BirdFinder:
         self._heartbeat_seconds = heartbeat_seconds
         self._clock = clock
         self._active_lock = threading.Lock()
-        self._active_target: str | None = None
+        # The one in-flight search, or None. A dict {token, requested, cancel}:
+        # ``token`` identifies the search so its thread only clears state it still
+        # owns (a replacement may have taken over); ``cancel`` is its private stop
+        # signal, set by stop_current() or by a replacing search.
+        self._active: dict | None = None
 
     # -- validation --------------------------------------------------------
 
@@ -174,25 +178,50 @@ class BirdFinder:
 
     # -- entry point -------------------------------------------------------
 
+    # Words that mean "stop the current search" rather than "search for X".
+    STOP_WORDS = {"stop", "cancel", "stop looking", "cancel search", "stop searching"}
+
+    def stop_current(self) -> str:
+        """Cancel the in-flight search, if any. Returns a message for the user."""
+        with self._active_lock:
+            active = self._active
+            if active is None:
+                return "No search is running right now."
+            active["cancel"].set()
+            requested = active["requested"]
+        return f"🛑 Stopped searching for {pretty_phrase(requested)}."
+
+    def is_searching(self) -> bool:
+        with self._active_lock:
+            return self._active is not None
+
     def start(self, chat_id: int, requested: str, stop_event: threading.Event) -> str:
-        """Validate and launch a search; return the immediate ack/refusal text."""
+        """Validate and launch a search; return the immediate ack/refusal text.
+
+        "stop"/"cancel" cancels the running search. Starting a new search while
+        one is already running REPLACES it ("look for draft instead"): the old
+        one is cancelled silently and the new one takes over.
+        """
+        if requested.strip().lower() in self.STOP_WORDS:
+            return self.stop_current()
         if not requested.strip():
             return f"Usage: /find <bird>. {self._options_text()}"
         targets = self.resolve_targets(requested)
         if not targets:
             return f"I don't know \"{requested.strip()}\". {self._options_text()}"
 
+        cancel = threading.Event()
+        token = object()
         with self._active_lock:
-            if self._active_target is not None:
-                return (
-                    f"Already searching for {pretty_phrase(self._active_target)}. "
-                    "One hunt at a time."
-                )
-            self._active_target = requested.strip()
+            previous = self._active
+            self._active = {"token": token, "requested": requested.strip(), "cancel": cancel}
+        replacing = previous is not None
+        if replacing:
+            previous["cancel"].set()  # silently retire the old search
 
         thread = threading.Thread(
             target=self._run_guarded,
-            args=(chat_id, requested.strip(), targets, stop_event),
+            args=(token, chat_id, requested.strip(), targets, stop_event, cancel),
             name="find",
             daemon=True,
         )
@@ -201,14 +230,15 @@ class BirdFinder:
         whom = ", ".join(pretty(label) for label in targets[:4])
         if len(targets) > 4:
             whom += f" +{len(targets) - 4} more"
+        lead = "🔄 Switching — now searching" if replacing else "🔭 On it — searching"
         return (
-            f"🔭 On it — searching all cameras for {whom} (up to {minutes} min). "
-            "I'll ping you the moment I spot one."
+            f"{lead} all cameras for {whom} (up to {minutes} min). "
+            "I'll ping you the moment I spot one. (Say \"stop looking\" to cancel.)"
         )
 
-    def _run_guarded(self, chat_id, requested, targets, stop_event) -> None:
+    def _run_guarded(self, token, chat_id, requested, targets, stop_event, cancel) -> None:
         try:
-            self._run(chat_id, requested, targets, stop_event)
+            self._run(chat_id, requested, targets, stop_event, cancel)
         except Exception:
             LOGGER.exception("Find loop failed for %r", requested)
             try:
@@ -216,12 +246,15 @@ class BirdFinder:
             except Exception:
                 LOGGER.exception("Failed to send find-error message")
         finally:
+            # Only clear if we still own the slot — a replacement may have taken
+            # over while we were winding down.
             with self._active_lock:
-                self._active_target = None
+                if self._active is not None and self._active["token"] is token:
+                    self._active = None
 
     # -- the search loop ---------------------------------------------------
 
-    def _run(self, chat_id, requested, targets, stop_event) -> FindOutcome:
+    def _run(self, chat_id, requested, targets, stop_event, cancel) -> FindOutcome:
         patrol = None
         if self._make_patrol is not None:
             try:
@@ -229,7 +262,7 @@ class BirdFinder:
             except Exception:
                 LOGGER.exception("Building PTZ patrol failed; searching without it")
         try:
-            return self._search(chat_id, requested, targets, stop_event, patrol)
+            return self._search(chat_id, requested, targets, stop_event, cancel, patrol)
         finally:
             if patrol is not None:
                 try:
@@ -237,14 +270,13 @@ class BirdFinder:
                 except Exception:
                     LOGGER.exception("PTZ patrol stop failed")
 
-    def _search(self, chat_id, requested, targets, stop_event, patrol) -> FindOutcome:
+    def _search(self, chat_id, requested, targets, stop_event, cancel, patrol) -> FindOutcome:
         start = self._clock()
         deadline = start + self._timeout_seconds
         next_tick = start + self._tick_seconds
         last_visible_keys: frozenset[str] | None = None
         last_message_at = start
         ever_seen: dict[str, list[str]] = {}
-        target_set = set(targets)
 
         if patrol is not None:
             try:
@@ -252,7 +284,7 @@ class BirdFinder:
             except Exception:
                 LOGGER.exception("PTZ patrol start failed; searching without it")
 
-        while not stop_event.is_set() and self._clock() < deadline:
+        while not stop_event.is_set() and not cancel.is_set() and self._clock() < deadline:
             visible = currently_visible(self._registry.snapshot(), self._fresh_seconds)
             for label, cams in visible.items():
                 ever_seen[label] = sorted(set(ever_seen.get(label, [])) | set(cams))
@@ -280,8 +312,16 @@ class BirdFinder:
                 except Exception:
                     LOGGER.exception("PTZ patrol step failed")
 
-            stop_event.wait(self._poll_seconds)
+            # Wait on the cancel signal so "stop looking" / a replacement
+            # interrupts the poll immediately instead of after the full interval.
+            if cancel.wait(self._poll_seconds):
+                break
 
+        # Cancelled (explicit stop or replaced) and shutdown both exit quietly —
+        # stop_current()/start() already messaged the user. Only a real timeout
+        # sends the not-found recap.
+        if cancel.is_set() or stop_event.is_set():
+            return FindOutcome(requested, False, [], [], self._clock() - start)
         elapsed = self._clock() - start
         self._notify(chat_id, format_not_found_message(requested, elapsed, ever_seen))
         return FindOutcome(requested, False, [], [], elapsed)

@@ -29,7 +29,7 @@ StatusProvider = Callable[[], str]
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/status": "Show camera and detection status",
     "/snapshot": "Capture a snapshot from every camera",
-    "/find": "Find a bird across all cameras (e.g. /find percy)",
+    "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
     "/pause": "Privacy mode: stop the cameras (optional duration, e.g. /pause 10m)",
     "/stop": "Privacy mode: stop the cameras (alias of /pause)",
     "/play": "Resume the cameras after a pause",

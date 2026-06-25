@@ -104,19 +104,13 @@ def test_start_empty_returns_usage() -> None:
     assert finder.start(1, "", threading.Event()).startswith("Usage:")
 
 
-def test_start_refuses_second_search() -> None:
-    finder = _finder(FakeRegistry([]), [])
-    finder._active_target = "matcha"
-    assert "Already searching for Matcha" in finder.start(1, "percy", threading.Event())
-
-
 def test_run_finds_any_member_of_a_group() -> None:
     sent: list = []
     # Only draft is visible; "find the cockatiels" should still succeed on it.
     registry = FakeRegistry([row("camera-192.168.1.8", "draft", 1.0)])
     finder = _finder(registry, sent, timeout_seconds=300.0)
     targets = finder.resolve_targets("cockatiels")
-    outcome = finder._run(7, "cockatiels", targets, threading.Event())
+    outcome = finder._run(7, "cockatiels", targets, threading.Event(), threading.Event())
     assert outcome.found is True
     assert outcome.found_labels == ["draft"]
     assert any("Found Draft on .8" in text for _, text in sent)
@@ -137,7 +131,7 @@ def test_run_includes_vlm_description_and_photos_on_hit() -> None:
         poll_seconds=0.0,
         timeout_seconds=300.0,
     )
-    outcome = finder._run(7, "percy", ["percy"], threading.Event())
+    outcome = finder._run(7, "percy", ["percy"], threading.Event(), threading.Event())
     assert outcome.found is True
     # The scene description rides along in the message and the photo caption.
     assert any("Percy is preening" in text for _, text in sent)
@@ -148,6 +142,44 @@ def test_run_times_out_when_absent() -> None:
     sent: list = []
     registry = FakeRegistry([row("camera-192.168.1.42", "matcha", 1.0)])
     finder = _finder(registry, sent, timeout_seconds=0.0)
-    outcome = finder._run(7, "percy", ["percy"], threading.Event())
+    outcome = finder._run(7, "percy", ["percy"], threading.Event(), threading.Event())
     assert outcome.found is False
     assert any("Couldn't find Percy" in text for _, text in sent)
+
+
+def test_run_cancelled_exits_quietly() -> None:
+    sent: list = []
+    registry = FakeRegistry([])
+    finder = _finder(registry, sent, timeout_seconds=300.0)
+    cancel = threading.Event()
+    cancel.set()  # already cancelled before the loop runs
+    outcome = finder._run(7, "percy", ["percy"], threading.Event(), cancel)
+    assert outcome.found is False
+    # Cancellation is announced by stop_current()/start(), not the loop.
+    assert not any("Couldn't find" in text for _, text in sent)
+
+
+def test_stop_current_without_search() -> None:
+    finder = _finder(FakeRegistry([]), [])
+    assert "No search is running" in finder.stop_current()
+
+
+def test_start_stop_word_cancels_active_search() -> None:
+    finder = _finder(FakeRegistry([]), [])
+    # Pretend a search is active.
+    finder._active = {"token": object(), "requested": "percy", "cancel": threading.Event()}
+    msg = finder.start(1, "stop", threading.Event())
+    assert "Stopped searching for Percy" in msg
+    assert finder._active["cancel"].is_set()
+
+
+def test_start_while_active_replaces() -> None:
+    # timeout 0 so the launched search thread exits immediately instead of
+    # spinning on the constant test clock.
+    finder = _finder(FakeRegistry([]), [], timeout_seconds=0.0)
+    old_cancel = threading.Event()
+    finder._active = {"token": object(), "requested": "matcha", "cancel": old_cancel}
+    msg = finder.start(1, "percy", threading.Event())
+    # The previous search is cancelled and the new one announced as a switch.
+    assert old_cancel.is_set()
+    assert "Switching" in msg

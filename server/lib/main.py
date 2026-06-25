@@ -145,6 +145,8 @@ def build_nl_router(
             notifier.send_text(chat_id, control.resume())
         elif action == "find":
             notifier.send_text(chat_id, find_provider(chat_id, intent.argument))
+        elif action == "stop_find":
+            notifier.send_text(chat_id, finder.stop_current())
         elif action == "discover":
             notifier.send_text(chat_id, "Scanning the local network for cameras...")
             notifier.send_text(chat_id, discover_provider())
@@ -336,11 +338,14 @@ def main() -> None:
     )
 
     def find_provider(chat_id: int, target: str) -> str:
+        assert finder is not None  # only wired when finder exists
+        # Stopping a search must work regardless of privacy state.
+        if target.strip().lower() in finder.STOP_WORDS:
+            return finder.stop_current()
         # Privacy first: a paused server is consuming no streams, so a search
         # would just stare at frozen registry state. Refuse instead.
         if control.is_paused():
             return f"{control.status()} Can't search while paused — /play first."
-        assert finder is not None  # only wired when finder exists
         return finder.start(chat_id, target, stop_event)
 
     def discover_provider() -> str:

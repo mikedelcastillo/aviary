@@ -55,6 +55,8 @@ INTENT_TESTS: list[tuple[str, str]] = [
     ("where are the lovebirds", "find"),
     ("find any bird", "find"),
     ("is bambi out", "find"),
+    ("stop looking", "stop_find"),
+    ("cancel the search", "stop_find"),
     ("reload cams", "discover"),
     ("rescan the cameras", "discover"),
     ("how are the cameras?", "status"),

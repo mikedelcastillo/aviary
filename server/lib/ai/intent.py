@@ -22,7 +22,7 @@ LOGGER = logging.getLogger("lib.ai.intent")
 
 # Every action the router can emit. "chat" is the catch-all for questions and
 # conversation, routed to the memory/VLM layer rather than a command.
-ACTIONS = ("pause", "resume", "find", "discover", "status", "snapshot", "chat")
+ACTIONS = ("pause", "resume", "find", "stop_find", "discover", "status", "snapshot", "chat")
 
 # Ollama ``format`` schema: constrains the model to a valid action + argument.
 INTENT_SCHEMA = {
@@ -54,6 +54,8 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '"find the cockatiels", "find any bird". argument = exactly the bird(s) or group the '
         'user named, e.g. "percy", "percy and matcha", "the cockatiels", "lovebirds", '
         '"any bird". Groups (cockatiels, lovebirds, budgies, birds) and "any" are allowed.\n'
+        '- "stop_find": cancel an in-progress search — "stop looking", "cancel the search", '
+        '"never mind". argument = "". (But "look for X instead" is a NEW find, not stop_find.)\n'
         '- "discover": rescan / reload / refresh the cameras on the network. argument = "".\n'
         '- "status": how the cameras or system are doing, health, what is online. argument = "".\n'
         '- "snapshot": take or show pictures from all cameras right now. argument = "".\n'
