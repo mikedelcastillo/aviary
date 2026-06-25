@@ -705,3 +705,13 @@ def test_photo_message_runs_photo_provider(monkeypatch) -> None:
     # The LARGEST photo is downloaded and handed to the provider; its reply ships.
     assert seen_image == [b"jpeg-BIG"]
     assert sent_messages == ["📷 Taking a look at your photo…", "📸 I spotted: Percy!"]
+
+
+def test_status_shows_ir_species_label_during_night() -> None:
+    registry = ObjectRegistry()
+    stats = {"camera-1": CameraStats("camera-1", 0.25, registry)}
+    stats["camera-1"].set_status("connected")
+    # At night only the species/IR outline is detected, not the individual.
+    stats["camera-1"].record_inference(["cockatiel"], [detection("cockatiel")], (100, 100))
+    message = build_status_message(stats, registry, known_birds=["percy", "draft"])
+    assert "Cockatiel" in message  # the seen species shows, not just "nothing seen"

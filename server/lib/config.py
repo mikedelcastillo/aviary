@@ -288,12 +288,15 @@ def build_config() -> AppConfig:
     # subnet when auto-detect would pick the wrong interface (Docker, etc.).
     discovery = DiscoveryConfig(cidr=os.environ.get("TAPO_DISCOVERY_CIDR") or None)
 
-    # Caretaker report beat, and whether raw photo alerts still fire. When the
-    # caretaker is on, the raw per-detection photo spam is off by default (it
-    # reports the photos instead); RAW_PHOTO_ALERTS overrides either way.
+    # Caretaker report beat, and whether raw photo alerts still fire. The
+    # caretaker only runs when the interval is set AND Ollama is on; raw alerts
+    # default OFF only when the caretaker will actually replace them, so a config
+    # with Ollama disabled (or no interval) keeps the raw alerts and never goes
+    # silent. RAW_PHOTO_ALERTS overrides either way.
+    ollama = _ollama_config()
     memory_minutes = _as_float("MEMORY_INTERVAL_MINUTES", 5.0)
-    raw_default = memory_minutes <= 0
-    raw_photo_alerts = _as_bool("RAW_PHOTO_ALERTS", raw_default)
+    caretaker_on = memory_minutes > 0 and ollama.enabled
+    raw_photo_alerts = _as_bool("RAW_PHOTO_ALERTS", not caretaker_on)
 
     return AppConfig(
         snapshot_dir=Path("./data/server/snapshots"),
@@ -303,7 +306,7 @@ def build_config() -> AppConfig:
         filter=object_filter,
         credentials=credentials,
         discovery=discovery,
-        ollama=_ollama_config(),
+        ollama=ollama,
         memory_interval_minutes=memory_minutes,
         raw_photo_alerts=raw_photo_alerts,
         ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),

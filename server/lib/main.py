@@ -170,13 +170,17 @@ def build_nl_router(
 
     def send_chat_reply(chat_id: int, text: str) -> None:
         history = memory.history(chat_id) if memory is not None else None
+        failed = False
         try:
             reply = chat_reply(client, app_config.ollama.llm_model, text, history=history)
         except Exception:
             LOGGER.exception("Chat reply failed")
             reply = "🤖 My language brain (Ollama) is unreachable right now."
+            failed = True
         notifier.send_text(chat_id, reply or "🤔")
-        if memory is not None:
+        # Don't persist a failed turn: a fake "I'm unreachable" assistant line
+        # would be fed back as context on the next message and corrupt the chat.
+        if memory is not None and not failed:
             memory.record(chat_id, "user", text)
             memory.record(chat_id, "assistant", reply)
 

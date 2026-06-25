@@ -33,8 +33,13 @@ def test_parse_duration_indefinite_inputs_return_none() -> None:
     assert parse_duration("") is None
     assert parse_duration(None) is None
     assert parse_duration("   ") is None
-    assert parse_duration("forever") is None
-    assert parse_duration("0") is None
+    assert parse_duration("forever") is None  # no number -> indefinite
+
+
+def test_parse_duration_explicit_zero_is_zero_not_indefinite() -> None:
+    # "/pause 0" gave a number, so it must NOT become an indefinite pause.
+    assert parse_duration("0") == 0.0
+    assert parse_duration("0m") == 0.0
 
 
 # -- RuntimeControl ---------------------------------------------------------

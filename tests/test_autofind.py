@@ -43,6 +43,9 @@ class FakeNotifier:
     def broadcast_text(self, t):
         self.texts.append(t)
 
+    def send_text(self, chat_id, t):
+        self.texts.append(t)
+
 
 def row(label, camera="cam-1", since=10.0):
     return {"label": label, "camera": camera, "since": since}
@@ -127,3 +130,11 @@ def test_overdue_not_repeated_until_bird_returns() -> None:
     reg.rows = [row("percy", since=700)]
     af._tick()  # missing again -> alerts a second time
     assert len(finder.starts) == 2
+
+
+def test_alerted_cleared_at_dawn() -> None:
+    af = _af(FakeReg([]), FakeFinder(), FakeNotifier(), ir=set(), total=2)
+    af._alerted = {"percy"}
+    af._last_condition = "all_ir"  # it was night
+    af._auto_toggle(0, 2)          # dawn: all cameras back to daylight
+    assert af._alerted == set()    # yesterday's suppression is cleared

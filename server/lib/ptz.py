@@ -286,7 +286,7 @@ class OnvifPtzCamera:
         return code == 200
 
     def stop(self) -> bool:
-        token = self._token  # only meaningful once a move resolved a token
+        token = self.profile_token()  # resolve like every other call, not the raw cache
         if token is None:
             return False
         code, _ = self._call(stop_body(token), f"{_NS_PTZ}/Stop")
@@ -331,7 +331,7 @@ class OnvifPtzCamera:
         return code == 200
 
     def goto_home(self) -> bool:
-        token = self._token
+        token = self.profile_token()  # resolve like every other call, not the raw cache
         if token is None:
             return False
         code, _ = self._call(goto_home_body(token), f"{_NS_PTZ}/GotoHomePosition")

@@ -93,8 +93,10 @@ def parse_duration(text: str | None) -> float | None:
             # An unrecognised unit token (e.g. "1x") is ignored rather than
             # guessed at; if nothing else matched we fall through to indefinite.
             continue
-    if not matched or total <= 0:
-        return None
+    if not matched:
+        return None  # no number at all -> indefinite pause
+    # A number WAS given (e.g. "pause 0") -> honour it, even if it's 0s. Only the
+    # no-argument case means indefinite; "0" should not silently become forever.
     return total
 
 

@@ -298,7 +298,9 @@ class BirdFinder:
         next_tick = start + self._tick_seconds
         last_visible_keys: frozenset[str] | None = None
         last_message_at = start
-        ever_seen: dict[str, list[str]] = {}
+        # Accumulate as sets (sorted once at the end), and skip the unknown-bird
+        # class so the not-found recap lists real birds, not "Unknown Bird".
+        ever_seen: dict[str, set[str]] = {}
 
         if patrol is not None:
             try:
@@ -309,7 +311,9 @@ class BirdFinder:
         while not stop_event.is_set() and not cancel.is_set() and self._clock() < deadline:
             visible = currently_visible(self._registry.snapshot(), self._fresh_seconds)
             for label, cams in visible.items():
-                ever_seen[label] = sorted(set(ever_seen.get(label, [])) | set(cams))
+                if label == "unknown_bird":
+                    continue
+                ever_seen.setdefault(label, set()).update(cams)
 
             found_labels = [label for label in targets if label in visible]
             if found_labels:
@@ -357,8 +361,9 @@ class BirdFinder:
         if cancel.is_set() or stop_event.is_set():
             return FindOutcome(requested, False, [], [], self._clock() - start)
         elapsed = self._clock() - start
+        seen_recap = {label: sorted(cams) for label, cams in ever_seen.items()}
         self._notify(
-            chat_id, format_not_found_message(requested, elapsed, ever_seen, self._camera_display)
+            chat_id, format_not_found_message(requested, elapsed, seen_recap, self._camera_display)
         )
         return FindOutcome(requested, False, [], [], elapsed)
 

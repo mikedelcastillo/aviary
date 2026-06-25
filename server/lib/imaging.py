@@ -24,7 +24,9 @@ def downscale_jpeg(image_bytes: bytes, max_dim: int = 1280, quality: int = 80) -
     height, width = array.shape[:2]
     scale = max_dim / max(height, width)
     if scale < 1.0:
-        array = cv2.resize(array, (int(width * scale), int(height * scale)))
+        # max(1, …) so an extreme aspect ratio can't round the short edge to 0,
+        # which would make cv2.resize raise on the photo-send path.
+        array = cv2.resize(array, (max(1, int(width * scale)), max(1, int(height * scale))))
     elif len(image_bytes) < 200_000:
         # Already small and within size — leave it as-is.
         return image_bytes

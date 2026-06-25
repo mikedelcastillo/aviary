@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -29,7 +29,9 @@ ANCHOR_LIMIT = 50
 
 def snapshot_name(camera_name: str) -> str:
     safe_camera = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in camera_name)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    # UTC like the collect/snapshot sidecar timestamps, so filename ordering is
+    # monotonic and consistent across the trees (a DST host won't reorder them).
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     return f"{timestamp}_{safe_camera}.jpg"
 
 

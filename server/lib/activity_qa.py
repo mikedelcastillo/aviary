@@ -11,6 +11,7 @@ kicks off a live ``/find`` instead of shrugging.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -29,8 +30,14 @@ MAX_QA_PHOTOS = 4
 SUMMARY_TIMEOUT_SECONDS = 60.0
 CAPTION_LIMIT = 1024  # Telegram album/photo caption cap.
 
-# Words that make an empty result trigger a live search instead of "haven't seen".
-_LIVE_WORDS = ("now", "right now", "currently", "doing", "up to", "where")
+# Whole words that make an empty result trigger a live search instead of
+# "haven't seen". Matched against word tokens (not substrings) so "now" doesn't
+# fire inside "know"/"snow".
+_LIVE_WORDS = frozenset({"now", "currently", "doing", "where"})
+
+
+def _wants_live(text: str) -> bool:
+    return bool(_LIVE_WORDS & set(re.findall(r"[a-z]+", text.lower())))
 
 # A message starting with one of these (or containing "?") is treated as a
 # specific question to answer, not a request for a generic activity summary.
@@ -92,20 +99,31 @@ class ActivityResponder:
         t = f"{text} {argument}".lower()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        def clamp(end: datetime) -> datetime:
-            return min(end, now)
+        def window(since: datetime, until: datetime, phrase: str) -> tuple[datetime, datetime, str]:
+            # A period that hasn't started yet today (since >= until) would be an
+            # inverted, always-empty range — fall back to the whole day instead.
+            if since >= until:
+                return midnight, now, "today"
+            return since, until, phrase
 
+        # "last night" is the PREVIOUS evening through this morning — handled
+        # before the bare "night" branch so it isn't mistaken for this evening.
+        if "last night" in t or "overnight" in t:
+            return window(
+                midnight - timedelta(days=1) + timedelta(hours=18),
+                min(midnight + timedelta(hours=6), now),
+                "last night",
+            )
         if "morning" in t:
-            return midnight.replace(hour=5), clamp(midnight.replace(hour=12)), "this morning"
+            return window(midnight.replace(hour=5), min(midnight.replace(hour=12), now), "this morning")
         if "afternoon" in t:
-            return midnight.replace(hour=12), clamp(midnight.replace(hour=17)), "this afternoon"
+            return window(midnight.replace(hour=12), min(midnight.replace(hour=17), now), "this afternoon")
         if "evening" in t or "tonight" in t or "night" in t:
-            return midnight.replace(hour=17), now, "this evening"
+            return window(midnight.replace(hour=17), now, "this evening")
         if "week" in t:
             return midnight - timedelta(days=6), now, "this week"
         if "yesterday" in t:
-            y = midnight - timedelta(days=1)
-            return y, midnight, "yesterday"
+            return midnight - timedelta(days=1), midnight, "yesterday"
         if "today" in t or "all day" in t or "whole day" in t or "so far" in t:
             return midnight, now, "today"
         if "hour" in t or "recently" in t or "just now" in t or "lately" in t:
@@ -131,7 +149,7 @@ class ActivityResponder:
         )
         if not entries:
             who = pretty_phrase(bird_text) if bird_text.strip() else "the birds"
-            wants_live = any(word in text.lower() for word in _LIVE_WORDS)
+            wants_live = _wants_live(text)
             if targets and self._find is not None and wants_live:
                 self._notify(chat_id, f"I haven't logged {who} {window_phrase} — let me check the cameras…")
                 self._find(chat_id, bird_text)

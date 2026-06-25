@@ -228,7 +228,11 @@ class MemoryMaker:
             LOGGER.exception("Memory summary failed")
             summary = "; ".join(observations)
 
-        all_birds = sorted({b for birds in cam_birds.values() for b in birds})
+        # Only the birds we actually captured a frame for — a bird that was
+        # visible on a camera that couldn't produce a frame is NOT reported (so
+        # it stays "new" and is retried), nor claimed in the memory entry.
+        captured = {bird for _, _, birds in shots for bird in birds}
+        all_birds = sorted(captured)
         try:
             append_entry(self._memories_dir, MemoryEntry(when, all_birds, summary or "(activity)", saved_paths))
         except Exception:
@@ -238,7 +242,7 @@ class MemoryMaker:
         #    instead of N separate photos plus a text (which spammed the chat).
         self._activity_since = when
         self._last_summary = summary
-        self._reported_set = frozenset(visible)
+        self._reported_set = frozenset(captured)
         header = f"🐦 {when.strftime('%H:%M')} — " + ", ".join(pretty(b) for b in all_birds)
         caption = _clip_caption(f"{header}\n{summary}".strip())
         items = [(img, caption if i == 0 else None) for i, (img, _, _) in enumerate(shots)]

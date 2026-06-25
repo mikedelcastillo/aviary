@@ -144,3 +144,25 @@ def test_week_window_includes_earlier_days(tmp_path) -> None:
         7, "has bambi spent time with jynx this week?", "bambi and jynx"
     )
     assert "Earlier this week" in client.user
+
+
+def test_evening_window_before_5pm_falls_back_to_today(tmp_path) -> None:
+    # Asked at 10am, "tonight" would be an inverted 17:00->10:00 range; must not
+    # invert — fall back to the whole day.
+    r = _responder(tmp_path, lambda c, t: None, now=datetime(2026, 6, 25, 10, 0))
+    since, until, phrase = r._window("are the birds asleep tonight", "", datetime(2026, 6, 25, 10, 0), True)
+    assert since <= until and phrase == "today"
+
+
+def test_last_night_uses_previous_evening(tmp_path) -> None:
+    r = _responder(tmp_path, lambda c, t: None)
+    now = datetime(2026, 6, 25, 9, 0)
+    since, until, phrase = r._window("what happened last night", "", now, True)
+    assert phrase == "last night"
+    assert since.day == 24 and since < until  # spans into the previous day
+
+
+def test_wants_live_is_word_boundary() -> None:
+    from lib.activity_qa import _wants_live
+    assert _wants_live("what is percy doing now") is True
+    assert _wants_live("do you know what percy did today") is False  # 'know', not 'now'

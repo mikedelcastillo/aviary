@@ -169,15 +169,14 @@ def build_status_message(
 
     lines = [f"🐦 Aviary — {healthy}/{len(snapshots)} cameras healthy", ""]
 
-    # Birds, most-recently-seen first.
+    # Birds, most-recently-seen first. Show EVERY label that has a sighting —
+    # roster individuals AND any species/IR outline (e.g. "cockatiel" at night),
+    # so /status isn't blank-looking during IR even though cameras are detecting.
     lines.append("Birds — last seen:")
-    roster = known_birds if known_birds is not None else sorted(last_seen)
-    shown = sorted(
-        ((bird, last_seen[bird]) for bird in roster if bird in last_seen),
-        key=lambda kv: kv[1][0],
-    )
-    for bird, (since, camera) in shown:
-        lines.append(f"  • {pretty(bird)} — {_ago(since)} · {camera_display(camera)}")
+    roster = known_birds if known_birds is not None else []
+    shown = sorted(last_seen.items(), key=lambda kv: kv[1][0])
+    for label, (since, camera) in shown:
+        lines.append(f"  • {pretty(label)} — {_ago(since)} · {camera_display(camera)}")
     missing = [bird for bird in roster if bird not in last_seen]
     if missing:
         lines.append(f"  • not seen yet: {', '.join(pretty(b) for b in missing)}")
@@ -317,7 +316,9 @@ def run_command_bot(
             if not message:
                 continue
 
-            text_in = message.get("text", "")
+            # A photo carries its text in "caption", not "text"; treat either as
+            # the message text so a captioned photo's command/question still runs.
+            text_in = message.get("text") or message.get("caption") or ""
             command = parse_command(text_in)
 
             user_id = (message.get("from") or {}).get("id")
@@ -350,7 +351,10 @@ def run_command_bot(
 
                 Thread(target=handle_photo, name="photo-analyze", daemon=True).start()
                 LOGGER.info("Handling photo from user %s", user_id)
-                continue
+                # No caption -> done. With a caption, fall through so the caption
+                # is also handled as a command / natural-language request.
+                if not text_in.strip():
+                    continue
 
             if command is None:
                 # Not a slash command: hand free text to the natural-language

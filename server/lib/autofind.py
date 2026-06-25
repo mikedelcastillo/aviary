@@ -123,10 +123,14 @@ class AutoFinder:
         with self._lock:
             self._alerted.update(overdue)
         minutes = int(self._unseen // 60)
-        self._notifier.broadcast_text(
-            f"🔍 Auto-find: haven't seen {_phrase(overdue)} in over {minutes} min — searching all cameras…"
-        )
+        # The search's own progress/result go to one chat (finder.start targets a
+        # single chat_id), so the kickoff notice goes to that SAME chat — not a
+        # broadcast that promises every user a result only one of them receives.
         chat_id = self._notifier.user_ids[0] if getattr(self._notifier, "user_ids", None) else 0
+        self._notifier.send_text(
+            chat_id,
+            f"🔍 Auto-find: haven't seen {_phrase(overdue)} in over {minutes} min — searching all cameras…",
+        )
         self._finder.start(chat_id, " and ".join(overdue), self._stop)
 
     def _overdue(self) -> list[str]:
@@ -160,6 +164,11 @@ class AutoFinder:
             if not first:
                 self._manual_override = False
             announce = None
+            if condition == "clear":
+                # New day: forget yesterday's alerts so a bird that's STILL
+                # missing this morning triggers a fresh search instead of staying
+                # suppressed from last night.
+                self._alerted.clear()
             if condition == "clear" and not self._enabled and not (first and self._manual_override):
                 self._enabled = True
                 announce = None if first else "🟢 Auto-find re-enabled — all cameras are back in daylight."
