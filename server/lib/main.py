@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.config import AppConfig, _as_user_ids, build_config
+from lib.control import RuntimeControl
 from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
@@ -57,6 +58,8 @@ def start_command_thread(
     status_provider: Callable[[], str] | None = None,
     discover_provider: Callable[[], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
+    pause_provider: Callable[[float | None], str] | None = None,
+    resume_provider: Callable[[], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -65,6 +68,8 @@ def start_command_thread(
         kwargs={
             "discover_provider": discover_provider,
             "snapshot_provider": snapshot_provider,
+            "pause_provider": pause_provider,
+            "resume_provider": resume_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -121,6 +126,12 @@ def main() -> None:
     stop_event = threading.Event()
     install_signal_handlers(stop_event)
 
+    # Shared privacy/pause state. /pause (or "stop the cams") flips it on and
+    # every camera thread releases its stream; /play flips it back. Created here
+    # so the supervisor can hand it to each monitor thread and the command bot
+    # can drive it.
+    control = RuntimeControl()
+
     # The shared, dynamically-grown camera state. The supervisor is the sole
     # writer of `stats`; the dashboard render thread and the /status provider are
     # readers. Every read snapshots under `stats_lock` so a camera appearing
@@ -149,6 +160,7 @@ def main() -> None:
         stats_lock,
         stop_event,
         progress=discovery_progress,
+        control=control,
     )
 
     # /userinfo stays available, /status exposes the runtime data, and /discover
@@ -158,9 +170,14 @@ def main() -> None:
     def status_provider() -> str:
         with stats_lock:
             snap = dict(stats)
-        return build_status_message(
+        message = build_status_message(
             snap, registry, app_config.telegram.bbox_movement_alert_ratio
         )
+        # Lead with the privacy banner when paused so /status makes it obvious
+        # why every camera reads "paused" and nothing is being recorded.
+        if control.is_paused():
+            return f"{control.status()}\n\n{message}"
+        return message
 
     # /snapshot grabs every camera's latest live frame, saves it under the
     # persistent collect tree (so import-collect-birds later sweeps it into the
@@ -170,6 +187,10 @@ def main() -> None:
     snapshot_collect_dir = app_config.collect.directory / "snapshots"
 
     def snapshot_provider(chat_id: int) -> str:
+        # Honour privacy mode: a paused server is consuming no frames, so refuse
+        # rather than serve a stale pre-pause frame.
+        if control.is_paused():
+            return f"{control.status()} No snapshot while paused."
         saved = capture_snapshots(stats, stats_lock, snapshot_collect_dir)
         if not saved:
             return "No camera frames available yet; send /discover once cameras are online."
@@ -187,6 +208,8 @@ def main() -> None:
             supervisor.discover_and_apply()
         ),
         snapshot_provider=snapshot_provider,
+        pause_provider=control.pause,
+        resume_provider=control.resume,
     )
 
     dashboard = Dashboard(

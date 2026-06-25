@@ -452,3 +452,152 @@ def test_snapshot_command_acks_then_reports_with_chat_id(monkeypatch) -> None:
     ]
     # The requesting chat is handed to the provider so the album goes to them.
     assert seen_chat_ids == [123]
+
+
+def _single_update(text: str, user_id: int = 111, chat_id: int = 123):
+    """A getUpdates stub yielding one message with ``text``."""
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": text,
+                            "from": {"id": user_id},
+                            "chat": {"id": chat_id},
+                        },
+                    }
+                ]
+            }
+        )
+
+    return get
+
+
+def test_pause_command_parses_duration_and_calls_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_durations: list[float | None] = []
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def pause_provider(duration: float | None) -> str:
+        seen_durations.append(duration)
+        return "Privacy mode on."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/pause 10m"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        pause_provider=pause_provider,
+    )
+
+    # "10m" -> 600 seconds handed to the provider; its reply is forwarded.
+    assert seen_durations == [600.0]
+    assert sent_messages == ["Privacy mode on."]
+
+
+def test_pause_command_without_argument_is_indefinite(monkeypatch) -> None:
+    stop_event = threading.Event()
+    seen_durations: list[float | None] = []
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        stop_event.set()
+        return Response()
+
+    def pause_provider(duration: float | None) -> str:
+        seen_durations.append(duration)
+        return "Paused indefinitely."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/stop"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        pause_provider=pause_provider,
+    )
+
+    # No argument -> None -> indefinite pause. /stop is an alias of /pause.
+    assert seen_durations == [None]
+
+
+def test_pause_command_requires_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    provider_called = False
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def pause_provider(_duration: float | None) -> str:
+        nonlocal provider_called
+        provider_called = True
+        return "Privacy mode on."
+
+    monkeypatch.setattr(
+        "lib.telegram.commands.requests.get", _single_update("/pause", user_id=999)
+    )
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        pause_provider=pause_provider,
+    )
+
+    assert sent_messages == ["Unauthorized."]
+    assert provider_called is False
+
+
+def test_resume_command_calls_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    provider_called = False
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def resume_provider() -> str:
+        nonlocal provider_called
+        provider_called = True
+        return "Resumed — cameras are live again."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/play"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        resume_provider=resume_provider,
+    )
+
+    assert provider_called is True
+    assert sent_messages == ["Resumed — cameras are live again."]

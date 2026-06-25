@@ -28,6 +28,7 @@ STATUS_STYLE = {
     "connected": ("●", "green"),
     "reconnecting": ("○", "red"),
     "stopped": ("■", "grey50"),
+    "paused": ("⏸", "magenta"),
 }
 
 # How long a "connected" camera may go without a decoded frame before the cell

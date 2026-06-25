@@ -9,6 +9,7 @@ from threading import Event
 
 import requests
 
+from lib.control import parse_duration
 from lib.dashboard import STALE_FRAME_SECONDS
 from lib.objects import ObjectRegistry
 from lib.stats import CameraStats
@@ -27,9 +28,29 @@ StatusProvider = Callable[[], str]
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/status": "Show camera and detection status",
     "/snapshot": "Capture a snapshot from every camera",
+    "/pause": "Privacy mode: stop the cameras (optional duration, e.g. /pause 10m)",
+    "/stop": "Privacy mode: stop the cameras (alias of /pause)",
+    "/play": "Resume the cameras after a pause",
+    "/resume": "Resume the cameras after a pause (alias of /play)",
     "/discover": "Scan the local network for cameras",
     "/userinfo": "Show your Telegram user ID",
 }
+
+# Commands that turn privacy mode ON; the trailing text is parsed as a duration.
+PAUSE_COMMANDS = ("/pause", "/stop")
+# Commands that turn privacy mode OFF.
+RESUME_COMMANDS = ("/play", "/resume")
+
+
+def command_argument(text: str) -> str:
+    """Return everything after the leading ``/command`` token, stripped.
+
+    ``parse_command`` only yields the bare command; pause needs its duration
+    argument ("/pause 10m" -> "10m"). An empty string means no argument was
+    given (an indefinite pause).
+    """
+    parts = text.strip().split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -206,6 +227,8 @@ def run_command_bot(
     poll_timeout_seconds: int = 30,
     discover_provider: Callable[[], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
+    pause_provider: Callable[[float | None], str] | None = None,
+    resume_provider: Callable[[], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -220,6 +243,10 @@ def run_command_bot(
         for command, present in (
             ("/status", status_provider is not None),
             ("/snapshot", snapshot_provider is not None),
+            ("/pause", pause_provider is not None),
+            ("/stop", pause_provider is not None),
+            ("/play", resume_provider is not None),
+            ("/resume", resume_provider is not None),
             ("/discover", discover_provider is not None),
             ("/userinfo", True),
         )
@@ -322,6 +349,28 @@ def run_command_bot(
                     text = "Unauthorized."
                 else:
                     text = status_provider()
+            elif command in PAUSE_COMMANDS:
+                # /pause [duration] / /stop [duration]: enter privacy mode. The
+                # argument is a casual duration ("10m", "1 hour"); absent/garbage
+                # parses to None, i.e. an indefinite pause.
+                if str(user_id) not in allowed or pause_provider is None:
+                    text = "Unauthorized."
+                else:
+                    duration = parse_duration(command_argument(message.get("text", "")))
+                    try:
+                        text = pause_provider(duration)
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Pause failed")
+                        text = f"Pause failed: {exc}"
+            elif command in RESUME_COMMANDS:
+                if str(user_id) not in allowed or resume_provider is None:
+                    text = "Unauthorized."
+                else:
+                    try:
+                        text = resume_provider()
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Resume failed")
+                        text = f"Resume failed: {exc}"
             else:
                 continue
 
