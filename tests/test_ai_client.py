@@ -182,6 +182,25 @@ def test_post_json_does_not_retry_4xx() -> None:
     assert calls["n"] == 1  # a 4xx is not retried
 
 
+def test_post_json_retries_transient_429() -> None:
+    # 429 (rate limit) is a 4xx but transient — it must be retried, not fast-failed.
+    calls = {"n": 0}
+
+    class RateLimitedSession:
+        def post(self, url, json, timeout):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return FakeResponse({}, ok=False, status=429)
+            return FakeResponse({"message": {"content": "ok"}})
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=RateLimitedSession(), max_retries=2, retry_backoff_seconds=0)
+    assert client.chat("m", []) == "ok"
+    assert calls["n"] == 2  # one 429, one success
+
+
 def test_post_json_raises_after_exhausting_retries() -> None:
     class DeadSession:
         def post(self, url, json, timeout):
