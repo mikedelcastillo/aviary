@@ -38,15 +38,22 @@ def downscale_jpeg(image_bytes: bytes, max_dim: int = 1280, quality: int = 80) -
 IR_SATURATION_THRESHOLD = 16.0
 
 
-def is_ir_frame(image_bytes: bytes, threshold: float = IR_SATURATION_THRESHOLD) -> bool:
-    """True if the frame looks like night/IR mode (effectively grayscale).
+def is_ir_array(frame, threshold: float = IR_SATURATION_THRESHOLD) -> bool:
+    """True if a decoded BGR frame looks like night/IR mode (near-grayscale).
 
     Tapo cameras drop to monochrome IR after dark; the birds can't be told apart
-    then, so the server gates colour-dependent work (auto-search) on this. Returns
-    False if the frame can't be decoded (don't assume IR on a bad read).
+    then, so the server gates colour-dependent work (auto-search) on this.
+    Operates on the array the camera loop already has — no JPEG decode — so IR is
+    computed once per frame and cached in :class:`lib.ir.IRState`.
     """
-    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-    if array is None:
+    if frame is None:
         return False
-    saturation = cv2.cvtColor(array, cv2.COLOR_BGR2HSV)[:, :, 1]
+    saturation = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[:, :, 1]
     return float(saturation.mean()) < threshold
+
+
+def is_ir_frame(image_bytes: bytes, threshold: float = IR_SATURATION_THRESHOLD) -> bool:
+    """As :func:`is_ir_array` but from JPEG bytes (decodes first). False on a bad
+    read — don't assume IR on a frame we couldn't decode."""
+    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    return is_ir_array(array, threshold)

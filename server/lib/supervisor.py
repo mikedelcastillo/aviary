@@ -35,6 +35,7 @@ from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import monitor_camera
 from lib.config import AppConfig, CameraConfig
 from lib.control import RuntimeControl
+from lib.ir import IRState
 from lib.detector import ObjectDetector
 from lib.discovery import (
     DiscoveryProgress,
@@ -112,6 +113,7 @@ class CameraSupervisor:
         stop_event: threading.Event,
         progress: DiscoveryProgress | None = None,
         control: RuntimeControl | None = None,
+        ir_state: IRState | None = None,
     ) -> None:
         self._app_config = app_config
         self._detector = detector
@@ -121,6 +123,7 @@ class CameraSupervisor:
         self._stats = stats
         self._stats_lock = stats_lock
         self._stop_event = stop_event
+        self._ir_state = ir_state
         # Shared privacy/pause state. Passed to every monitor thread so a pause
         # stops all cameras consuming their streams at once.
         self._control = control
@@ -173,6 +176,7 @@ class CameraSupervisor:
                     camera_stats,
                     self._stop_event,
                     self._control,
+                    self._ir_state,
                 ),
                 name=f"camera-{host}",
                 daemon=True,

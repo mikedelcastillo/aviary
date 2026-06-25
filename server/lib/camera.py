@@ -14,6 +14,8 @@ from lib.config import CameraConfig
 from lib.control import RuntimeControl
 from lib.detector import ObjectDetector
 from lib.discovery import redact_rtsp_url
+from lib.imaging import is_ir_array
+from lib.ir import IRState
 from lib.objects import frame_size_from_shape
 from lib.stats import CameraStats
 
@@ -95,6 +97,7 @@ def monitor_camera(
     stats: CameraStats,
     stop_event: threading.Event,
     control: RuntimeControl | None = None,
+    ir_state: IRState | None = None,
 ) -> None:
     # Log the exact URL (password masked) so a camera stuck on "connecting" can
     # be diagnosed: if this line appears but "Stream opened" never follows, the
@@ -169,6 +172,10 @@ def monitor_camera(
 
                 detections = detector.predict(frame)
                 frame_size = frame_size_from_shape(frame.shape)
+                # Stamp the camera's IR/night flag from the frame we already
+                # decoded, so the rest of the server reads it cached.
+                if ir_state is not None:
+                    ir_state.update(camera.name, is_ir_array(frame))
                 # Record after inference returns, so the cell's FPS reflects true
                 # capture+YOLO throughput, not the raw stream rate.
                 stats.record_inference(

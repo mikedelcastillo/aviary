@@ -38,7 +38,7 @@ from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder
-from lib.imaging import is_ir_frame
+from lib.ir import IRState
 from lib.labels import pretty_labels
 from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
@@ -419,6 +419,9 @@ def main() -> None:
     # readers. Every read snapshots under `stats_lock` so a camera appearing
     # mid-render can never raise "dict changed size during iteration".
     registry = ObjectRegistry()
+    # Per-camera IR/night state, stamped by each camera loop from the frame it
+    # already decoded; /status, auto-find and the activity feed read it cheaply.
+    ir_state = IRState()
     stats: dict[str, CameraStats] = {}
     stats_lock = threading.Lock()
     # Shared live state of the current discovery sweep. The supervisor's workers
@@ -443,6 +446,7 @@ def main() -> None:
         stop_event,
         progress=discovery_progress,
         control=control,
+        ir_state=ir_state,
     )
 
     # /userinfo stays available, /status exposes the runtime data, and /discover
@@ -458,7 +462,7 @@ def main() -> None:
             app_config.telegram.bbox_movement_alert_ratio,
             camera_display=namer.display,
             known_birds=sorted(pronouns),
-            ir_cameras=current_ir_cameras(),
+            ir_cameras=ir_state.ir_cameras(),
         )
         # Lead with the privacy banner when paused so /status makes it obvious
         # why every camera reads "paused" and nothing is being recorded.
@@ -504,21 +508,6 @@ def main() -> None:
             camera_stats = stats.get(camera_name)
         return latest_frame_jpeg(camera_stats) if camera_stats is not None else None
 
-    def current_ir_cameras() -> set[str]:
-        """Camera ids whose latest frame is in night/IR (grayscale) mode."""
-        with stats_lock:
-            names = list(stats.keys())
-        ir: set[str] = set()
-        for name in names:
-            jpeg = grab_frame(name)
-            if jpeg and is_ir_frame(jpeg):
-                ir.add(name)
-        return ir
-
-    def all_cameras_ir() -> bool:
-        with stats_lock:
-            total = len(stats)
-        return total > 0 and len(current_ir_cameras()) >= total
 
     # Roster groups (species -> members) for /find expansion, and the reverse
     # (member -> species) to annotate VLM detection context ("Pizza (a cockatiel)").
@@ -649,8 +638,8 @@ def main() -> None:
             control,
             notifier,
             stop_event,
-            ir_cameras=current_ir_cameras,
-            camera_count=lambda: len(stats),
+            ir_cameras=ir_state.ir_cameras,
+            camera_count=lambda: len(ir_state.known()),
             known_birds=sorted(pronouns),
         )
         if (finder is not None and notifier is not None)
@@ -772,7 +761,7 @@ def main() -> None:
             interval_seconds=app_config.memory_interval_minutes * 60.0,
             camera_display=namer.display,
             pronoun_note=pronoun_note,
-            night_mode=all_cameras_ir,
+            night_mode=ir_state.all_ir,
         ).start()
         LOGGER.info(
             "Caretaker reports every ~%.0f min; raw photo alerts %s",
