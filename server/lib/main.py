@@ -25,6 +25,12 @@ from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
 from lib.config import AppConfig, _as_user_ids, build_config
+from lib.console import (
+    ConsoleDispatcher,
+    ConsoleLogToggle,
+    ConsoleNotifier,
+    run_terminal_chat,
+)
 from lib.control import RuntimeControl, parse_duration
 from lib.daycare import DaycareNarrator
 from lib.dashboard import Dashboard
@@ -39,6 +45,7 @@ from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_report
 from lib.telegram.commands import build_status_message, run_command_bot
+from lib.terminal_logging import NativeStderrRedirect
 from lib.telegram.notifier import TelegramNotifier
 
 
@@ -52,6 +59,11 @@ VLM_DESCRIBE_TIMEOUT_SECONDS = 60.0
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--log-level", default=os.getenv("AVIARY_LOG_LEVEL", "INFO"))
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="interactive terminal chat instead of the live dashboard",
+    )
     return parser.parse_args()
 
 
@@ -181,6 +193,109 @@ def build_nl_router(
         finder.findable_labels,
         dispatch,
         notifier.send_text,
+    )
+
+
+def make_console_dispatcher(
+    app_config: AppConfig,
+    *,
+    control: RuntimeControl,
+    ollama_client: OllamaClient | None,
+    detector: ObjectDetector,
+    registry: ObjectRegistry,
+    namer,
+    member_species: dict[str, str],
+    species_members: dict[str, tuple[str, ...]],
+    grab_frame,
+    describe_frame,
+    ptz_manager,
+    supervisor: CameraSupervisor,
+    status_provider,
+    discover_provider,
+    snapshot_text,
+    stop_event: threading.Event,
+) -> ConsoleDispatcher:
+    """Build the terminal-chat dispatcher: same providers, replies to the console.
+
+    A :class:`ConsoleNotifier` stands in for Telegram so the finder and NL router
+    print to the terminal instead. Photos are never printed — find runs
+    text-only (with the VLM description) here; images stay on Telegram.
+    """
+
+    def emit(text: str) -> None:
+        print(f"\n{text}\n", flush=True)
+
+    console_notifier = ConsoleNotifier(emit)
+
+    console_finder = BirdFinder(
+        registry,
+        detector.known_labels,
+        notify=console_notifier.send_text,
+        grab_frame=grab_frame,
+        send_album=None,  # no images in the terminal
+        describe_frame=describe_frame if ollama_client is not None else None,
+        make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
+        camera_display=namer.display,
+        species_members=species_members,
+    )
+
+    def console_find(chat_id: int, target: str) -> str:
+        if target.strip().lower() in console_finder.STOP_WORDS:
+            return console_finder.stop_current()
+        if control.is_paused():
+            return f"{control.status()} Can't search while paused — /play first."
+        return console_finder.start(chat_id, target, stop_event)
+
+    activity_responder = (
+        ActivityResponder(
+            app_config.collect.directory,
+            ollama_client,
+            app_config.ollama.llm_model,
+            app_config.ollama.vlm_model,
+            detector.known_labels,
+            notify=console_notifier.send_text,
+            send_album=None,
+            find=lambda cid, arg: emit(console_find(cid, arg)),
+            member_species=member_species,
+            camera_display=namer.display,
+        )
+        if ollama_client is not None
+        else None
+    )
+
+    router = build_nl_router(
+        app_config,
+        console_notifier,
+        console_finder,
+        control,
+        stop_event,
+        ollama_client,
+        find_provider=console_find,
+        discover_provider=discover_provider,
+        status_provider=status_provider,
+        snapshot_provider=snapshot_text,
+        activity_responder=activity_responder,
+        memory=ConversationMemory() if ollama_client is not None else None,
+    )
+
+    def nl_handle(chat_id: int, text: str) -> None:
+        if router is not None:
+            router.handle_async(chat_id, text)
+        else:
+            emit("(AI is off — set OLLAMA_ENABLED=1; meanwhile use /commands.)")
+
+    return ConsoleDispatcher(
+        emit=emit,
+        status_text=status_provider,
+        discover_text=discover_provider,
+        snapshot_text=snapshot_text,
+        pause=control.pause,
+        resume=control.resume,
+        find=console_find,
+        nl_handle=nl_handle,
+        parse_duration=parse_duration,
+        toggle_logs=ConsoleLogToggle().toggle,
+        on_quit=stop_event.set,
     )
 
 
@@ -522,16 +637,34 @@ def main() -> None:
             "on" if app_config.raw_photo_alerts else "off",
         )
 
-    dashboard = Dashboard(
-        stats,
-        registry,
-        log_level=getattr(logging, args.log_level.upper(), logging.INFO),
-        logfile=os.getenv("AVIARY_LOG_FILE", "aviary.log"),
-        movement_alert_ratio=app_config.telegram.bbox_movement_alert_ratio,
-        stats_lock=stats_lock,
-        discovery_progress=discovery_progress,
-    )
-    dashboard.start()
+    # Presentation: the live dashboard by default, or the interactive terminal
+    # chat with --chat. In chat mode we keep the terminal clean — Python logs go
+    # to the logfile and native ffmpeg/h264 stderr is redirected there too (toggle
+    # live logs from inside the chat with /logs).
+    dashboard = None
+    stderr_redirect = None
+    if args.chat:
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
+        file_handler = logging.FileHandler(os.getenv("AVIARY_LOG_FILE", "aviary.log"))
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        root.addHandler(file_handler)
+        stderr_redirect = NativeStderrRedirect(os.getenv("AVIARY_LOG_FILE", "aviary.log"))
+        stderr_redirect.start()
+    else:
+        dashboard = Dashboard(
+            stats,
+            registry,
+            log_level=getattr(logging, args.log_level.upper(), logging.INFO),
+            logfile=os.getenv("AVIARY_LOG_FILE", "aviary.log"),
+            movement_alert_ratio=app_config.telegram.bbox_movement_alert_ratio,
+            stats_lock=stats_lock,
+            discovery_progress=discovery_progress,
+        )
+        dashboard.start()
 
     # Initial sweep AFTER the dashboard is live so its discovery grid animates
     # the scan. (The heavy YOLO load already happened above and scrolled
@@ -561,10 +694,42 @@ def main() -> None:
             LOGGER.exception("Server-started broadcast failed")
 
     try:
-        # The supervisor owns the daemon monitor threads (each self-reconnects),
-        # so the main thread just parks until a signal sets stop_event.
-        while not stop_event.is_set():
-            stop_event.wait(1.0)
+        if args.chat:
+            def snapshot_text(_chat_id: int) -> str:
+                if control.is_paused():
+                    return f"{control.status()} No snapshot while paused."
+                saved = capture_snapshots(stats, stats_lock, snapshot_collect_dir)
+                if not saved:
+                    return "No camera frames yet; /discover once cameras are online."
+                return (
+                    f"Captured {len(saved)} snapshot(s) → {snapshot_collect_dir} "
+                    "(photos are saved + sent to Telegram, not shown here)."
+                )
+
+            console_dispatcher = make_console_dispatcher(
+                app_config,
+                control=control,
+                ollama_client=ollama_client,
+                detector=detector,
+                registry=registry,
+                namer=namer,
+                member_species=member_species,
+                species_members=species_members,
+                grab_frame=grab_frame,
+                describe_frame=describe_frame,
+                ptz_manager=ptz_manager,
+                supervisor=supervisor,
+                status_provider=status_provider,
+                discover_provider=discover_provider,
+                snapshot_text=snapshot_text,
+                stop_event=stop_event,
+            )
+            run_terminal_chat(console_dispatcher, stop_event)
+        else:
+            # The supervisor owns the daemon monitor threads (each self-reconnects),
+            # so the main thread just parks until a signal sets stop_event.
+            while not stop_event.is_set():
+                stop_event.wait(1.0)
     finally:
         # Tell the user we're going down BEFORE the slow joins, while the
         # notifier still works. Only on a graceful stop (SIGINT/SIGTERM set
@@ -574,7 +739,10 @@ def main() -> None:
                 notifier.broadcast_text("🔴 Aviary server stopping — cameras going offline.")
             except Exception:
                 LOGGER.exception("Server-stopping broadcast failed")
-        dashboard.stop()
+        if dashboard is not None:
+            dashboard.stop()
+        if stderr_redirect is not None:
+            stderr_redirect.stop()
         supervisor.join()
         dispatcher.shutdown()
 
