@@ -137,3 +137,38 @@ def test_generate_allows_configured_concurrency() -> None:
     for t in threads:
         t.join()
     assert state["max"] <= 2
+
+
+def test_post_json_retries_transient_5xx_then_succeeds() -> None:
+    calls = {"n": 0}
+
+    class FlakySession:
+        def post(self, url, json, timeout):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return FakeResponse({}, ok=False, status=502)  # Olla backend busy
+            return FakeResponse({"message": {"content": "ok"}})
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=FlakySession(), max_retries=2, retry_backoff_seconds=0)
+    assert client.chat("m", []) == "ok"
+    assert calls["n"] == 2  # one 502, one success
+
+
+def test_post_json_raises_after_exhausting_retries() -> None:
+    class DeadSession:
+        def post(self, url, json, timeout):
+            return FakeResponse({}, ok=False, status=502)
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=DeadSession(), max_retries=1, retry_backoff_seconds=0)
+    try:
+        client.generate("m", "p", images=["B"])
+    except requests.HTTPError:
+        pass
+    else:
+        raise AssertionError("expected HTTPError after retries exhausted")

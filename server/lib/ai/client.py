@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any
 
 import requests
@@ -30,10 +31,17 @@ class OllamaClient:
         timeout_seconds: float = 120.0,
         session: requests.Session | None = None,
         vision_concurrency: int = 1,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 1.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self._session = session or requests.Session()
+        # Transient 5xx / connection errors are retried — important behind an Olla
+        # load balancer, where a single backend can be briefly busy (502) while
+        # another is healthy; a retry routes around it.
+        self._max_retries = max(0, max_retries)
+        self._retry_backoff = retry_backoff_seconds
         # Vision calls are the expensive ones, and many fire at once (naming all
         # cameras, captioning every memory frame, a /find description). A bounded
         # semaphore turns generate() into a queue so the GPU isn't swamped — the
@@ -71,13 +79,7 @@ class OllamaClient:
             payload["think"] = think
         if temperature is not None:
             payload.setdefault("options", {})["temperature"] = temperature
-        response = self._session.post(
-            f"{self.base_url}/api/chat",
-            json=payload,
-            timeout=timeout_seconds or self.timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
+        data = self._post_json("/api/chat", payload, timeout_seconds or self.timeout_seconds)
         return (data.get("message") or {}).get("content", "") or ""
 
     def generate(
@@ -104,10 +106,29 @@ class OllamaClient:
         # Queue behind the vision semaphore so concurrent callers don't pile onto
         # the GPU at once; the timeout only starts once we hold a slot.
         with self._vision_slots:
-            response = self._session.post(
-                f"{self.base_url}/api/generate",
-                json=payload,
-                timeout=timeout_seconds or self.timeout_seconds,
-            )
-            response.raise_for_status()
-            return response.json().get("response", "") or ""
+            data = self._post_json("/api/generate", payload, timeout_seconds or self.timeout_seconds)
+            return data.get("response", "") or ""
+
+    def _post_json(self, path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+        """POST JSON and return the parsed body, retrying transient failures.
+
+        A 5xx (e.g. an Olla backend returning 502 while busy) or a connection
+        error is retried up to ``max_retries`` times with a short backoff; the
+        last error is raised if every attempt fails.
+        """
+        url = f"{self.base_url}{path}"
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self._session.post(url, json=payload, timeout=timeout)
+                response.raise_for_status()
+                return response.json()
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt < self._max_retries:
+                    LOGGER.warning(
+                        "Ollama %s failed (%s); retry %d/%d",
+                        path, exc, attempt + 1, self._max_retries,
+                    )
+                    time.sleep(self._retry_backoff)
+        raise last_exc  # type: ignore[misc]
