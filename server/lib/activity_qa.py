@@ -15,10 +15,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from lib.activity import summarise_activity
+from lib.activity import answer_activity_question, summarise_activity
 from lib.clock import now_ph
 from lib.find import pretty_phrase
 from lib.journal import humanize_ago, load_recent
+from lib.labels import pretty
 from lib.roster import expand_targets
 
 
@@ -30,6 +31,21 @@ CAPTION_LIMIT = 1024  # Telegram album/photo caption cap.
 
 # Words that make an empty result trigger a live search instead of "haven't seen".
 _LIVE_WORDS = ("now", "right now", "currently", "doing", "up to", "where")
+
+# A message starting with one of these (or containing "?") is treated as a
+# specific question to answer, not a request for a generic activity summary.
+_QUESTION_WORDS = (
+    "did", "do", "does", "is", "are", "was", "were", "when", "what", "where",
+    "who", "how", "has", "have", "had", "can", "could", "will", "should", "any",
+)
+
+
+def _is_question(text: str) -> bool:
+    stripped = text.strip().lstrip("/").lower()
+    if "?" in stripped:
+        return True
+    first = stripped.split()[0] if stripped.split() else ""
+    return first in _QUESTION_WORDS
 
 
 def parse_activity_arg(argument: str) -> tuple[str, bool]:
@@ -64,19 +80,44 @@ class ActivityResponder:
         self._pronoun_note = pronoun_note
         self._now = now
 
-    def _window(self, text: str, argument: str, now: datetime) -> tuple[datetime, str]:
-        if "today" in text.lower() or "today" in argument.lower():
-            return now.replace(hour=0, minute=0, second=0, microsecond=0), "today"
-        return now - timedelta(hours=1), "in the last hour"
+    def _window(self, text: str, argument: str, now: datetime, question: bool) -> tuple[datetime, datetime, str]:
+        """Resolve the lookback window ``(since, until, phrase)``, honouring
+        time-of-day granularity.
+
+        Explicit phrasing wins (morning/afternoon/evening/today/last hour).
+        Otherwise a question defaults to the whole day ("did pizza eat?" means
+        today), while a bare /activity defaults to the last hour. Windows are
+        clamped so they never extend past ``now``.
+        """
+        t = f"{text} {argument}".lower()
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def clamp(end: datetime) -> datetime:
+            return min(end, now)
+
+        if "morning" in t:
+            return midnight.replace(hour=5), clamp(midnight.replace(hour=12)), "this morning"
+        if "afternoon" in t:
+            return midnight.replace(hour=12), clamp(midnight.replace(hour=17)), "this afternoon"
+        if "evening" in t or "tonight" in t or "night" in t:
+            return midnight.replace(hour=17), now, "this evening"
+        if "today" in t or "all day" in t or "whole day" in t or "so far" in t:
+            return midnight, now, "today"
+        if "hour" in t or "recently" in t or "just now" in t or "lately" in t:
+            return now - timedelta(hours=1), now, "in the last hour"
+        if question:
+            return midnight, now, "today"
+        return now - timedelta(hours=1), now, "in the last hour"
 
     def respond(self, chat_id: int, text: str, argument: str) -> None:
         bird_text, _ = parse_activity_arg(argument)
         now = self._now()
-        since, window_phrase = self._window(text, argument, now)
+        question = _is_question(text)
+        since, until, window_phrase = self._window(text, argument, now, question)
         targets = expand_targets(bird_text, self._known_labels()) if bird_text.strip() else None
 
         entries = load_recent(
-            self._memories_dir, since, now, set(targets) if targets else None
+            self._memories_dir, since, until, set(targets) if targets else None
         )
         if not entries:
             who = pretty_phrase(bird_text) if bird_text.strip() else "the birds"
@@ -88,18 +129,29 @@ class ActivityResponder:
             self._notify(chat_id, f"I haven't logged any activity for {who} {window_phrase}.")
             return
 
-        # Each note carries when it happened, relatively ("2 hours ago"), so the
-        # summary's bullets can say when.
-        notes = [f"{humanize_ago(entry.time, now)} — {entry.note}" for entry in entries]
-        subject = pretty_phrase(bird_text) if bird_text.strip() else ""
+        # Each note carries when it happened (relative, "2 hours ago") and which
+        # birds were seen — so the model can answer "together?" / "when?" / "did X
+        # do Y?" and weave timing into a summary.
+        notes = [
+            f"({humanize_ago(entry.time, now)}) "
+            f"[{', '.join(pretty(b) for b in entry.birds) if entry.birds else 'quiet'}]: {entry.note}"
+            for entry in entries
+        ]
         try:
-            summary = summarise_activity(
-                self._client, self._llm_model, notes, subject,
-                self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
-            )
+            if question:
+                summary = answer_activity_question(
+                    self._client, self._llm_model, text, notes,
+                    self._pronoun_note, window_phrase, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+                )
+            else:
+                subject = pretty_phrase(bird_text) if bird_text.strip() else ""
+                summary = summarise_activity(
+                    self._client, self._llm_model, notes, subject,
+                    self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+                )
         except Exception:
-            LOGGER.exception("Activity summary failed")
-            summary = notes[-1]
+            LOGGER.exception("Activity response failed")
+            summary = ""
         summary = summary or notes[-1]
 
         # The most recent distinct photos (newest entries first).

@@ -218,6 +218,52 @@ _ACTIVITY_SUMMARY_PROMPT = (
 )
 
 
+_ACTIVITY_QA_PROMPT = (
+    "You are the warm caretaker of a home aviary, answering a question about the "
+    "pet birds using ONLY the timestamped memory notes provided. Each note line is "
+    "'(when) [birds seen]: what they were doing'. Answer the SPECIFIC question "
+    "directly in 1-4 sentences. Be concrete about WHEN (e.g. 'around 2pm', 'this "
+    "morning', 'about an hour ago') and WHICH birds. For a question about two or "
+    "more birds being TOGETHER, only say yes if a note lists them together at the "
+    "same time, and say when. For a yes/no question, start with a clear yes or no. "
+    "If the notes don't show what's asked, say you didn't catch it / can't tell "
+    "from today's memory — never guess. Use each bird's correct pronoun (per the "
+    "pronouns given); refer to birds by NAME, never the species. No preamble."
+)
+
+
+def answer_activity_question(
+    client,
+    model: str,
+    question: str,
+    notes: list[str],
+    pronoun_note: str = "",
+    window_phrase: str = "",
+    *,
+    timeout_seconds: float | None = None,
+) -> str:
+    """Answer a free-form day-lookback question grounded in the memory notes."""
+    if not notes:
+        return ""
+    body = "\n".join(f"- {line}" for line in notes)
+    parts = []
+    if pronoun_note:
+        parts.append(f"Bird pronouns (use these): {pronoun_note}")
+    parts.append(f"Question: {question.strip()}")
+    header = f"Memory notes from {window_phrase}" if window_phrase else "Memory notes"
+    parts.append(f"{header}:\n{body}")
+    reply = client.chat(
+        model,
+        [
+            {"role": "system", "content": _ACTIVITY_QA_PROMPT},
+            {"role": "user", "content": "\n\n".join(parts)},
+        ],
+        think=True,
+        timeout_seconds=timeout_seconds,
+    )
+    return strip_thinking(reply)
+
+
 def summarise_activity(
     client, model: str, notes: list[str], subject: str = "", pronoun_note: str = "", *, timeout_seconds: float | None = None
 ) -> str:

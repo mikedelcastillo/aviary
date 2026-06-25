@@ -9,21 +9,28 @@ KNOWN = ["bambi", "draft", "matcha", "percy", "pizza"]
 
 
 class FakeClient:
+    def __init__(self) -> None:
+        self.system = ""
+        self.user = ""
+
     def chat(self, model, messages, **kwargs):
+        self.system = messages[0]["content"]
+        self.user = messages[1]["content"]
         return "Percy preened on the perch while Matcha napped nearby."
 
 
-def _responder(memories_dir, notify, find=None, send_album=None, now=None):
+def _responder(memories_dir, notify, find=None, send_album=None, now=None, client=None):
     # Fix "now" so the window is deterministic.
     when = now or datetime(2026, 6, 25, 15, 0)
     return ActivityResponder(
         memories_dir,
-        FakeClient(),
+        client or FakeClient(),
         "qwen3:4b",
         lambda: KNOWN,
         notify=notify,
         send_album=send_album,
         find=find,
+        pronoun_note="Percy and Bambi are female (use she/her for them).",
         now=lambda: when,
     )
 
@@ -75,3 +82,42 @@ def test_respond_says_unlogged_when_not_live(tmp_path) -> None:
         7, "/activity matcha", "matcha"
     )
     assert sent and "haven't logged" in sent[0].lower()
+
+
+def test_question_uses_qa_path_with_birds_and_question(tmp_path) -> None:
+    # Whole-day co-occurrence question -> QA prompt, notes carry each entry's birds.
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 9, 0), ["jynx", "matcha"], "Together on the perch."))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 13, 0), ["pizza"], "Pizza alone."))
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "did jynx and matcha spend time together today?", "jynx and matcha"
+    )
+    # The QA system prompt (not the bullet-summary one) was used.
+    assert "answering a question" in client.system.lower()
+    # The user payload includes the question and the per-entry bird list.
+    assert "spend time together" in client.user
+    assert "Jynx, Matcha" in client.user
+
+
+def test_question_defaults_to_whole_day_window(tmp_path) -> None:
+    # "did pizza eat" (no "today") still looks at the whole day, not just last hour.
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 8, 30), ["pizza"], "Pizza at the food bowl."))
+    client = FakeClient()
+    sent: list = []
+    _responder(tmp_path, lambda c, t: sent.append(t), client=client).respond(
+        7, "did pizza eat?", "pizza"
+    )
+    assert "food bowl" in client.user  # the 08:30 entry was in-window
+    assert "from today" in client.user
+
+
+def test_morning_window_excludes_afternoon(tmp_path) -> None:
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 8, 0), ["bambi"], "Morning bath."))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 0), ["bambi"], "Afternoon nap."))
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "what did bambi do this morning?", "bambi"
+    )
+    assert "Morning bath" in client.user
+    assert "Afternoon nap" not in client.user
+    assert "this morning" in client.user
