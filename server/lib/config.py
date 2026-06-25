@@ -69,6 +69,20 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class OllamaConfig:
+    # Points at the Ollama already running on the machine — this project never
+    # installs or manages Ollama, it only talks to it over HTTP. Two models: a
+    # language model for intent parsing + chat, and a vision model for captioning
+    # bird photos. Both default to models the user already has pulled.
+    enabled: bool
+    base_url: str = "http://localhost:11434"
+    llm_model: str = "qwen3:4b"
+    vlm_model: str = "qwen2.5vl:7b"
+    # Generous: vision passes over a photo can take tens of seconds on a busy GPU.
+    timeout_seconds: float = 120.0
+
+
+@dataclass(frozen=True)
 class CollectConfig:
     objects: frozenset[str]
     directory: Path = Path("./data/server/collect")
@@ -126,6 +140,9 @@ class AppConfig:
     filter: FilterConfig
     credentials: CameraCredentials
     discovery: DiscoveryConfig
+    # Defaulted (and last) so existing constructions that predate the AI features
+    # — and tests — don't have to pass it. ``build_config`` always sets it.
+    ollama: OllamaConfig = OllamaConfig(enabled=False)
 
 
 def _require_env(name: str) -> str:
@@ -194,6 +211,23 @@ def _model_image_size() -> int:
         raise ValueError(f"MODEL_IMAGE_SIZE must be an integer, got {raw!r}") from exc
 
 
+def _ollama_config() -> OllamaConfig:
+    """Build the Ollama client config from the environment.
+
+    Enabled by default (the whole point is to talk to the machine's existing
+    Ollama); set ``OLLAMA_ENABLED=0`` to turn the natural-language features off.
+    Blank model/url envs fall back to the dataclass defaults — the single source
+    of truth — so an empty value in .env behaves like "unset".
+    """
+    enabled = os.environ.get("OLLAMA_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+    base_url = os.environ.get("OLLAMA_BASE_URL", "").strip() or OllamaConfig.base_url
+    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "").strip() or OllamaConfig.llm_model
+    vlm_model = os.environ.get("OLLAMA_VLM_MODEL", "").strip() or OllamaConfig.vlm_model
+    return OllamaConfig(
+        enabled=enabled, base_url=base_url, llm_model=llm_model, vlm_model=vlm_model
+    )
+
+
 def build_config() -> AppConfig:
     model = ModelConfig(
         paths=_model_paths(),
@@ -223,4 +257,5 @@ def build_config() -> AppConfig:
         filter=object_filter,
         credentials=credentials,
         discovery=discovery,
+        ollama=_ollama_config(),
     )

@@ -12,10 +12,13 @@ from collections.abc import Callable
 
 from dotenv import load_dotenv
 
+from lib.ai.client import OllamaClient
+from lib.ai.intent import Intent
+from lib.ai.router import NaturalLanguageRouter
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.config import AppConfig, _as_user_ids, build_config
-from lib.control import RuntimeControl
+from lib.control import RuntimeControl, parse_duration
 from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
@@ -63,6 +66,7 @@ def start_command_thread(
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
     find_provider: Callable[[int, str], str] | None = None,
+    nl_provider: Callable[[int, str], None] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -74,12 +78,104 @@ def start_command_thread(
             "pause_provider": pause_provider,
             "resume_provider": resume_provider,
             "find_provider": find_provider,
+            "nl_provider": nl_provider,
         },
         name="telegram-commands",
         daemon=True,
     )
     thread.start()
     return thread
+
+
+# Persona for free-text chat that isn't a command. Feature 4 enriches this with
+# the activity log + vision Q&A; here it is a warm, brief fallback responder.
+CHAT_SYSTEM_PROMPT = (
+    "You are the friendly caretaker of a home aviary — pet birds including "
+    "percy, matcha and jynx (lovebirds), bambi (budgie), and draft and pizza "
+    "(cockatiels), watched by several cameras. Reply briefly and warmly. If "
+    "someone asks where a bird is right now, tell them you can look — they can "
+    "say \"find <bird>\". Don't invent specific things the birds did."
+)
+
+
+def build_nl_router(
+    app_config: AppConfig,
+    notifier,
+    finder,
+    control: RuntimeControl,
+    stop_event: threading.Event,
+    *,
+    find_provider,
+    discover_provider,
+    status_provider,
+    snapshot_provider,
+) -> NaturalLanguageRouter | None:
+    """Wire the natural-language router to the command providers, or None.
+
+    Returns None when the AI is disabled or there is no notifier to reply
+    through. The dispatch maps each classified intent onto the very same
+    providers the slash commands use, so behaviour (privacy refusals, acks) is
+    identical whether the user types ``/find percy`` or "where's percy?".
+    """
+    if not app_config.ollama.enabled or notifier is None or finder is None:
+        return None
+
+    client = OllamaClient(
+        app_config.ollama.base_url, timeout_seconds=app_config.ollama.timeout_seconds
+    )
+    if client.is_available():
+        LOGGER.info(
+            "Ollama reachable at %s (llm=%s)",
+            app_config.ollama.base_url,
+            app_config.ollama.llm_model,
+        )
+    else:
+        LOGGER.warning(
+            "Ollama not reachable at %s; natural-language replies will say so",
+            app_config.ollama.base_url,
+        )
+
+    def chat_reply(chat_id: int, text: str) -> None:
+        try:
+            reply = client.chat(
+                app_config.ollama.llm_model,
+                [
+                    {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                think=False,
+            )
+        except Exception:
+            LOGGER.exception("Chat reply failed")
+            reply = "🤖 My language brain (Ollama) is unreachable right now."
+        notifier.send_text(chat_id, reply.strip() or "🤔")
+
+    def dispatch(chat_id: int, intent: Intent, text: str) -> None:
+        action = intent.action
+        if action == "pause":
+            notifier.send_text(chat_id, control.pause(parse_duration(intent.argument)))
+        elif action == "resume":
+            notifier.send_text(chat_id, control.resume())
+        elif action == "find":
+            notifier.send_text(chat_id, find_provider(chat_id, intent.argument))
+        elif action == "discover":
+            notifier.send_text(chat_id, "Scanning the local network for cameras...")
+            notifier.send_text(chat_id, discover_provider())
+        elif action == "status":
+            notifier.send_text(chat_id, status_provider())
+        elif action == "snapshot":
+            notifier.send_text(chat_id, "Capturing snapshots from all cameras...")
+            notifier.send_text(chat_id, snapshot_provider(chat_id))
+        else:  # chat
+            chat_reply(chat_id, text)
+
+    return NaturalLanguageRouter(
+        client,
+        app_config.ollama.llm_model,
+        finder.findable_labels,
+        dispatch,
+        notifier.send_text,
+    )
 
 
 def main() -> None:
@@ -235,18 +331,36 @@ def main() -> None:
         assert finder is not None  # only wired when finder exists
         return finder.start(chat_id, target, stop_event)
 
+    def discover_provider() -> str:
+        return format_discovery_report(supervisor.discover_and_apply())
+
+    # Natural-language routing: free-text Telegram messages ("stop the cams",
+    # "where's percy?") are classified by Ollama and dispatched to the same
+    # providers as the slash commands. Wired only when a notifier exists (to
+    # reply) and Ollama is enabled; degrades gracefully if Ollama is unreachable.
+    nl_router = build_nl_router(
+        app_config,
+        notifier,
+        finder,
+        control,
+        stop_event,
+        find_provider=find_provider,
+        discover_provider=discover_provider,
+        status_provider=status_provider,
+        snapshot_provider=snapshot_provider,
+    )
+
     start_command_thread(
         app_config.telegram.bot_token,
         app_config.telegram.user_ids,
         stop_event,
         status_provider=status_provider,
-        discover_provider=lambda: format_discovery_report(
-            supervisor.discover_and_apply()
-        ),
+        discover_provider=discover_provider,
         snapshot_provider=snapshot_provider,
         pause_provider=control.pause,
         resume_provider=control.resume,
         find_provider=find_provider if finder is not None else None,
+        nl_provider=nl_router.handle_async if nl_router is not None else None,
     )
 
     dashboard = Dashboard(

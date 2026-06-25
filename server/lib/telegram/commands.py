@@ -231,6 +231,7 @@ def run_command_bot(
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
     find_provider: Callable[[int, str], str] | None = None,
+    nl_provider: Callable[[int, str], None] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -296,13 +297,23 @@ def run_command_bot(
             if not message:
                 continue
 
-            command = parse_command(message.get("text", ""))
-            if command is None:
-                continue
+            text_in = message.get("text", "")
+            command = parse_command(text_in)
 
             user_id = (message.get("from") or {}).get("id")
             chat_id = (message.get("chat") or {}).get("id")
             if chat_id is None or user_id is None:
+                continue
+
+            if command is None:
+                # Not a slash command: hand free text to the natural-language
+                # router (if enabled and the sender is allowed). It replies on
+                # its own background thread, so polling is never blocked.
+                if nl_provider is not None and text_in.strip() and str(user_id) in allowed:
+                    try:
+                        nl_provider(chat_id, text_in)
+                    except Exception:
+                        LOGGER.exception("Natural-language routing failed")
                 continue
 
             if command == "/discover":
