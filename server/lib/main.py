@@ -273,12 +273,32 @@ def main() -> None:
             "Initial discovery found no cameras; send /discover once they are online"
         )
 
+    # Announce we're live (with the camera count) so the user knows monitoring
+    # has resumed — e.g. after a restart. Best-effort; never block startup.
+    if notifier is not None:
+        camera_count = len(initial.added)
+        try:
+            notifier.broadcast_text(
+                f"🟢 Aviary server started — watching {camera_count} "
+                f"camera{'s' if camera_count != 1 else ''}."
+            )
+        except Exception:
+            LOGGER.exception("Server-started broadcast failed")
+
     try:
         # The supervisor owns the daemon monitor threads (each self-reconnects),
         # so the main thread just parks until a signal sets stop_event.
         while not stop_event.is_set():
             stop_event.wait(1.0)
     finally:
+        # Tell the user we're going down BEFORE the slow joins, while the
+        # notifier still works. Only on a graceful stop (SIGINT/SIGTERM set
+        # stop_event); a SIGKILL can't be announced. Best-effort.
+        if notifier is not None:
+            try:
+                notifier.broadcast_text("🔴 Aviary server stopping — cameras going offline.")
+            except Exception:
+                LOGGER.exception("Server-stopping broadcast failed")
         dashboard.stop()
         supervisor.join()
         dispatcher.shutdown()

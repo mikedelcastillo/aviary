@@ -117,6 +117,17 @@ class TelegramNotifier:
         # If no file_id was ever obtained, the loop above already attempted a
         # direct upload to every recipient, so there is nothing left to send.
 
+    def broadcast_text(self, text: str) -> None:
+        """Send a plain text message to EVERY configured recipient.
+
+        Used for lifecycle announcements (server started / stopping). Best-effort
+        and parallel across recipients; a per-recipient failure is logged and
+        swallowed so a shutdown broadcast can't hang the shutdown path.
+        """
+        if not self.bot_token or not self.user_ids:
+            return
+        self._broadcast(self.user_ids, lambda user_id: self._send_message(user_id, text))
+
     def send_text(self, chat_id: int | str, text: str) -> None:
         """Send a plain text message to a SINGLE chat (used by ``/find`` updates).
 

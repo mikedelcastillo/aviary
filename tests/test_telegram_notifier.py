@@ -103,6 +103,28 @@ def test_photo_uploaded_once_then_reused_by_file_id(monkeypatch, tmp_path) -> No
     assert "photo" not in uploads[0]["data"]
 
 
+def test_broadcast_text_sends_to_every_recipient(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A", "B"], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("🟢 started")
+
+    assert {call["json"]["chat_id"] for call in post.calls} == {"A", "B"}
+    assert all(call["json"]["text"] == "🟢 started" for call in post.calls)
+    assert all(call["url"].endswith("/sendMessage") for call in post.calls)
+
+
+def test_broadcast_text_without_recipients_sends_nothing(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", [], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("nobody to tell")
+
+    assert post.calls == []
+
+
 def test_no_photo_sends_text_to_every_recipient(monkeypatch) -> None:
     post = RecordingPost([FakeResponse(200, {"ok": True})])
     monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
