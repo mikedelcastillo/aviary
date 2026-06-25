@@ -46,6 +46,7 @@ class ActivityResponder:
         send_photo: Callable[[int, bytes, str | None], object] | None = None,
         find: Callable[[int, str], None] | None = None,
         member_species: dict[str, str] | None = None,
+        pronouns: dict[str, str] | None = None,
         camera_display: Callable[[str], str] = lambda name: name,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -58,6 +59,7 @@ class ActivityResponder:
         self._send_photo = send_photo
         self._find = find
         self._member_species = member_species or {}
+        self._pronouns = pronouns or {}
         self._camera_display = camera_display
         self._clock = clock
 
@@ -96,7 +98,7 @@ class ActivityResponder:
             try:
                 caption = caption_sighting(
                     self._client, self._vlm_model, sighting, self._member_species,
-                    timeout_seconds=CAPTION_TIMEOUT_SECONDS,
+                    self._pronouns, timeout_seconds=CAPTION_TIMEOUT_SECONDS,
                 )
             except Exception:
                 LOGGER.exception("QA caption failed")

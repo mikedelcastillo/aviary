@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lib.roster import DEFAULT_SPECIES_MEMBERS, expand_targets
+from lib.roster import DEFAULT_SPECIES_MEMBERS, expand_targets, load_sexes, pronoun_map
 
 
 # The live model's findable labels (what the server detects).
@@ -54,3 +54,13 @@ def test_unknown_target_resolves_empty() -> None:
 def test_default_species_members_cover_the_flock() -> None:
     assert DEFAULT_SPECIES_MEMBERS["cockatiel"] == ("draft", "pizza")
     assert "percy" in DEFAULT_SPECIES_MEMBERS["lovebird"]
+
+
+def test_pronoun_map_matches_known_sexes() -> None:
+    pronouns = pronoun_map(load_sexes())
+    assert pronouns["percy"] == "she"
+    assert pronouns["bambi"] == "she"
+    assert pronouns["matcha"] == "he"
+    assert pronouns["pizza"] == "he"
+    assert pronouns["jynx"] == "he"
+    assert pronouns["draft"] == "he"

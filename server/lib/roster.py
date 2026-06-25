@@ -28,6 +28,15 @@ DEFAULT_SPECIES_MEMBERS: dict[str, tuple[str, ...]] = {
     "budgie": ("bambi",),
 }
 
+# Bird sexes, so descriptions use the right pronoun. Loaded from roster.yaml's
+# ``sex`` field when present; this is the fallback for the current flock.
+DEFAULT_SEXES: dict[str, str] = {
+    "jynx": "male", "matcha": "male", "draft": "male", "pizza": "male",
+    "percy": "female", "bambi": "female",
+}
+
+_PRONOUNS = {"male": "he", "female": "she"}
+
 # Words that mean "every bird". "any"/"anyone" land here too: "find any bird"
 # resolves to all birds, and the search reports the FIRST one it sees.
 ALL_BIRD_WORDS = {
@@ -145,3 +154,30 @@ def expand_targets(
             seen.add(label)
             ordered.append(label)
     return ordered
+
+
+def load_sexes(paths: tuple[Path, ...] = _DEFAULT_ROSTER_PATHS) -> dict[str, str]:
+    """Map each individual bird to its sex from roster.yaml, or the fallback."""
+    for path in paths:
+        try:
+            if not path.exists():
+                continue
+            import yaml
+
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            sexes = {
+                str(entry["name"]).lower(): str(entry["sex"]).lower()
+                for entry in data.get("labels", [])
+                if entry.get("kind") == "individual" and entry.get("sex")
+            }
+            if sexes:
+                return sexes
+        except Exception:
+            LOGGER.exception("Failed to load sexes from %s; using fallback", path)
+    return DEFAULT_SEXES
+
+
+def pronoun_map(sexes: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a name -> "he"/"she" map (birds of unknown sex are omitted -> "they")."""
+    sexes = sexes if sexes is not None else DEFAULT_SEXES
+    return {name: _PRONOUNS[sex] for name, sex in sexes.items() if sex in _PRONOUNS}

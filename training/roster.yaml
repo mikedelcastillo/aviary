@@ -23,12 +23,14 @@
 
 labels:
   # ---- Individuals — living (both models) ----
-  - { name: draft,  kind: individual, species: cockatiel, models: [live, archive] }
-  - { name: pizza,  kind: individual, species: cockatiel, models: [live, archive] }
-  - { name: percy,  kind: individual, species: lovebird,  models: [live, archive] }
-  - { name: matcha, kind: individual, species: lovebird,  models: [live, archive] }
-  - { name: jynx,   kind: individual, species: lovebird,  models: [live, archive] }
-  - { name: bambi,  kind: individual, species: budgie,    models: [live, archive] }
+  # ``sex`` (male|female) is documentation for the server so descriptions use the
+  # right pronoun (he/she); see lib/roster.load_sexes.
+  - { name: draft,  kind: individual, species: cockatiel, models: [live, archive], sex: male }
+  - { name: pizza,  kind: individual, species: cockatiel, models: [live, archive], sex: male }
+  - { name: percy,  kind: individual, species: lovebird,  models: [live, archive], sex: female }
+  - { name: matcha, kind: individual, species: lovebird,  models: [live, archive], sex: male }
+  - { name: jynx,   kind: individual, species: lovebird,  models: [live, archive], sex: male }
+  - { name: bambi,  kind: individual, species: budgie,    models: [live, archive], sex: female }
 
   # ---- Individuals — archive only (deceased / historical) ----
   - { name: rust,   kind: individual, species: lovebird, models: [archive] }

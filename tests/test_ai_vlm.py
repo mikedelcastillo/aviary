@@ -75,6 +75,15 @@ def test_build_detection_context_when_empty() -> None:
     assert "no birds" in context.lower()
 
 
+def test_build_detection_context_includes_pronouns() -> None:
+    detections = [FakeDetection("pizza", (0, 0, 20, 20)), FakeDetection("percy", (180, 180, 200, 200))]
+    context = build_detection_context(
+        detections, 200, 200, {"pizza": "cockatiel"}, {"pizza": "he", "percy": "she"}
+    )
+    assert "Pizza (he, a cockatiel)" in context
+    assert "Percy (she)" in context
+
+
 def test_describe_scene_prepends_context() -> None:
     client = FakeClient("Percy is on the perch with Matcha.")
     out = describe_scene(client, "qwen2.5vl:7b", b"jpegbytes", context="Detected: Percy top-left.")

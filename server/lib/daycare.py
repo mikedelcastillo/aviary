@@ -51,6 +51,7 @@ class DaycareNarrator:
         *,
         interval_seconds: float,
         member_species: dict[str, str] | None = None,
+        pronouns: dict[str, str] | None = None,
         camera_display: Callable[[str], str] = lambda name: name,
         max_photos: int = 6,
         clock: Callable[[], float] = time.time,
@@ -63,6 +64,7 @@ class DaycareNarrator:
         self._stop_event = stop_event
         self._interval = interval_seconds
         self._member_species = member_species or {}
+        self._pronouns = pronouns or {}
         self._camera_display = camera_display
         self._max_photos = max_photos
         self._clock = clock
@@ -110,6 +112,7 @@ class DaycareNarrator:
                     self._vlm_model,
                     sighting,
                     self._member_species,
+                    self._pronouns,
                     timeout_seconds=CAPTION_TIMEOUT_SECONDS,
                 )
             except Exception:

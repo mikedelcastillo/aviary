@@ -60,15 +60,18 @@ def build_detection_context(
     width: int,
     height: int,
     species_of: dict[str, str] | None = None,
+    pronouns: dict[str, str] | None = None,
 ) -> str:
     """Turn YOLO detections into grounding text so the VLM knows what to look at.
 
     The birds are usually tiny in a wide camera frame, so left to itself the VLM
-    says "there are no birds". Telling it exactly which birds the detector found
-    and where (in thirds) makes it describe them accurately — and, empirically,
-    much faster. ``detections`` are anything with ``.label`` and ``.bbox_xyxy``.
+    says "there are no birds". Telling it exactly which birds the detector found,
+    where (in thirds), and each one's pronoun makes it describe them accurately
+    (and, empirically, much faster). ``detections`` are anything with ``.label``
+    and ``.bbox_xyxy``.
     """
     species_of = species_of or {}
+    pronouns = pronouns or {}
     if not detections:
         return (
             "This is a still from a pet-bird camera. The detector found no birds "
@@ -77,14 +80,21 @@ def build_detection_context(
     parts = []
     for detection in detections:
         x1, y1, x2, y2 = detection.bbox_xyxy
-        name = pretty(detection.label)
-        species = species_of.get(detection.label.lower())
-        who = f"{name} (a {species})" if species and species != detection.label.lower() else name
+        label = detection.label.lower()
+        bits = []
+        pronoun = pronouns.get(label)
+        if pronoun:
+            bits.append(pronoun)
+        species = species_of.get(label)
+        if species and species != label:
+            bits.append(f"a {species}")
+        who = f"{pretty(detection.label)} ({', '.join(bits)})" if bits else pretty(detection.label)
         parts.append(f"{who} in the {position_phrase((x1 + x2) / 2, (y1 + y2) / 2, width, height)}")
     return (
         "This is a still from a pet-bird camera. The camera detected these birds: "
         + "; ".join(parts)
-        + ". They may be small or far from the camera."
+        + ". They may be small or far from the camera. Use each bird's name and "
+        "the pronoun given (he/she)."
     )
 
 

@@ -40,7 +40,7 @@ from lib.find import BirdFinder
 from lib.labels import pretty_labels
 from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
-from lib.roster import load_species_members
+from lib.roster import load_sexes, load_species_members, pronoun_map
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_report
@@ -214,6 +214,7 @@ def make_console_dispatcher(
     namer,
     member_species: dict[str, str],
     species_members: dict[str, tuple[str, ...]],
+    pronouns: dict[str, str],
     grab_frame,
     describe_frame,
     ptz_manager,
@@ -265,6 +266,7 @@ def make_console_dispatcher(
             send_photo=None,
             find=lambda cid, arg: emit(console_find(cid, arg)),
             member_species=member_species,
+            pronouns=pronouns,
             camera_display=namer.display,
         )
         if ollama_client is not None
@@ -465,6 +467,8 @@ def main() -> None:
     member_species = {
         member: species for species, members in species_members.items() for member in members
     }
+    # name -> "he"/"she" so descriptions use the right pronoun.
+    pronouns = pronoun_map(load_sexes())
 
     def describe_frame(image: bytes) -> str | None:
         # Best-effort VLM scene description for /find hits. We FIRST run the
@@ -478,7 +482,7 @@ def main() -> None:
         if frame is not None:
             height, width = frame.shape[:2]
             context = build_detection_context(
-                detector.predict(frame), width, height, member_species
+                detector.predict(frame), width, height, member_species, pronouns
             )
         return describe_scene(
             ollama_client,
@@ -514,7 +518,7 @@ def main() -> None:
             return "That didn't look like an image I could read."
         detections = detector.predict(frame)
         height, width = frame.shape[:2]
-        context = build_detection_context(detections, width, height, member_species)
+        context = build_detection_context(detections, width, height, member_species, pronouns)
         try:
             description = describe_scene(
                 ollama_client,
@@ -582,6 +586,7 @@ def main() -> None:
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),
             member_species=member_species,
+            pronouns=pronouns,
             camera_display=namer.display,
         )
         if (ollama_client is not None and notifier is not None and finder is not None)
@@ -637,6 +642,7 @@ def main() -> None:
             stop_event,
             interval_seconds=app_config.daycare_digest_minutes * 60.0,
             member_species=member_species,
+            pronouns=pronouns,
             camera_display=namer.display,
         ).start()
         LOGGER.info(
@@ -723,6 +729,7 @@ def main() -> None:
                 namer=namer,
                 member_species=member_species,
                 species_members=species_members,
+                pronouns=pronouns,
                 grab_frame=grab_frame,
                 describe_frame=describe_frame,
                 ptz_manager=ptz_manager,

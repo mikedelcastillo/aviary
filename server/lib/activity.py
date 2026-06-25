@@ -144,7 +144,13 @@ def summarise_counts(sightings: list[Sighting]) -> str:
 
 
 def caption_sighting(
-    client, vlm_model: str, sighting: Sighting, member_species: dict[str, str] | None = None, *, timeout_seconds: float | None = None
+    client,
+    vlm_model: str,
+    sighting: Sighting,
+    member_species: dict[str, str] | None = None,
+    pronouns: dict[str, str] | None = None,
+    *,
+    timeout_seconds: float | None = None,
 ) -> str:
     """A short VLM caption for one sighting, grounded by its detection box."""
     context = build_detection_context(
@@ -152,6 +158,7 @@ def caption_sighting(
         sighting.width,
         sighting.height,
         member_species,
+        pronouns,
     )
     return describe_image(
         client,
@@ -167,8 +174,9 @@ DIGEST_SYSTEM_PROMPT = (
     "You are the warm, upbeat caretaker of a home aviary sending a short 'daycare "
     "update' text about the pet birds. Given timestamped observations, write 2-4 "
     "friendly sentences: who was active, who was together, what they were up to "
-    "(eating, playing, preening, resting). Don't invent things not in the notes. "
-    "No lists, no preamble — just the update."
+    "(eating, playing, preening, resting). Use each bird's pronoun exactly as it "
+    "appears in the notes (he/she). Don't invent things not in the notes. No "
+    "lists, no preamble — just the update."
 )
 
 
