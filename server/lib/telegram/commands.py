@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from threading import Event
+from threading import Event, Thread
 
 import requests
 
@@ -42,6 +42,26 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
 PAUSE_COMMANDS = ("/pause", "/stop")
 # Commands that turn privacy mode OFF.
 RESUME_COMMANDS = ("/play", "/resume")
+
+
+def download_telegram_file(base_url: str, file_id: str, timeout: int = 30) -> bytes | None:
+    """Fetch a Telegram file's bytes by file_id (getFile -> file download URL).
+
+    ``base_url`` is ``https://api.telegram.org/bot<token>``; the binary lives
+    under the parallel ``/file/bot<token>/<path>`` route. Returns None on any
+    failure so the caller can degrade gracefully.
+    """
+    try:
+        meta = requests.get(f"{base_url}/getFile", params={"file_id": file_id}, timeout=timeout)
+        meta.raise_for_status()
+        file_path = meta.json()["result"]["file_path"]
+        file_base = base_url.replace("/bot", "/file/bot", 1)
+        blob = requests.get(f"{file_base}/{file_path}", timeout=timeout)
+        blob.raise_for_status()
+        return blob.content
+    except (requests.RequestException, KeyError, ValueError) as exc:
+        LOGGER.warning("Failed to download Telegram file %s: %s", file_id, exc)
+        return None
 
 
 def command_argument(text: str) -> str:
@@ -239,6 +259,7 @@ def run_command_bot(
     resume_provider: Callable[[], str] | None = None,
     find_provider: Callable[[int, str], str] | None = None,
     nl_provider: Callable[[int, str], None] | None = None,
+    photo_provider: Callable[[bytes], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -310,6 +331,33 @@ def run_command_bot(
             user_id = (message.get("from") or {}).get("id")
             chat_id = (message.get("chat") or {}).get("id")
             if chat_id is None or user_id is None:
+                continue
+
+            # A photo (with or without a caption): identify the birds + describe
+            # it, for fun. Runs on its own thread (detector + VLM are slow) so
+            # the poll loop keeps moving.
+            photos = message.get("photo")
+            if photos and photo_provider is not None:
+                if str(user_id) not in allowed:
+                    send(chat_id, "Unauthorized.")
+                    continue
+                file_id = photos[-1]["file_id"]  # largest size
+
+                def handle_photo(fid: str = file_id, cid: int = chat_id) -> None:
+                    send(cid, "📷 Taking a look at your photo…")
+                    image = download_telegram_file(base_url, fid)
+                    if image is None:
+                        send(cid, "Hmm, I couldn't download that photo.")
+                        return
+                    try:
+                        reply = photo_provider(image)
+                    except Exception:
+                        LOGGER.exception("Photo analysis failed")
+                        reply = "I couldn't make sense of that photo, sorry!"
+                    send(cid, reply)
+
+                Thread(target=handle_photo, name="photo-analyze", daemon=True).start()
+                LOGGER.info("Handling photo from user %s", user_id)
                 continue
 
             if command is None:

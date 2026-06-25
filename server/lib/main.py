@@ -31,6 +31,7 @@ from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
 from lib.find import BirdFinder
+from lib.labels import pretty_labels
 from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
 from lib.roster import load_species_members
@@ -80,6 +81,7 @@ def start_command_thread(
     resume_provider: Callable[[], str] | None = None,
     find_provider: Callable[[int, str], str] | None = None,
     nl_provider: Callable[[int, str], None] | None = None,
+    photo_provider: Callable[[bytes], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -92,6 +94,7 @@ def start_command_thread(
             "resume_provider": resume_provider,
             "find_provider": find_provider,
             "nl_provider": nl_provider,
+            "photo_provider": photo_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -378,6 +381,36 @@ def main() -> None:
         else None
     )
 
+    def photo_provider(image: bytes) -> str:
+        # For fun: a user sends a photo, we run the detector to ID our birds and
+        # the vision model (grounded by those detections) to describe it.
+        if ollama_client is None:
+            return "My vision brain (Ollama) is off right now."
+        frame = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            return "That didn't look like an image I could read."
+        detections = detector.predict(frame)
+        height, width = frame.shape[:2]
+        context = build_detection_context(detections, width, height, member_species)
+        try:
+            description = describe_scene(
+                ollama_client,
+                app_config.ollama.vlm_model,
+                image,
+                context=context,
+                timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            LOGGER.exception("Photo description failed")
+            description = ""
+        birds = pretty_labels({d.label for d in detections})
+        head = (
+            f"📸 I spotted: {birds}!"
+            if detections
+            else "📸 I don't recognise any of our flock in this one."
+        )
+        return f"{head}\n{description}" if description else head
+
     def find_provider(chat_id: int, target: str) -> str:
         assert finder is not None  # only wired when finder exists
         # Stopping a search must work regardless of privacy state.
@@ -462,6 +495,7 @@ def main() -> None:
         resume_provider=control.resume,
         find_provider=find_provider if finder is not None else None,
         nl_provider=nl_router.handle_async if nl_router is not None else None,
+        photo_provider=photo_provider if ollama_client is not None else None,
     )
 
     # Daycare digest: periodic "wave" updates instead of per-detection spam.

@@ -601,3 +601,60 @@ def test_resume_command_calls_provider(monkeypatch) -> None:
 
     assert provider_called is True
     assert sent_messages == ["Resumed — cameras are live again."]
+
+
+def test_photo_message_runs_photo_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_image: list[bytes] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "photo": [
+                                {"file_id": "small"},
+                                {"file_id": "BIG"},  # largest last
+                            ],
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        # Stop once both the ack and the analysis reply have been sent.
+        if len(sent_messages) >= 2:
+            stop_event.set()
+        return Response()
+
+    def photo_provider(image: bytes) -> str:
+        seen_image.append(image)
+        return "📸 I spotted: Percy!"
+
+    # download_telegram_file is exercised separately; stub it here.
+    monkeypatch.setattr(
+        "lib.telegram.commands.download_telegram_file", lambda base, fid, timeout=30: b"jpeg-" + fid.encode()
+    )
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        photo_provider=photo_provider,
+    )
+
+    # The LARGEST photo is downloaded and handed to the provider; its reply ships.
+    assert seen_image == [b"jpeg-BIG"]
+    assert sent_messages == ["📷 Taking a look at your photo…", "📸 I spotted: Percy!"]
