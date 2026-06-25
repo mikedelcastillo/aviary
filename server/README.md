@@ -67,3 +67,22 @@ starts consuming any newly found cameras and replies with a summary (hosts
 scanned, cameras added, auth failures). Cameras are de-duplicated by host, so
 rerunning `/discover` only starts streams for cameras that are not already
 active.
+
+## Sleep tracking
+
+The server watches the cameras' IR (night) signal to track the flock's sleep.
+When the room goes fully dark (every camera in IR) a night opens; when it
+lightens for good in the morning the night finalizes and is scored 0–100:
+
+- **Duration** vs the 10–12h of darkness the birds need (steep penalty under 8h).
+- **Consistency** — how close bedtime and wake-up are to their rolling usual.
+- **Light at night** and **disturbances** (night-motion bursts, including
+  possible cockatiel night-frights) dent the score.
+
+Ask the bot **`/sleep`** for last night's score and summary, **`/sleep week`**
+for the 7-night trend, or just "how did the birds sleep?". `/status` shows a
+"night in progress" line while they're asleep. Set `SLEEP_MORNING_REPORT=1` to
+also get a short summary each morning when they wake. Nightly records persist
+under `data/server/sleep/` so the trend (and the consistency baseline) build up
+over time. Sleep is measured at the room/flock level — individual birds can't be
+told apart in the dark — so it's reported as "the birds' sleep".
