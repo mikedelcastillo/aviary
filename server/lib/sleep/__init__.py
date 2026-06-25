@@ -31,6 +31,7 @@ from lib.sleep.narrate import (
     format_morning,
     format_status_line,
     format_week,
+    sleep_streak,
 )
 from lib.sleep.tracker import SleepTracker
 
@@ -49,6 +50,7 @@ __all__ = [
     "format_morning",
     "format_status_line",
     "format_week",
+    "sleep_streak",
     "from_json",
     "load_current",
     "load_nights",

@@ -9,6 +9,7 @@ from lib.sleep.narrate import (
     format_status_line,
     format_week,
     llm_summary,
+    sleep_streak,
 )
 
 
@@ -46,6 +47,19 @@ def test_format_last_flags_night_fright() -> None:
 def test_format_last_short_night_phrasing() -> None:
     text = format_last(_night(dark_min=7 * 60))  # 7h
     assert "short" in text.lower()
+
+
+def test_sleep_streak_counts_leading_good_nights() -> None:
+    # Newest-first: a run of good nights breaks at the first sub-80 night.
+    nights = [_night(score=s) for s in (91, 84, 80, 70, 95)]
+    assert sleep_streak(nights) == 3
+    assert sleep_streak([_night(score=50)]) == 0
+    assert sleep_streak([]) == 0
+
+
+def test_format_last_shows_streak() -> None:
+    assert "good nights in a row" in format_last(_night(score=91), streak=3)
+    assert "good nights in a row" not in format_last(_night(score=91), streak=1)
 
 
 def test_format_morning_one_liner() -> None:

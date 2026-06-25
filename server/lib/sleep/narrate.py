@@ -19,8 +19,26 @@ LOGGER = logging.getLogger("lib.sleep.narrate")
 
 _SPARK = "▁▂▃▄▅▆▇█"
 
+# A night scoring at least this counts toward a "good sleep" streak.
+GOOD_SLEEP_SCORE = 80
+
 NO_COVERAGE = "No camera coverage to track sleep right now — I'll start watching once the cameras are reporting. 🌙"
 COLD_START_NOTE = "Still learning their routine — the schedule read is a best guess until I've tracked a few nights."
+
+
+def sleep_streak(recent_newest_first: list[SleepNight], good: int = GOOD_SLEEP_SCORE) -> int:
+    """How many of the most-recent consecutive nights scored ``good`` or better.
+
+    ``recent_newest_first`` is the nights newest-first (as :func:`load_recent`
+    returns them); the count stops at the first night below the threshold.
+    """
+    streak = 0
+    for night in recent_newest_first:
+        if night.score is not None and night.score >= good:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 def _band(score: int) -> str:
@@ -101,8 +119,8 @@ def _dark_phrase(night: SleepNight) -> str:
     return f"Dark: {_hm(night.dark_minutes)}{span}{tail}"
 
 
-def format_last(night: SleepNight) -> str:
-    """The full last-night report."""
+def format_last(night: SleepNight, *, streak: int = 0) -> str:
+    """The full last-night report. ``streak`` is the run of good nights so far."""
     lines = [
         f"🌙 Last night ({night.night_of:%a %b %d})",
         f"Sleep score: {night.score}/100 · {_band(night.score or 0)}",
@@ -112,6 +130,8 @@ def format_last(night: SleepNight) -> str:
     schedule = _schedule_line(night)
     if schedule:
         lines.append(schedule)
+    if streak >= 2:
+        lines.append(f"🔥 {streak} good nights in a row!")
     if night.confidence < 0.7:
         lines.append("(Reading is a best guess — partial camera coverage.)")
     fright = _fright_note(night)

@@ -816,15 +816,15 @@ def main() -> None:
             return
 
         def work() -> None:
-            from lib.sleep import NO_COVERAGE, format_last, format_week
+            from lib.sleep import NO_COVERAGE, format_last, format_week, sleep_streak
 
             arg = (argument or "").strip().lower()
             if arg in ("week", "trend", "7", "this week", "lately"):
                 notifier.send_text(chat_id, format_week(sleep_tracker.recent(7)))
                 return
-            last = sleep_tracker.last_finalized()
-            if last is not None:
-                notifier.send_text(chat_id, format_last(last))
+            recent = sleep_tracker.recent(7)
+            if recent:
+                notifier.send_text(chat_id, format_last(recent[0], streak=sleep_streak(recent)))
                 return
             in_progress = sleep_tracker.in_progress()
             line = format_status_line(in_progress, now_ph()) if in_progress is not None else None
