@@ -62,16 +62,21 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '- "discover": rescan / reload / refresh the cameras on the network. argument = "".\n'
         '- "status": how the cameras or system are doing, health, what is online. argument = "".\n'
         '- "snapshot": take or show pictures from all cameras right now. argument = "".\n'
-        '- "activity": what a bird IS or WAS doing / its day / behaviour — "what did percy '
-        'do today", "what is draft up to", "what are the birds doing right now", "how was '
-        'matcha today". argument = the bird/group named, or "" for all birds.\n'
+        '- "activity": what a bird IS or WAS doing / its day / behaviour / recent photos — '
+        '"what did percy do today", "what is draft up to", "what are the birds doing", "how '
+        'was matcha today", "show me recent photos of pizza", "show me what the birds are up '
+        'to", "where are the birds", "where is everyone". argument = the bird/group named, or '
+        '"" for all birds.\n'
         '- "chat": greetings, thanks, or anything that isn\'t about the birds\' whereabouts '
         'or activity. argument = "".\n\n'
         "Rules:\n"
-        '- "where is percy" -> find, argument "percy" (WHERE it is). "what did percy do '
-        'today" / "what is percy up to" -> activity, argument "percy" (WHAT it is doing). '
-        '"find the cockatiels" -> find, argument "cockatiels". "find any bird" -> find, '
-        'argument "any bird". Use find for location, activity for behaviour.\n'
+        '- "where is percy" -> find (locate one specific bird). "where are the birds" / '
+        '"where is everyone" -> activity (a summary of all, not a single-bird locate). '
+        '"what did percy do today" / "what is percy up to" / "show me photos of percy" -> '
+        'activity. "find the cockatiels" / "find any bird" -> find. "show me the cameras" / '
+        '"take a snapshot" -> snapshot (live capture), but "show me photos of <bird>" -> '
+        "activity (recent collected photos). Use find to locate, activity for "
+        "behaviour/photos/summaries.\n"
         f"- Known birds: {birds}. Groups: cockatiels, lovebirds, budgies, birds. If a find "
         "target is not known, still put what they said in argument.\n"
         "- Output ONLY the JSON object."
