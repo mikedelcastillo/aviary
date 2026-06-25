@@ -16,7 +16,11 @@ class FakeResponse:
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise requests.HTTPError(f"status {self.status_code}")
+            # Mirror requests: the raised HTTPError carries the response, so the
+            # client can inspect the status code to decide whether to retry.
+            error = requests.HTTPError(f"status {self.status_code}")
+            error.response = self  # type: ignore[attr-defined]
+            raise error
 
 
 class FakeSession:
@@ -155,6 +159,27 @@ def test_post_json_retries_transient_5xx_then_succeeds() -> None:
     client = OllamaClient("http://x", session=FlakySession(), max_retries=2, retry_backoff_seconds=0)
     assert client.chat("m", []) == "ok"
     assert calls["n"] == 2  # one 502, one success
+
+
+def test_post_json_does_not_retry_4xx() -> None:
+    calls = {"n": 0}
+
+    class ClientErrorSession:
+        def post(self, url, json, timeout):
+            calls["n"] += 1
+            return FakeResponse({}, ok=False, status=400)  # bad request: won't recover
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=ClientErrorSession(), max_retries=3, retry_backoff_seconds=0)
+    try:
+        client.chat("m", [])
+    except requests.HTTPError:
+        pass
+    else:
+        raise AssertionError("expected HTTPError to surface immediately")
+    assert calls["n"] == 1  # a 4xx is not retried
 
 
 def test_post_json_raises_after_exhausting_retries() -> None:
