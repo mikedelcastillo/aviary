@@ -78,3 +78,62 @@ def test_is_available_reflects_reachability() -> None:
     assert not OllamaClient(
         "http://x", session=FakeSession(FakeResponse({}, ok=False))
     ).is_available()
+
+
+def test_generate_serialises_vision_calls() -> None:
+    import threading
+    import time
+
+    state = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    class ConcurrencyTrackingSession:
+        def post(self, url, json, timeout):
+            with lock:
+                state["now"] += 1
+                state["max"] = max(state["max"], state["now"])
+            time.sleep(0.05)
+            with lock:
+                state["now"] -= 1
+            return FakeResponse({"response": "ok"})
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=ConcurrencyTrackingSession(), vision_concurrency=1)
+    threads = [threading.Thread(target=lambda: client.generate("m", "p", images=["B"])) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # With one slot, never more than one vision call hit the server at once.
+    assert state["max"] == 1
+
+
+def test_generate_allows_configured_concurrency() -> None:
+    import threading
+    import time
+
+    state = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    class TrackingSession:
+        def post(self, url, json, timeout):
+            with lock:
+                state["now"] += 1
+                state["max"] = max(state["max"], state["now"])
+            time.sleep(0.05)
+            with lock:
+                state["now"] -= 1
+            return FakeResponse({"response": "ok"})
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=TrackingSession(), vision_concurrency=2)
+    threads = [threading.Thread(target=lambda: client.generate("m", "p", images=["B"])) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert state["max"] <= 2

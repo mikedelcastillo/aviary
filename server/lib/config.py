@@ -80,6 +80,9 @@ class OllamaConfig:
     vlm_model: str = "qwen2.5vl:7b"
     # Generous: vision passes over a photo can take tens of seconds on a busy GPU.
     timeout_seconds: float = 120.0
+    # Max concurrent vision (image) calls; the rest queue. 1 keeps the GPU from
+    # being swamped when many frames are captioned/named at once.
+    vision_concurrency: int = 1
 
 
 @dataclass(frozen=True)
@@ -250,8 +253,10 @@ def _ollama_config() -> OllamaConfig:
     base_url = os.environ.get("OLLAMA_BASE_URL", "").strip() or OllamaConfig.base_url
     llm_model = os.environ.get("OLLAMA_LLM_MODEL", "").strip() or OllamaConfig.llm_model
     vlm_model = os.environ.get("OLLAMA_VLM_MODEL", "").strip() or OllamaConfig.vlm_model
+    vision_concurrency = max(1, int(_as_float("OLLAMA_VISION_CONCURRENCY", OllamaConfig.vision_concurrency)))
     return OllamaConfig(
-        enabled=enabled, base_url=base_url, llm_model=llm_model, vlm_model=vlm_model
+        enabled=enabled, base_url=base_url, llm_model=llm_model, vlm_model=vlm_model,
+        vision_concurrency=vision_concurrency,
     )
 
 

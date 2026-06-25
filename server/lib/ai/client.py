@@ -13,6 +13,7 @@ Calls raise on transport/HTTP error so callers can decide how to degrade; a
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 import requests
@@ -28,10 +29,16 @@ class OllamaClient:
         *,
         timeout_seconds: float = 120.0,
         session: requests.Session | None = None,
+        vision_concurrency: int = 1,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self._session = session or requests.Session()
+        # Vision calls are the expensive ones, and many fire at once (naming all
+        # cameras, captioning every memory frame, a /find description). A bounded
+        # semaphore turns generate() into a queue so the GPU isn't swamped — the
+        # extra callers block here and run as slots free, instead of all at once.
+        self._vision_slots = threading.BoundedSemaphore(max(1, vision_concurrency))
 
     def is_available(self) -> bool:
         """Best-effort reachability probe (lists installed models)."""
@@ -94,10 +101,13 @@ class OllamaClient:
             payload["format"] = fmt
         if temperature is not None:
             payload.setdefault("options", {})["temperature"] = temperature
-        response = self._session.post(
-            f"{self.base_url}/api/generate",
-            json=payload,
-            timeout=timeout_seconds or self.timeout_seconds,
-        )
-        response.raise_for_status()
-        return response.json().get("response", "") or ""
+        # Queue behind the vision semaphore so concurrent callers don't pile onto
+        # the GPU at once; the timeout only starts once we hold a slot.
+        with self._vision_slots:
+            response = self._session.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=timeout_seconds or self.timeout_seconds,
+            )
+            response.raise_for_status()
+            return response.json().get("response", "") or ""

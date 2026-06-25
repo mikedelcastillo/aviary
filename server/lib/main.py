@@ -365,7 +365,9 @@ def main() -> None:
     # scene descriptions, camera naming). None when the AI is disabled.
     ollama_client = (
         OllamaClient(
-            app_config.ollama.base_url, timeout_seconds=app_config.ollama.timeout_seconds
+            app_config.ollama.base_url,
+            timeout_seconds=app_config.ollama.timeout_seconds,
+            vision_concurrency=app_config.ollama.vision_concurrency,
         )
         if app_config.ollama.enabled
         else None
