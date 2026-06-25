@@ -107,3 +107,30 @@ def test_tick_edits_in_place_when_quiet(tmp_path) -> None:
     maker._tick()
     assert notifier.tracked == []
     assert notifier.edits and "quiet" in notifier.edits[0][2].lower()
+
+
+def test_night_mode_refreshes_instead_of_reporting_when_quiet(tmp_path) -> None:
+    memories = tmp_path / "memories"
+    now_dt = datetime(2026, 6, 25, 2, 0)
+    notifier = FakeNotifier()
+    maker = _maker(memories, FakeRegistry([row("percy")]), notifier, now_dt, 1000.0)
+    maker._night_mode = lambda: True
+    maker._reported_set = frozenset({"percy"})  # not a new bird
+    maker._activity_msgs = {"A": 100}
+    maker._last_report_at = 1000.0 - 10_000  # well past even the slow night beat
+    maker._tick()
+    # Resting at night with no new bird / motion -> just an in-place refresh.
+    assert notifier.albums == []
+    assert notifier.edits or notifier.caption_edits
+
+
+def test_leaving_ir_triggers_immediate_report(tmp_path) -> None:
+    memories = tmp_path / "memories"
+    now_dt = datetime(2026, 6, 25, 6, 0)
+    notifier = FakeNotifier()
+    maker = _maker(memories, FakeRegistry([row("percy")]), notifier, now_dt, 1000.0)
+    maker._was_night = True          # it was night...
+    maker._night_mode = lambda: False  # ...and a camera just left IR (dawn/light)
+    maker._reported_set = frozenset({"percy"})  # not new, but the wake-up reports anyway
+    maker._tick()
+    assert notifier.albums  # an immediate report on waking

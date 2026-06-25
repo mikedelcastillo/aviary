@@ -65,6 +65,9 @@ class MemoryMaker:
         camera_display: Callable[[str], str] = lambda name: name,
         pronoun_note: str = "",
         max_cameras: int = 3,
+        night_mode: Callable[[], bool] | None = None,
+        night_slowdown: float = 4.0,
+        night_move_threshold: float = 12.0,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = now_ph,
     ) -> None:
@@ -83,6 +86,13 @@ class MemoryMaker:
         self._camera_display = camera_display
         self._pronoun_note = pronoun_note
         self._max_cameras = max_cameras
+        # When every camera is in night/IR we assume the birds (and we) are
+        # asleep: report only on a major change, refresh on a much slower beat,
+        # and report immediately the moment a camera leaves IR (a light / dawn).
+        self._night_mode = night_mode
+        self._night_slowdown = max(1.0, night_slowdown)
+        self._night_move_threshold = night_move_threshold
+        self._was_night = False
         self._clock = clock
         self._now = now
         self._reported_set: frozenset[str] = frozenset()
@@ -110,10 +120,34 @@ class MemoryMaker:
 
     def _tick(self) -> None:
         now = self._clock()
-        visible = currently_visible(self._registry.snapshot(), self._fresh)
+        rows = self._registry.snapshot()
+        visible = currently_visible(rows, self._fresh)
         visible_set = frozenset(visible)
         new_birds = visible_set - self._reported_set
-        due = (now - self._last_report_at) >= self._interval
+
+        night = self._night_mode() if self._night_mode is not None else False
+        woke = self._was_night and not night  # a camera left IR — light/dawn
+        self._was_night = night
+        interval = self._interval * (self._night_slowdown if night else 1.0)
+        due = (now - self._last_report_at) >= interval
+
+        # The moment the room lights up (or dawn breaks), report what's going on.
+        if woke and visible:
+            if self._report(visible):
+                self._last_report_at = now
+            return
+
+        if night:
+            # Assume resting: only break the quiet for a NEW bird or real motion;
+            # otherwise just refresh ("still quiet") on the slow night beat.
+            major = bool(new_birds) or self._has_motion(rows)
+            if major and visible:
+                if self._report(visible):
+                    self._last_report_at = now
+            elif due:
+                self._refresh(visible_set)
+                self._last_report_at = now
+            return
 
         if new_birds or (due and visible_set != self._reported_set and visible_set):
             if self._report(visible):
@@ -121,6 +155,16 @@ class MemoryMaker:
         elif due:
             self._refresh(visible_set)
             self._last_report_at = now
+
+    def _has_motion(self, rows: list[dict]) -> bool:
+        """True if a freshly-seen bird has moved notably — a major night event."""
+        for row in rows:
+            since = row.get("since")
+            if since is None or since > self._fresh:
+                continue
+            if (row.get("movement_percent") or 0.0) >= self._night_move_threshold:
+                return True
+        return False
 
     # -- reporting ---------------------------------------------------------
 

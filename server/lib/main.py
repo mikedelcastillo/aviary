@@ -515,6 +515,11 @@ def main() -> None:
                 ir.add(name)
         return ir
 
+    def all_cameras_ir() -> bool:
+        with stats_lock:
+            total = len(stats)
+        return total > 0 and len(current_ir_cameras()) >= total
+
     # Roster groups (species -> members) for /find expansion, and the reverse
     # (member -> species) to annotate VLM detection context ("Pizza (a cockatiel)").
     species_members = load_species_members()
@@ -767,6 +772,7 @@ def main() -> None:
             interval_seconds=app_config.memory_interval_minutes * 60.0,
             camera_display=namer.display,
             pronoun_note=pronoun_note,
+            night_mode=all_cameras_ir,
         ).start()
         LOGGER.info(
             "Caretaker reports every ~%.0f min; raw photo alerts %s",
