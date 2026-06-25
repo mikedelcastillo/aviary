@@ -715,3 +715,56 @@ def test_status_shows_ir_species_label_during_night() -> None:
     stats["camera-1"].record_inference(["cockatiel"], [detection("cockatiel")], (100, 100))
     message = build_status_message(stats, registry, known_birds=["percy", "draft"])
     assert "Cockatiel" in message  # the seen species shows, not just "nothing seen"
+
+
+def test_captioned_photo_command_keeps_its_argument(monkeypatch) -> None:
+    """A photo captioned '/find percy' must pass 'percy' to the find provider.
+
+    Regression: argument extraction read message['text'], which is empty for a
+    photo (its text rides in 'caption'), so a captioned command lost its
+    argument and ran as a bare '/find'.
+    """
+    stop_event = threading.Event()
+    seen_targets: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "photo": [{"file_id": "small"}, {"file_id": "BIG"}],
+                            "caption": "/find percy",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        return Response()
+
+    def find_provider(chat_id: int, target: str) -> str:
+        seen_targets.append(target)
+        stop_event.set()
+        return "On it."
+
+    monkeypatch.setattr(
+        "lib.telegram.commands.download_telegram_file", lambda base, fid, timeout=30: b"jpeg"
+    )
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        find_provider=find_provider,
+        photo_provider=lambda image: "📸 ok",
+    )
+
+    assert seen_targets == ["percy"]

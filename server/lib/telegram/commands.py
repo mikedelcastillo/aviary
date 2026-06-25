@@ -402,7 +402,7 @@ def run_command_bot(
                     send(chat_id, "Unauthorized.")
                 else:
                     try:
-                        send(chat_id, autofind_provider(command_argument(message.get("text", ""))))
+                        send(chat_id, autofind_provider(command_argument(text_in)))
                     except Exception as exc:
                         LOGGER.exception("Autofind toggle failed")
                         send(chat_id, f"Auto-find failed: {exc}")
@@ -437,7 +437,7 @@ def run_command_bot(
                 else:
                     send(chat_id, "📋 Looking back…")
                     try:
-                        activity_provider(chat_id, command_argument(message.get("text", "")))
+                        activity_provider(chat_id, command_argument(text_in))
                     except Exception as exc:  # never let it kill polling
                         LOGGER.exception("Activity failed")
                         send(chat_id, f"Activity failed: {exc}")
@@ -451,7 +451,7 @@ def run_command_bot(
                 if str(user_id) not in allowed or find_provider is None:
                     send(chat_id, "Unauthorized.")
                 else:
-                    target = command_argument(message.get("text", ""))
+                    target = command_argument(text_in)
                     try:
                         ack = find_provider(chat_id, target)
                     except Exception as exc:  # never let it kill polling
@@ -478,7 +478,7 @@ def run_command_bot(
                 if str(user_id) not in allowed or pause_provider is None:
                     text = "Unauthorized."
                 else:
-                    duration = parse_duration(command_argument(message.get("text", "")))
+                    duration = parse_duration(command_argument(text_in))
                     try:
                         text = pause_provider(duration)
                     except Exception as exc:  # never let it kill polling
