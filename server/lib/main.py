@@ -452,6 +452,8 @@ def main() -> None:
         LOGGER.warning(
             "Initial discovery found no cameras; send /discover once they are online"
         )
+    # Name the freshly-discovered cameras from a live frame (background, VLM).
+    trigger_camera_naming()
 
     # Announce we're live (with the camera count) so the user knows monitoring
     # has resumed — e.g. after a restart. Best-effort; never block startup.
