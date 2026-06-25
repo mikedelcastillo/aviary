@@ -25,7 +25,7 @@ from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
-from lib.care import toxic_food_in
+from lib.care import care_reply, toxic_food_in
 from lib.care_scheduler import CareScheduler
 from lib.clock import now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
@@ -113,6 +113,7 @@ def start_command_thread(
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
     sleep_provider: Callable[[int, str], None] | None = None,
+    care_provider: Callable[[str], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -130,6 +131,7 @@ def start_command_thread(
             "photo_provider": photo_provider,
             "activity_provider": activity_provider,
             "sleep_provider": sleep_provider,
+            "care_provider": care_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -156,6 +158,7 @@ def build_nl_router(
     memory=None,
     chat_context=None,
     sleep_provider=None,
+    care_provider=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -240,6 +243,8 @@ def build_nl_router(
             activity_responder.respond(chat_id, text, intent.argument)
         elif action == "sleep" and sleep_provider is not None:
             sleep_provider(chat_id, intent.argument)
+        elif action == "care" and care_provider is not None:
+            notifier.send_text(chat_id, care_provider(intent.argument))
         else:  # chat (or activity with no responder)
             send_chat_reply(chat_id, text)
 
@@ -817,6 +822,10 @@ def main() -> None:
 
         threading.Thread(target=work, name="sleep", daemon=True).start()
 
+    def care_provider(argument: str) -> str:
+        # The /care guide — pure + fast, so it answers inline (no thread/AI).
+        return care_reply(argument, member_species=member_species)
+
     # Natural-language routing: free-text Telegram messages ("stop the cams",
     # "where's percy?") are classified by Ollama and dispatched to the same
     # providers as the slash commands. Wired only when a notifier exists (to
@@ -869,6 +878,7 @@ def main() -> None:
         memory=memory,
         chat_context=chat_context_provider,
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
+        care_provider=care_provider,
     )
 
     start_command_thread(
@@ -887,6 +897,7 @@ def main() -> None:
         photo_provider=photo_provider if ollama_client is not None else None,
         activity_provider=activity_provider if activity_responder is not None else None,
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
+        care_provider=care_provider,
     )
     if auto_finder is not None:
         auto_finder.start()

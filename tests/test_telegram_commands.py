@@ -746,6 +746,41 @@ def test_sleep_command_passes_argument_to_provider(monkeypatch) -> None:
     assert seen == [(123, "week")]
 
 
+def test_care_command_sends_provider_reply(monkeypatch) -> None:
+    from lib.telegram.commands import COMMAND_DESCRIPTIONS
+
+    assert "/care" in COMMAND_DESCRIPTIONS
+
+    stop_event = threading.Event()
+    sent: list[str] = []
+    seen_args: list[str] = []
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def care_provider(argument: str) -> str:
+        seen_args.append(argument)
+        return f"🐦 care: {argument or 'overview'}"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/care diet"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        care_provider=care_provider,
+    )
+
+    assert seen_args == ["diet"]
+    assert sent == ["🐦 care: diet"]
+
+
 def test_command_bot_survives_a_handler_exception(monkeypatch) -> None:
     """A handler raising must not kill the poll thread; the bot keeps serving.
 

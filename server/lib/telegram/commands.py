@@ -31,6 +31,7 @@ StatusProvider = Callable[[], str]
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/sleep": "How the birds slept — sleep score + summary (e.g. /sleep, /sleep week)",
+    "/care": "Bird-care guide (e.g. /care, /care diet, /care toxic, /care cockatiel)",
     "/discover": "Scan the local network for cameras",
     "/home": "Aim the pan-tilt cameras at their saved viewpoint",
     "/autofind": "Auto-search for missing birds (/autofind enable | disable)",
@@ -249,6 +250,7 @@ def run_command_bot(
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
     sleep_provider: Callable[[int, str], None] | None = None,
+    care_provider: Callable[[str], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -263,6 +265,7 @@ def run_command_bot(
         for command, present in (
             ("/activity", activity_provider is not None),
             ("/sleep", sleep_provider is not None),
+            ("/care", care_provider is not None),
             ("/discover", discover_provider is not None),
             ("/home", home_provider is not None),
             ("/autofind", autofind_provider is not None),
@@ -465,6 +468,19 @@ def run_command_bot(
                             LOGGER.exception("Sleep report failed")
                             send(chat_id, f"Sleep report failed: {exc}")
                     LOGGER.info("Handled /sleep for user %s", user_id)
+                    continue
+
+                if command == "/care":
+                    # Bird-care guide from the knowledge base — fast + synchronous.
+                    if str(user_id) not in allowed or care_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, care_provider(command_argument(text_in)))
+                        except Exception as exc:  # never let it kill polling
+                            LOGGER.exception("Care guide failed")
+                            send(chat_id, f"Care info failed: {exc}")
+                    LOGGER.info("Handled /care for user %s", user_id)
                     continue
 
                 if command == "/find":

@@ -40,6 +40,15 @@ def test_parse_intent_accepts_sleep_action() -> None:
     assert parse_intent('{"action": "sleep", "argument": "week"}') == Intent("sleep", "week")
 
 
+def test_parse_intent_accepts_care_action() -> None:
+    assert parse_intent('{"action": "care", "argument": "diet"}') == Intent("care", "diet")
+
+
+def test_system_prompt_mentions_care_guide() -> None:
+    prompt = build_system_prompt(["percy"]).lower()
+    assert "care guide" in prompt
+
+
 def test_system_prompt_mentions_sleep_routing() -> None:
     prompt = build_system_prompt(["percy"]).lower()
     assert "sleep score" in prompt and "night fright" in prompt
