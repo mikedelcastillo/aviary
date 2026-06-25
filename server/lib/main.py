@@ -820,7 +820,9 @@ def main() -> None:
 
             arg = (argument or "").strip().lower()
             if arg in ("week", "trend", "7", "this week", "lately"):
-                notifier.send_text(chat_id, format_week(sleep_tracker.recent(7)))
+                # recent() is newest-first; format_week wants oldest-first so the
+                # trend sparkline reads left-to-right through time.
+                notifier.send_text(chat_id, format_week(list(reversed(sleep_tracker.recent(7)))))
                 return
             recent = sleep_tracker.recent(7)
             if recent:
