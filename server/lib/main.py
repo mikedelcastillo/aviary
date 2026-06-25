@@ -24,6 +24,7 @@ from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
 from lib.config import AppConfig, _as_user_ids, build_config
 from lib.control import RuntimeControl, parse_duration
+from lib.daycare import DaycareNarrator
 from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
@@ -428,6 +429,30 @@ def main() -> None:
         find_provider=find_provider if finder is not None else None,
         nl_provider=nl_router.handle_async if nl_router is not None else None,
     )
+
+    # Daycare digest: periodic "wave" updates instead of per-detection spam.
+    # Only when the AI is on, there's someone to send to, and a cadence is set.
+    if (
+        ollama_client is not None
+        and notifier is not None
+        and app_config.daycare_digest_minutes > 0
+    ):
+        DaycareNarrator(
+            app_config.collect.directory,
+            ollama_client,
+            app_config.ollama.llm_model,
+            app_config.ollama.vlm_model,
+            notifier,
+            stop_event,
+            interval_seconds=app_config.daycare_digest_minutes * 60.0,
+            member_species=member_species,
+            camera_display=namer.display,
+        ).start()
+        LOGGER.info(
+            "Daycare digest every %.0f min; raw photo alerts %s",
+            app_config.daycare_digest_minutes,
+            "on" if app_config.raw_photo_alerts else "off",
+        )
 
     dashboard = Dashboard(
         stats,

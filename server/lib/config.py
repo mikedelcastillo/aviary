@@ -141,8 +141,12 @@ class AppConfig:
     credentials: CameraCredentials
     discovery: DiscoveryConfig
     # Defaulted (and last) so existing constructions that predate the AI features
-    # — and tests — don't have to pass it. ``build_config`` always sets it.
+    # — and tests — don't have to pass them. ``build_config`` always sets them.
     ollama: OllamaConfig = OllamaConfig(enabled=False)
+    # Minutes between "daycare digest" waves (0 disables). When digests are on,
+    # raw per-detection photo alerts default OFF so the digest replaces the spam.
+    daycare_digest_minutes: float = 0.0
+    raw_photo_alerts: bool = True
 
 
 def _require_env(name: str) -> str:
@@ -158,6 +162,23 @@ def _as_user_ids(value: str) -> list[str]:
 
 def _as_object_names(value: str) -> frozenset[str]:
     return frozenset(item.strip().lower() for item in value.split(",") if item.strip())
+
+
+def _as_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _as_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _credentials() -> CameraCredentials:
@@ -249,6 +270,13 @@ def build_config() -> AppConfig:
     # subnet when auto-detect would pick the wrong interface (Docker, etc.).
     discovery = DiscoveryConfig(cidr=os.environ.get("TAPO_DISCOVERY_CIDR") or None)
 
+    # Daycare digest cadence, and whether raw photo alerts still fire. When
+    # digests are enabled the raw per-detection photo spam is off by default
+    # (the digest is the new photo channel); RAW_PHOTO_ALERTS overrides either way.
+    digest_minutes = _as_float("DAYCARE_DIGEST_MINUTES", 20.0)
+    raw_default = digest_minutes <= 0
+    raw_photo_alerts = _as_bool("RAW_PHOTO_ALERTS", raw_default)
+
     return AppConfig(
         snapshot_dir=Path("./data/server/snapshots"),
         model=model,
@@ -258,4 +286,6 @@ def build_config() -> AppConfig:
         credentials=credentials,
         discovery=discovery,
         ollama=_ollama_config(),
+        daycare_digest_minutes=digest_minutes,
+        raw_photo_alerts=raw_photo_alerts,
     )

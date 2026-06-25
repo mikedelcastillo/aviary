@@ -262,8 +262,11 @@ class AlertDispatcher:
         except Exception:
             LOGGER.exception("Collection failed for camera=%s", job.camera.name)
 
+        # Raw per-detection photo alerts can be switched off (e.g. when the
+        # daycare digest replaces them); collection above still always runs.
+        send_alert = self._notifier is not None and self._app_config.raw_photo_alerts
         snapshot_path = None
-        if self._notifier is not None and self._app_config.telegram.include_snapshot:
+        if send_alert and self._app_config.telegram.include_snapshot:
             try:
                 snapshot_path = write_snapshot(
                     self._app_config.snapshot_dir, job.camera.name, job.frame, job.detections
@@ -273,15 +276,16 @@ class AlertDispatcher:
 
         labels = ", ".join(sorted({detection.label for detection in job.detections}))
         LOGGER.info(
-            "Alerting camera=%s labels=%s snapshot=%s collected=%d",
+            "Alerting camera=%s labels=%s snapshot=%s collected=%d send_alert=%s",
             job.camera.name,
             labels,
             snapshot_path,
             len(collected),
+            send_alert,
         )
 
-        if self._notifier is None:
-            # No Telegram target; nothing will consume the snapshot.
+        if not send_alert:
+            # No raw alert to deliver (digest mode or no Telegram); collection done.
             if snapshot_path is not None:
                 snapshot_path.unlink(missing_ok=True)
             return

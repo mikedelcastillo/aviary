@@ -142,6 +142,13 @@ class TelegramNotifier:
         except requests.RequestException as exc:
             LOGGER.warning("Text send to %s failed: %s", chat_id, exc)
 
+    def broadcast_album(self, items: Sequence[tuple[bytes, str | None]]) -> None:
+        """Send an album to EVERY recipient (used by the daycare digest)."""
+        if not self.bot_token or not self.user_ids or not items:
+            return
+        for user_id in self.user_ids:
+            self.send_album(user_id, items)
+
     def send_album(
         self, chat_id: int | str, items: Sequence[tuple[bytes, str | None]]
     ) -> None:
