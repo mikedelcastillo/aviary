@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from lib.roster import DEFAULT_SPECIES_MEMBERS, expand_targets, load_sexes, pronoun_map
+from lib.roster import (
+    DEFAULT_SPECIES_MEMBERS,
+    expand_targets,
+    load_sexes,
+    pronoun_map,
+    pronoun_sentence,
+)
 
 
 # The live model's findable labels (what the server detects).
@@ -64,3 +70,12 @@ def test_pronoun_map_matches_known_sexes() -> None:
     assert pronouns["pizza"] == "he"
     assert pronouns["jynx"] == "he"
     assert pronouns["draft"] == "he"
+
+
+def test_pronoun_sentence_groups_by_sex() -> None:
+    note = pronoun_sentence(pronoun_map(load_sexes()))
+    assert "Bambi" in note and "Percy" in note and "female (she/her)" in note
+    assert "Draft" in note and "male (he/him)" in note
+    # Females listed under she, not he.
+    she_part = note.split("female")[0]
+    assert "Percy" in she_part and "Bambi" in she_part

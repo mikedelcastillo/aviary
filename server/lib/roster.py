@@ -181,3 +181,27 @@ def pronoun_map(sexes: dict[str, str] | None = None) -> dict[str, str]:
     """Build a name -> "he"/"she" map (birds of unknown sex are omitted -> "they")."""
     sexes = sexes if sexes is not None else DEFAULT_SEXES
     return {name: _PRONOUNS[sex] for name, sex in sexes.items() if sex in _PRONOUNS}
+
+
+def pronoun_sentence(pronouns: dict[str, str]) -> str:
+    """A ground-truth sentence for prompts: "Percy and Bambi are female (she/her); ...".
+
+    The captions/observations fed to the summariser may not carry pronouns, so
+    the model defaults birds to "he". Stating the sexes explicitly fixes that.
+    """
+    from lib.labels import pretty
+
+    she = sorted(name for name, p in pronouns.items() if p == "she")
+    he = sorted(name for name, p in pronouns.items() if p == "he")
+
+    def _clause(names: list[str], word: str, pronoun: str) -> str:
+        joined = ", ".join(pretty(n) for n in names)
+        verb = "is" if len(names) == 1 else "are"
+        return f"{joined} {verb} {word} ({pronoun})"
+
+    parts = []
+    if she:
+        parts.append(_clause(she, "female", "she/her"))
+    if he:
+        parts.append(_clause(he, "male", "he/him"))
+    return ". ".join(parts) + "." if parts else ""

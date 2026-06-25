@@ -40,7 +40,7 @@ from lib.find import BirdFinder
 from lib.labels import pretty_labels
 from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
-from lib.roster import load_sexes, load_species_members, pronoun_map
+from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_sentence
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_report
@@ -273,6 +273,7 @@ def make_console_dispatcher(
             notify=console_notifier.send_text,
             send_photo=None,
             find=lambda cid, arg: emit(console_find(cid, arg)),
+            pronoun_note=pronoun_sentence(pronouns),
         )
         if ollama_client is not None
         else None
@@ -477,8 +478,11 @@ def main() -> None:
     member_species = {
         member: species for species, members in species_members.items() for member in members
     }
-    # name -> "he"/"she" so descriptions use the right pronoun.
+    # name -> "he"/"she" so descriptions use the right pronoun, plus a ground-
+    # truth sentence ("Percy and Bambi are female …") for the summary LLM, which
+    # works from captions that often don't carry pronouns.
     pronouns = pronoun_map(load_sexes())
+    pronoun_note = pronoun_sentence(pronouns)
     # The caretaker's persistent day memory lives beside the collect tree.
     memories_dir = app_config.collect.directory.parent / "memories"
 
@@ -561,10 +565,11 @@ def main() -> None:
             return f"{control.status()} Can't search while paused — /play first."
         return finder.start(chat_id, target, stop_event)
 
-    def trigger_camera_naming() -> None:
-        # Name any not-yet-named cameras from a live frame, on a background
-        # thread (the VLM is slow). Only when the AI is enabled; otherwise the
-        # fallback "Cam N" names stand.
+    def trigger_camera_naming(force: bool = False) -> None:
+        # Name cameras from a live frame, on a background thread (the VLM is
+        # slow). With force, RE-name already-named cameras too (a pan-tilt camera
+        # may have moved). Only when the AI is enabled; otherwise cameras show
+        # their IP.
         if ollama_client is None:
             return
         with stats_lock:
@@ -572,14 +577,20 @@ def main() -> None:
         threading.Thread(
             target=name_cameras,
             args=(namer, cameras, grab_frame, ollama_client, app_config.ollama.vlm_model),
-            kwargs={"stop_event": stop_event, "timeout_seconds": VLM_DESCRIBE_TIMEOUT_SECONDS},
+            kwargs={
+                "stop_event": stop_event,
+                "timeout_seconds": VLM_DESCRIBE_TIMEOUT_SECONDS,
+                "force": force,
+            },
             name="camera-naming",
             daemon=True,
         ).start()
 
     def discover_provider() -> str:
         report = format_discovery_report(supervisor.discover_and_apply())
-        trigger_camera_naming()  # name any newly-found cameras
+        # Re-name every camera: new ones get named, and existing pan-tilt cameras
+        # that have moved since last time get a fresh, accurate name.
+        trigger_camera_naming(force=True)
         return report
 
     # Activity Q&A ("what did percy do today?") reads the collected-photos log;
@@ -596,6 +607,7 @@ def main() -> None:
             # A "what is X doing now?" with no logged memory kicks off a live
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),
+            pronoun_note=pronoun_note,
         )
         if (ollama_client is not None and notifier is not None and finder is not None)
         else None
@@ -669,6 +681,7 @@ def main() -> None:
             stop_event,
             interval_seconds=app_config.memory_interval_minutes * 60.0,
             camera_display=namer.display,
+            pronoun_note=pronoun_note,
         ).start()
         LOGGER.info(
             "Caretaker reports every ~%.0f min; raw photo alerts %s",
@@ -725,7 +738,7 @@ def main() -> None:
     # restart), then a silent sweep every AUTO_DISCOVER_SECONDS so cameras that
     # come online later are picked up without the user running /discover.
     # Idempotent — start_camera dedups by host.
-    def _rediscover() -> None:
+    def _rediscover(force: bool = False) -> None:
         try:
             applied = supervisor.discover_and_apply()
         except Exception:
@@ -733,7 +746,10 @@ def main() -> None:
             return
         if applied.added:
             LOGGER.info("Auto-discovery started %d more camera(s)", len(applied.added))
-            trigger_camera_naming()
+        # On the periodic sweep, re-name every camera (force) since pan-tilt
+        # cameras may have moved; the quick post-boot retries just name new ones.
+        if applied.added or force:
+            trigger_camera_naming(force=force)
 
     def _discovery_background() -> None:
         for delay in (15.0, 45.0):
@@ -741,7 +757,7 @@ def main() -> None:
                 return
             _rediscover()
         while not stop_event.wait(AUTO_DISCOVER_SECONDS):
-            _rediscover()
+            _rediscover(force=True)
 
     threading.Thread(target=_discovery_background, name="auto-discovery", daemon=True).start()
 

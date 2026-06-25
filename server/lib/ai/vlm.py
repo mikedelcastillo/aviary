@@ -70,7 +70,6 @@ def build_detection_context(
     (and, empirically, much faster). ``detections`` are anything with ``.label``
     and ``.bbox_xyxy``.
     """
-    species_of = species_of or {}
     pronouns = pronouns or {}
     if not detections:
         return (
@@ -80,21 +79,17 @@ def build_detection_context(
     parts = []
     for detection in detections:
         x1, y1, x2, y2 = detection.bbox_xyxy
-        label = detection.label.lower()
-        bits = []
-        pronoun = pronouns.get(label)
-        if pronoun:
-            bits.append(pronoun)
-        species = species_of.get(label)
-        if species and species != label:
-            bits.append(f"a {species}")
-        who = f"{pretty(detection.label)} ({', '.join(bits)})" if bits else pretty(detection.label)
+        pronoun = pronouns.get(detection.label.lower())
+        # Name + pronoun only — deliberately NO species. The detector already
+        # identified the bird, and naming the species makes the model parrot
+        # "Percy the lovebird" / "Bambi the budgie", which we don't want.
+        who = f"{pretty(detection.label)} ({pronoun})" if pronoun else pretty(detection.label)
         parts.append(f"{who} in the {position_phrase((x1 + x2) / 2, (y1 + y2) / 2, width, height)}")
     return (
         "This is a still from a pet-bird camera. The camera detected these birds: "
         + "; ".join(parts)
-        + ". They may be small or far from the camera. Use each bird's name and "
-        "the pronoun given (he/she)."
+        + ". They may be small or far from the camera. Refer to each bird by its "
+        "NAME and pronoun (he/she) only — do NOT state its species or breed."
     )
 
 

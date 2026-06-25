@@ -23,11 +23,13 @@ LOGGER = logging.getLogger("lib.camera_names")
 
 
 def fallback_name(camera_name: str) -> str:
-    """A readable placeholder name from the camera identity: camera-x.y.z.8 -> Cam 8."""
-    host = camera_name.removeprefix("camera-")
-    if host.count(".") == 3:
-        return f"Cam {host.rsplit('.', 1)[1]}"
-    return camera_name
+    """Until the VLM names it, show the camera's IP — an honest address, not a
+    made-up non-descriptive name. ``camera-192.168.1.45`` -> ``192.168.1.45``.
+
+    This only shows transiently: naming retries on every discovery sweep (the
+    view may also have moved), so a real descriptive name replaces it.
+    """
+    return camera_name.removeprefix("camera-")
 
 
 def unique_name(base: str, used: set[str]) -> str:
@@ -92,16 +94,22 @@ def name_cameras(
     timeout_seconds: float = 60.0,
     frame_wait_seconds: float = 2.0,
     frame_attempts: int = 8,
+    name_attempts: int = 3,
+    force: bool = False,
 ) -> None:
-    """Name any not-yet-named cameras from a current frame (best-effort, blocking).
+    """Name cameras from a current frame (best-effort, blocking).
 
-    Intended to run on a background thread after discovery. For each unnamed
-    camera it waits briefly for a frame to arrive, asks the vision model for a
-    name, de-duplicates it, and records it. A camera that never yields a frame or
-    whose VLM call fails simply keeps its fallback name.
+    Runs on a background thread after discovery. For each camera it waits for a
+    frame, then asks the vision model for a descriptive name, retrying with a
+    fresh frame if the model returns nothing usable (all banned/empty). A camera
+    the model still can't name is left UNNAMED (it shows its IP and is retried
+    on the next sweep). With ``force`` it RE-names already-named cameras too —
+    used on /discover, since a pan-tilt camera may have moved to a new view; an
+    existing name is kept if the re-name fails.
     """
     for camera_name in camera_names:
-        if namer.has(camera_name):
+        already_named = namer.has(camera_name)
+        if already_named and not force:
             continue
         if stop_event is not None and stop_event.is_set():
             return
@@ -114,15 +122,37 @@ def name_cameras(
                 stop_event.wait(frame_wait_seconds)
         if not image:
             continue
-        try:
-            base = name_camera_view(client, model, image, timeout_seconds=timeout_seconds)
-        except Exception:
-            LOGGER.exception("VLM naming failed for %s", camera_name)
-            base = ""
-        # Collision: re-ask the VLM for a name distinct from what's taken, rather
-        # than slapping a number on a duplicate ("Big Cage" + "Big Cage").
+
+        base = ""
+        for _ in range(max(1, name_attempts)):
+            try:
+                base = name_camera_view(client, model, image, timeout_seconds=timeout_seconds)
+            except Exception:
+                LOGGER.exception("VLM naming failed for %s", camera_name)
+                base = ""
+            if base:
+                break
+            # Re-grab a fresh frame and try again — a blurry/empty frame or a
+            # banned-word answer shouldn't doom the camera to a placeholder.
+            fresh = grab_frame(camera_name)
+            if fresh:
+                image = fresh
+            if stop_event is not None:
+                stop_event.wait(1.0)
+
+        if not base:
+            # Keep an existing good name if a re-name failed; otherwise leave it
+            # unnamed (shows its IP) to be retried on the next sweep.
+            if not already_named:
+                LOGGER.warning("Could not name %s yet; shows its IP, will retry", camera_name)
+            continue
+
+        # Names in use, excluding THIS camera's own current name (so a re-name to
+        # the same descriptive name doesn't get a spurious "2").
         used = namer.used_names()
-        if base and base in used:
+        if already_named:
+            used = used - {namer.display(camera_name)}
+        if base in used:
             try:
                 distinct = _distinct_name(client, model, image, used, timeout_seconds=timeout_seconds)
             except Exception:
@@ -130,6 +160,6 @@ def name_cameras(
                 distinct = ""
             if distinct and distinct not in used:
                 base = distinct
-        display = unique_name(base or fallback_name(camera_name), namer.used_names())
+        display = unique_name(base, used)
         namer.set(camera_name, display)
         LOGGER.info("Named camera %s -> %s", camera_name, display)

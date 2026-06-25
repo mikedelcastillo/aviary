@@ -175,19 +175,21 @@ DIGEST_SYSTEM_PROMPT = (
     "update' text about the pet birds. Given timestamped observations, write 2-4 "
     "friendly sentences: who was active, who was together, what they were up to "
     "(eating, playing, preening, resting). Use each bird's pronoun exactly as it "
-    "appears in the notes (he/she). Don't invent things not in the notes. No "
-    "lists, no preamble — just the update."
+    "appears in the notes (he/she), and refer to birds by NAME only — never add "
+    "the species. Don't invent things not in the notes. No lists, no preamble — "
+    "just the update."
 )
 
 
 def summarise_day(
-    client, llm_model: str, observations: list[str], *, header: str = "", timeout_seconds: float | None = None
+    client, llm_model: str, observations: list[str], *, header: str = "", pronoun_note: str = "", timeout_seconds: float | None = None
 ) -> str:
     """Fold per-photo captions into one warm caretaker summary via the LLM."""
     if not observations:
         return ""
     notes = "\n".join(f"- {line}" for line in observations)
-    user = (f"{header}\n" if header else "") + f"Observations:\n{notes}"
+    pronoun_prefix = f"Bird pronouns (use these exactly): {pronoun_note}\n\n" if pronoun_note else ""
+    user = (f"{header}\n" if header else "") + pronoun_prefix + f"Observations:\n{notes}"
     reply = client.chat(
         llm_model,
         [
@@ -201,22 +203,30 @@ def summarise_day(
 
 
 _ACTIVITY_SUMMARY_PROMPT = (
-    "You are the aviary caretaker giving a quick activity update from logged "
-    "memories. Write AT MOST 3 short sentences, warm and concrete: which birds, "
-    "who was with whom, what they did. Use each bird's pronoun as it appears in "
-    "the notes (he/she). Don't invent anything not in the notes. No lists or "
-    "preamble — just the update."
+    "You are the aviary caretaker giving an activity update from logged memories. "
+    "Write it as bullet points — start each line with '• ' — UP TO 10 bullets. "
+    "Cover EVERY bird that appears in the notes: at least one bullet per bird, "
+    "saying what it did and who it was with. Use each bird's correct pronoun from "
+    "the pronouns given (she/he), and refer to birds by NAME only — never add the "
+    "species. Be warm and concrete; don't invent anything not in the notes. No "
+    "preamble or closing line — just the bullets."
 )
 
 
 def summarise_activity(
-    client, model: str, notes: list[str], subject: str = "", *, timeout_seconds: float | None = None
+    client, model: str, notes: list[str], subject: str = "", pronoun_note: str = "", *, timeout_seconds: float | None = None
 ) -> str:
-    """Fold journal memory notes into a <=3-sentence activity report."""
+    """Fold journal memory notes into a <=3-sentence activity report.
+
+    ``pronoun_note`` states each bird's sex (the notes often don't carry it, so
+    the model would otherwise default everyone to "he").
+    """
     if not notes:
         return ""
     body = "\n".join(f"- {line}" for line in notes)
     ask = f"Summarise {subject}'s activity from these notes:\n{body}" if subject else f"Notes:\n{body}"
+    if pronoun_note:
+        ask = f"Bird pronouns (use these exactly): {pronoun_note}\n\n{ask}"
     reply = client.chat(
         model,
         [

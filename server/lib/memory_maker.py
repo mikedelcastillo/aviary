@@ -56,6 +56,7 @@ class MemoryMaker:
         poll_seconds: float = 30.0,
         fresh_seconds: float = 15.0,
         camera_display: Callable[[str], str] = lambda name: name,
+        pronoun_note: str = "",
         max_cameras: int = 3,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] = datetime.now,
@@ -73,6 +74,7 @@ class MemoryMaker:
         self._poll = poll_seconds
         self._fresh = fresh_seconds
         self._camera_display = camera_display
+        self._pronoun_note = pronoun_note
         self._max_cameras = max_cameras
         self._clock = clock
         self._now = now
@@ -170,7 +172,8 @@ class MemoryMaker:
             observations.append(f"{who} ({self._camera_display(camera)}): {note or 'seen'}")
         try:
             summary = summarise_activity(
-                self._client, self._llm_model, observations, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
+                self._client, self._llm_model, observations,
+                pronoun_note=self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
             )
         except Exception:
             LOGGER.exception("Memory summary failed")

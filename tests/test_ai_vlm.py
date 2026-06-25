@@ -67,7 +67,9 @@ def test_build_detection_context_grounds_the_vlm() -> None:
     ]
     context = build_detection_context(detections, 200, 200, {"pizza": "cockatiel"})
     assert "Percy in the top-left" in context
-    assert "Pizza (a cockatiel) in the bottom-right" in context
+    # Species is deliberately NOT included (so the model won't say "the cockatiel").
+    assert "Pizza in the bottom-right" in context
+    assert "cockatiel" not in context
 
 
 def test_build_detection_context_when_empty() -> None:
@@ -75,13 +77,16 @@ def test_build_detection_context_when_empty() -> None:
     assert "no birds" in context.lower()
 
 
-def test_build_detection_context_includes_pronouns() -> None:
+def test_build_detection_context_uses_name_and_pronoun_not_species() -> None:
     detections = [FakeDetection("pizza", (0, 0, 20, 20)), FakeDetection("percy", (180, 180, 200, 200))]
     context = build_detection_context(
         detections, 200, 200, {"pizza": "cockatiel"}, {"pizza": "he", "percy": "she"}
     )
-    assert "Pizza (he, a cockatiel)" in context
+    # Name + pronoun, but NOT the species — and an instruction not to state it.
+    assert "Pizza (he)" in context
     assert "Percy (she)" in context
+    assert "cockatiel" not in context
+    assert "species" in context.lower()
 
 
 def test_describe_scene_prepends_context() -> None:

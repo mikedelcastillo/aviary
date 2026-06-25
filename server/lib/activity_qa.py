@@ -50,6 +50,7 @@ class ActivityResponder:
         notify: Callable[[int, str], None],
         send_photo: Callable[[int, bytes, str | None], object] | None = None,
         find: Callable[[int, str], None] | None = None,
+        pronoun_note: str = "",
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._memories_dir = Path(memories_dir)
@@ -59,6 +60,7 @@ class ActivityResponder:
         self._notify = notify
         self._send_photo = send_photo
         self._find = find
+        self._pronoun_note = pronoun_note
         self._clock = clock
 
     def _window(self, text: str, argument: str, now: datetime) -> tuple[datetime, str]:
@@ -89,7 +91,8 @@ class ActivityResponder:
         subject = pretty_phrase(bird_text) if bird_text.strip() else ""
         try:
             summary = summarise_activity(
-                self._client, self._llm_model, notes, subject, timeout_seconds=SUMMARY_TIMEOUT_SECONDS
+                self._client, self._llm_model, notes, subject,
+                self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
             )
         except Exception:
             LOGGER.exception("Activity summary failed")
