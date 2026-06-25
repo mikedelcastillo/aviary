@@ -382,14 +382,17 @@ class PtzManager:
             return None
         return OnvifPatrol(cameras, cols=self._scan_cols, rows=self._scan_rows)
 
-    def go_home(self, hosts) -> tuple[int, int]:
+    def go_home(self, hosts) -> tuple[int, int, int]:
         """Send every PTZ camera among ``hosts`` to its first saved preset.
 
-        Returns ``(homed, total_ptz)``. Used by ``/home`` and run after discovery
-        so the cameras always face their saved viewpoint.
+        Returns ``(homed, total_ptz, without_preset)`` — where ``without_preset``
+        counts PTZ cameras that had no saved home preset to aim at, so ``/home``
+        can tell the user to set one in the Tapo app. Used by ``/home`` and run
+        after discovery so the cameras always face their saved viewpoint.
         """
         cameras = [cam for host in sorted(hosts) if (cam := self.camera_for(host))]
         homed = 0
+        without_preset = 0
         for camera in cameras:
             try:
                 preset = camera.first_preset_token()
@@ -397,6 +400,7 @@ class PtzManager:
                 LOGGER.exception("PTZ get-presets failed on %s", camera.host)
                 preset = None
             if preset is None:
+                without_preset += 1
                 LOGGER.warning("PTZ %s has no saved preset to home to", camera.host)
                 continue
             try:
@@ -405,7 +409,7 @@ class PtzManager:
                     LOGGER.info("PTZ %s sent to home preset %s", camera.host, preset)
             except Exception:
                 LOGGER.exception("PTZ home failed on %s", camera.host)
-        return homed, len(cameras)
+        return homed, len(cameras), without_preset
 
 
 class OnvifPatrol:

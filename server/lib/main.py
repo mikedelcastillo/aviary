@@ -248,10 +248,17 @@ def build_nl_router(
 
 def home_report(ptz_manager, hosts) -> str:
     """Send PTZ cameras to their saved viewpoint and report how many."""
-    homed, total = ptz_manager.go_home(hosts)
+    homed, total, without_preset = ptz_manager.go_home(hosts)
     if total == 0:
         return "No pan-tilt cameras to home."
-    return f"🏠 Sent {homed}/{total} pan-tilt camera(s) to their saved viewpoint."
+    message = f"🏠 Sent {homed}/{total} pan-tilt camera(s) to their saved viewpoint."
+    if without_preset:
+        # A bare "0/2" is mystifying; tell the user WHY a camera didn't move.
+        message += (
+            f"\n⚠️ {without_preset} camera(s) have no saved home preset — "
+            "set one in the Tapo app so I can aim them."
+        )
+    return message
 
 
 def make_console_dispatcher(

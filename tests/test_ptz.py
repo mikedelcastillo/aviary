@@ -193,9 +193,9 @@ def test_ptz_manager_go_home_sends_each_ptz_camera_to_preset() -> None:
     # Pre-seed the capability cache: two PTZ cams + one non-PTZ (None).
     mgr._cache = {"192.168.1.30": cam1, "192.168.1.31": cam2, "192.168.1.99": None}
 
-    homed, total = mgr.go_home(["192.168.1.30", "192.168.1.31", "192.168.1.99"])
+    homed, total, without_preset = mgr.go_home(["192.168.1.30", "192.168.1.31", "192.168.1.99"])
 
-    assert (homed, total) == (2, 2)  # the non-PTZ host is ignored
+    assert (homed, total, without_preset) == (2, 2, 0)  # the non-PTZ host is ignored
     assert cam1.preset_gotos == ["1"]
     assert cam2.preset_gotos == ["1"]
 
@@ -208,7 +208,25 @@ def test_ptz_manager_go_home_skips_cameras_without_preset() -> None:
     cam = FakeCamera("192.168.1.30", preset=None)  # no saved viewpoint
     mgr._cache = {"192.168.1.30": cam}
 
-    homed, total = mgr.go_home(["192.168.1.30"])
+    homed, total, without_preset = mgr.go_home(["192.168.1.30"])
 
-    assert (homed, total) == (0, 1)
+    assert (homed, total, without_preset) == (0, 1, 1)
     assert cam.preset_gotos == []
+
+
+def test_home_report_warns_about_cameras_without_preset() -> None:
+    from lib.main import home_report
+
+    class FakeMgr:
+        def __init__(self, result):
+            self.result = result
+
+        def go_home(self, hosts):
+            return self.result
+
+    assert "No pan-tilt cameras" in home_report(FakeMgr((0, 0, 0)), [])
+    # Some cameras lack a saved preset -> explain why, don't just say "0/2".
+    message = home_report(FakeMgr((1, 2, 1)), ["h"])
+    assert "1/2" in message and "no saved home preset" in message
+    # When every camera has a preset, no warning is appended.
+    assert "no saved home preset" not in home_report(FakeMgr((2, 2, 0)), ["h"])
