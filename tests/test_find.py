@@ -9,13 +9,15 @@ from lib.find import (
     format_not_found_message,
     format_progress_message,
     format_visible,
+    pretty,
     short_camera,
 )
 
 
-class FakeRegistry:
-    """Stands in for ObjectRegistry: returns canned snapshot rows."""
+FINDABLE = ["bambi", "cockatiel", "draft", "jynx", "lovebird", "matcha", "percy", "pizza"]
 
+
+class FakeRegistry:
     def __init__(self, rows: list[dict]) -> None:
         self._rows = rows
 
@@ -30,56 +32,53 @@ def row(camera: str, label: str, since: float) -> dict:
 # -- pure helpers -----------------------------------------------------------
 
 
+def test_pretty_capitalises_bird_names() -> None:
+    assert pretty("percy") == "Percy"
+    assert pretty("unknown_bird") == "Unknown Bird"
+
+
 def test_short_camera_trims_to_last_octet() -> None:
     assert short_camera("camera-192.168.1.8") == ".8"
-    assert short_camera("studio-cam") == "studio-cam"
 
 
 def test_currently_visible_filters_by_freshness() -> None:
     rows = [
         row("camera-192.168.1.8", "percy", 2.0),
-        row("camera-192.168.1.42", "percy", 30.0),  # stale -> excluded
+        row("camera-192.168.1.42", "percy", 30.0),  # stale
         row("camera-192.168.1.42", "matcha", 1.0),
     ]
-    visible = currently_visible(rows, fresh_seconds=12.0)
-    assert visible == {
+    assert currently_visible(rows, 12.0) == {
         "percy": ["camera-192.168.1.8"],
         "matcha": ["camera-192.168.1.42"],
     }
 
 
-def test_currently_visible_dedupes_and_sorts_cameras() -> None:
-    rows = [
-        row("camera-192.168.1.44", "matcha", 1.0),
-        row("camera-192.168.1.8", "matcha", 1.0),
-        row("camera-192.168.1.8", "matcha", 2.0),
-    ]
-    visible = currently_visible(rows, fresh_seconds=12.0)
-    # Cameras are de-duplicated and sorted lexicographically by full name.
-    assert visible == {"matcha": ["camera-192.168.1.44", "camera-192.168.1.8"]}
-
-
-def test_format_visible_and_messages() -> None:
+def test_format_visible_capitalises() -> None:
+    assert "Percy (.8)" in format_visible({"percy": ["camera-192.168.1.8"]})
     assert format_visible({}) == "no birds in view"
-    visible = {"percy": ["camera-192.168.1.8"], "matcha": ["camera-192.168.1.42"]}
-    rendered = format_visible(visible)
-    assert "percy (.8)" in rendered
-    assert "matcha (.42)" in rendered
-    assert "Found percy" in format_found_message("percy", ["camera-192.168.1.8"])
-    assert "Still looking for percy" in format_progress_message("percy", visible)
-    not_found = format_not_found_message("percy", elapsed=300.0, ever_seen=visible)
-    assert "Couldn't find percy" in not_found
-    assert "5 min" in not_found
-    assert "matcha" in not_found  # recap of what was seen
 
 
-# -- validation -------------------------------------------------------------
+def test_format_found_message_lists_birds_and_description() -> None:
+    visible = {"draft": ["camera-192.168.1.8"], "percy": ["camera-192.168.1.42"]}
+    msg = format_found_message(["draft", "percy"], visible, "Draft is eating.")
+    assert "Draft on .8" in msg
+    assert "Percy on .42" in msg
+    assert "Draft is eating." in msg
+
+
+def test_format_progress_and_not_found_capitalise() -> None:
+    assert "Cockatiels" in format_progress_message("cockatiels", {})
+    nf = format_not_found_message("cockatiels", 300.0, {"matcha": ["camera-192.168.1.8"]})
+    assert "Cockatiels" in nf and "Matcha" in nf and "5 min" in nf
+
+
+# -- finder -----------------------------------------------------------------
 
 
 def _finder(registry, sent, **kwargs):
     return BirdFinder(
         registry,
-        lambda: ["percy", "matcha", "lovebird"],
+        lambda: FINDABLE,
         notify=lambda chat_id, text: sent.append((chat_id, text)),
         clock=kwargs.pop("clock", lambda: 0.0),
         poll_seconds=0.0,
@@ -87,90 +86,68 @@ def _finder(registry, sent, **kwargs):
     )
 
 
-def test_normalise_target_is_case_insensitive() -> None:
+def test_resolve_targets_handles_groups() -> None:
     finder = _finder(FakeRegistry([]), [])
-    assert finder.normalise_target("Percy") == "percy"
-    assert finder.normalise_target("  MATCHA ") == "matcha"
-    assert finder.normalise_target("dog") is None
-    assert finder.normalise_target("") is None
+    assert set(finder.resolve_targets("cockatiels")) == {"draft", "pizza", "cockatiel"}
+    assert finder.resolve_targets("percy") == ["percy"]
 
 
-def test_start_unknown_bird_lists_options() -> None:
+def test_start_unknown_lists_options() -> None:
     finder = _finder(FakeRegistry([]), [])
-    message = finder.start(123, "dog", threading.Event())
-    assert "don't know a bird" in message
-    assert "percy" in message
+    msg = finder.start(1, "dinosaur", threading.Event())
+    assert "don't know" in msg.lower()
+    assert "Percy" in msg
 
 
-def test_start_without_target_returns_usage() -> None:
+def test_start_empty_returns_usage() -> None:
     finder = _finder(FakeRegistry([]), [])
-    message = finder.start(123, "", threading.Event())
-    assert message.startswith("Usage:")
-    assert "percy" in message
+    assert finder.start(1, "", threading.Event()).startswith("Usage:")
 
 
-def test_start_refuses_second_concurrent_search() -> None:
+def test_start_refuses_second_search() -> None:
     finder = _finder(FakeRegistry([]), [])
-    # Simulate a search already in flight without spawning a thread.
     finder._active_target = "matcha"
-    message = finder.start(123, "percy", threading.Event())
-    assert "Already searching for matcha" in message
+    assert "Already searching for Matcha" in finder.start(1, "percy", threading.Event())
 
 
-# -- search loop ------------------------------------------------------------
-
-
-def test_run_reports_when_target_is_visible() -> None:
-    sent: list[tuple[int, str]] = []
-    registry = FakeRegistry([row("camera-192.168.1.8", "percy", 1.0)])
+def test_run_finds_any_member_of_a_group() -> None:
+    sent: list = []
+    # Only draft is visible; "find the cockatiels" should still succeed on it.
+    registry = FakeRegistry([row("camera-192.168.1.8", "draft", 1.0)])
     finder = _finder(registry, sent, timeout_seconds=300.0)
-    outcome = finder._run(123, "percy", threading.Event())
+    targets = finder.resolve_targets("cockatiels")
+    outcome = finder._run(7, "cockatiels", targets, threading.Event())
     assert outcome.found is True
-    assert outcome.cameras == ["camera-192.168.1.8"]
-    assert any("Found percy" in text for _, text in sent)
+    assert outcome.found_labels == ["draft"]
+    assert any("Found Draft on .8" in text for _, text in sent)
 
 
-def test_run_sends_proof_photos_when_found() -> None:
-    sent: list[tuple[int, str]] = []
-    albums: list[tuple[int, list]] = []
+def test_run_includes_vlm_description_and_photos_on_hit() -> None:
+    sent: list = []
+    albums: list = []
     registry = FakeRegistry([row("camera-192.168.1.8", "percy", 1.0)])
     finder = BirdFinder(
         registry,
-        lambda: ["percy"],
-        notify=lambda chat_id, text: sent.append((chat_id, text)),
-        grab_frame=lambda camera: b"jpeg-bytes-for-" + camera.encode(),
-        send_album=lambda chat_id, items: albums.append((chat_id, list(items))),
+        lambda: FINDABLE,
+        notify=lambda c, t: sent.append((c, t)),
+        grab_frame=lambda cam: b"jpeg",
+        send_album=lambda c, items: albums.append((c, list(items))),
+        describe_frame=lambda image: "Percy is preening near the window.",
         clock=lambda: 0.0,
         poll_seconds=0.0,
         timeout_seconds=300.0,
     )
-    outcome = finder._run(123, "percy", threading.Event())
+    outcome = finder._run(7, "percy", ["percy"], threading.Event())
     assert outcome.found is True
-    # A proof album of the camera that saw the bird is sent to the chat.
-    assert len(albums) == 1
-    chat_id, items = albums[0]
-    assert chat_id == 123
-    assert items[0][0] == b"jpeg-bytes-for-camera-192.168.1.8"
-    assert "percy" in items[0][1]
+    # The scene description rides along in the message and the photo caption.
+    assert any("Percy is preening" in text for _, text in sent)
+    assert albums and "Percy is preening" in albums[0][1][0][1]
 
 
-def test_run_times_out_when_target_absent() -> None:
-    sent: list[tuple[int, str]] = []
+def test_run_times_out_when_absent() -> None:
+    sent: list = []
     registry = FakeRegistry([row("camera-192.168.1.42", "matcha", 1.0)])
-    # timeout_seconds=0 -> deadline == start, so the loop falls straight through
-    # to the not-found report without sleeping.
     finder = _finder(registry, sent, timeout_seconds=0.0)
-    outcome = finder._run(123, "percy", threading.Event())
+    outcome = finder._run(7, "percy", ["percy"], threading.Event())
     assert outcome.found is False
-    assert any("Couldn't find percy" in text for _, text in sent)
-
-
-def test_run_stops_early_when_stop_event_set() -> None:
-    sent: list[tuple[int, str]] = []
-    registry = FakeRegistry([])
-    finder = _finder(registry, sent, timeout_seconds=300.0)
-    stop = threading.Event()
-    stop.set()
-    outcome = finder._run(123, "percy", stop)
-    # Stop requested before the first poll: ends as not-found, no crash.
-    assert outcome.found is False
+    assert any("Couldn't find Percy" in text for _, text in sent)

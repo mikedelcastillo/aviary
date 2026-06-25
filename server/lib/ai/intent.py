@@ -50,8 +50,10 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '- "pause": stop the cameras / privacy mode / "stop recording" / "stop the cams". '
         'argument = a duration if given (e.g. "10m", "1 hour"), else "".\n'
         '- "resume": turn the cameras back on / play / resume / unpause. argument = "".\n'
-        '- "find": locate a SPECIFIC bird RIGHT NOW — "where is X", "find X", "is X out". '
-        "argument = the bird's name.\n"
+        '- "find": locate one or more birds RIGHT NOW — "where is X", "find X", "is X out", '
+        '"find the cockatiels", "find any bird". argument = exactly the bird(s) or group the '
+        'user named, e.g. "percy", "percy and matcha", "the cockatiels", "lovebirds", '
+        '"any bird". Groups (cockatiels, lovebirds, budgies, birds) and "any" are allowed.\n'
         '- "discover": rescan / reload / refresh the cameras on the network. argument = "".\n'
         '- "status": how the cameras or system are doing, health, what is online. argument = "".\n'
         '- "snapshot": take or show pictures from all cameras right now. argument = "".\n'
@@ -59,10 +61,12 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '("what did X do today", "what are the birds doing"), greetings, or unclear '
         'requests. argument = "".\n\n'
         "Rules:\n"
-        '- "where is percy" -> find percy. "what did percy do today" -> chat (history, not '
-        "current location). Only use find when the user wants a bird's CURRENT whereabouts.\n"
-        f"- Known birds: {birds}. If a find target is not a known bird, still put what they "
-        "said in argument.\n"
+        '- "where is percy" -> find, argument "percy". "find the cockatiels" -> find, '
+        'argument "cockatiels". "find any bird" -> find, argument "any bird". '
+        '"what did percy do today" -> chat (history, not current location). Only use find '
+        "when the user wants a bird's CURRENT whereabouts.\n"
+        f"- Known birds: {birds}. Groups: cockatiels, lovebirds, budgies, birds. If a find "
+        "target is not known, still put what they said in argument.\n"
         "- Output ONLY the JSON object."
     )
 

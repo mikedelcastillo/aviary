@@ -1,17 +1,17 @@
-"""Locate a specific bird across every camera (the ``/find`` command).
+"""Locate one or more birds across every camera (the ``/find`` command).
 
-``/find percy`` answers "where is Percy right now?". It watches the shared
-:class:`~lib.objects.ObjectRegistry` — which every camera thread keeps updated
-with what its detector last saw — and reports the moment the target turns up,
-giving up after a timeout. While it searches it nudges any pan-tilt cameras
-through a patrol sweep (best-effort; see :mod:`lib.ptz`) so a bird tucked out of
-frame still gets found.
+"find percy", "find the cockatiels", "find any bird" — the target is resolved
+(via :mod:`lib.roster`) into a SET of detector labels, and the search succeeds
+the moment ANY of them turns up. It watches the shared
+:class:`~lib.objects.ObjectRegistry` that every camera thread keeps updated, and
+while it searches it nudges the pan-tilt cameras through a patrol sweep
+(best-effort; see :mod:`lib.ptz`). On a hit it sends photo proof and — when a
+vision model is wired — a short description of what the bird is doing and who
+it's with.
 
-The search runs on its OWN thread, never on the Telegram poll loop: a five
-minute hunt must not block /pause or /status. Progress is pushed to the
-requesting chat via a callback. Updates are deliberately *context-aware* — a new
-message only when the set of visible birds actually changes, plus an occasional
-heartbeat — so a long search doesn't turn into a stream of identical texts.
+The search runs on its OWN thread so a five-minute hunt never blocks the
+Telegram poll loop. Progress is context-aware: a message only when the set of
+visible birds changes, plus an occasional heartbeat.
 """
 
 from __future__ import annotations
@@ -22,27 +22,30 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence
 
+from lib.roster import DEFAULT_SPECIES_MEMBERS, expand_targets
+
 
 LOGGER = logging.getLogger("lib.find")
 
-# A label counts as "currently visible" if a camera saw it within this window.
-# Cameras sample ~1 fps, so a few sample intervals smooths over the frame the
-# bird happened to hop out of without going stale.
 DEFAULT_FRESH_SECONDS = 12.0
-# Total time to hunt before giving up, per the spec ("timeout of 5 minutes").
 DEFAULT_TIMEOUT_SECONDS = 300.0
-# How often to re-check the registry (and step the PTZ patrol).
 DEFAULT_POLL_SECONDS = 2.0
-# Cadence of the "every 10 seconds" progress check. A message is only actually
-# sent when the visible set changed or the heartbeat below is due.
 DEFAULT_TICK_SECONDS = 10.0
-# Force a reassurance message after this long with no change, so the user knows
-# the search is still alive even when nothing new has appeared.
 DEFAULT_HEARTBEAT_SECONDS = 60.0
 
 
 class _Snapshotter(Protocol):
     def snapshot(self) -> list[dict]: ...
+
+
+def pretty(label: str) -> str:
+    """Capitalise a bird label for display: percy -> Percy, unknown_bird -> Unknown Bird."""
+    return label.replace("_", " ").title()
+
+
+def pretty_phrase(text: str) -> str:
+    """Title-case a free-text request: "cockatiels" -> "Cockatiels"."""
+    return text.strip().title() if text.strip() else "that bird"
 
 
 def short_camera(name: str) -> str:
@@ -54,13 +57,7 @@ def short_camera(name: str) -> str:
 
 
 def currently_visible(rows: list[dict], fresh_seconds: float) -> dict[str, list[str]]:
-    """Map each freshly-seen label to the cameras seeing it.
-
-    ``rows`` are :meth:`lib.objects.ObjectRegistry.snapshot` entries (each has a
-    ``camera``, a ``label`` and ``since`` = seconds since last seen). Only rows
-    within ``fresh_seconds`` count as visible *now*. Cameras are de-duplicated
-    and ordered for a stable message.
-    """
+    """Map each freshly-seen label to the cameras seeing it (within ``fresh_seconds``)."""
     visible: dict[str, set[str]] = {}
     for row in rows:
         since = row.get("since")
@@ -71,29 +68,42 @@ def currently_visible(rows: list[dict], fresh_seconds: float) -> dict[str, list[
 
 
 def format_visible(visible: dict[str, list[str]]) -> str:
-    """Render the visible map as ``percy (.8), matcha (.42, .44)``."""
+    """Render the visible map as ``Percy (.8), Matcha (.42, .44)`` (capitalised)."""
     if not visible:
         return "no birds in view"
     parts = []
     for label in sorted(visible):
         cams = ", ".join(short_camera(camera) for camera in visible[label])
-        parts.append(f"{label} ({cams})")
+        parts.append(f"{pretty(label)} ({cams})")
     return "; ".join(parts)
 
 
-def format_found_message(target: str, cameras: list[str]) -> str:
-    where = ", ".join(short_camera(camera) for camera in cameras)
-    return f"🔎 Found {target}! On camera {where}."
+def format_found_message(
+    found_labels: list[str],
+    visible: dict[str, list[str]],
+    description: str | None = None,
+) -> str:
+    parts = []
+    for label in found_labels:
+        cams = ", ".join(short_camera(camera) for camera in visible.get(label, []))
+        parts.append(f"{pretty(label)} on {cams}")
+    message = f"🔎 Found {'; '.join(parts)}!"
+    if description:
+        message += f"\n{description}"
+    return message
 
 
-def format_progress_message(target: str, visible: dict[str, list[str]]) -> str:
-    return f"Still looking for {target}. Right now I can see: {format_visible(visible)}."
+def format_progress_message(requested: str, visible: dict[str, list[str]]) -> str:
+    return (
+        f"Still looking for {pretty_phrase(requested)}. "
+        f"Right now I can see: {format_visible(visible)}."
+    )
 
 
-def format_not_found_message(target: str, elapsed: float, ever_seen: dict[str, list[str]]) -> str:
-    minutes = int(round(elapsed / 60))
+def format_not_found_message(requested: str, elapsed: float, ever_seen: dict[str, list[str]]) -> str:
+    minutes = max(1, int(round(elapsed / 60)))
     base = (
-        f"😕 Couldn't find {target} after {minutes} min. "
+        f"😕 Couldn't find {pretty_phrase(requested)} after {minutes} min. "
         "They may be out of frame, behind something, or resting."
     )
     if ever_seen:
@@ -103,18 +113,15 @@ def format_not_found_message(target: str, elapsed: float, ever_seen: dict[str, l
 
 @dataclass
 class FindOutcome:
-    target: str
+    requested: str
     found: bool
+    found_labels: list[str] = field(default_factory=list)
     cameras: list[str] = field(default_factory=list)
     elapsed_seconds: float = 0.0
 
 
 class BirdFinder:
-    """Runs at most one search at a time, on a background thread.
-
-    A single-flight guard keeps a second ``/find`` from piling on while one is
-    already running; the caller gets told a search is in progress instead.
-    """
+    """Runs at most one search at a time, on a background thread."""
 
     def __init__(
         self,
@@ -124,7 +131,9 @@ class BirdFinder:
         notify: Callable[[int, str], None],
         grab_frame: "Callable[[str], bytes | None] | None" = None,
         send_album: "Callable[[int, Sequence[tuple[bytes, str | None]]], None] | None" = None,
+        describe_frame: "Callable[[bytes], str | None] | None" = None,
         make_patrol: "Callable[[], PtzPatrol | None] | None" = None,
+        species_members: dict[str, tuple[str, ...]] | None = None,
         fresh_seconds: float = DEFAULT_FRESH_SECONDS,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -135,14 +144,13 @@ class BirdFinder:
         self._registry = registry
         self._known_labels = known_labels
         self._notify = notify
-        # Grabs a camera's latest frame as JPEG bytes (proof photos on a hit),
-        # and sends an album to a chat. Both optional — without them /find still
-        # reports in text. Reuses the notifier's rate-limited album sender.
         self._grab_frame = grab_frame
         self._send_album = send_album
-        # Builds a fresh patrol per search (reflecting the cameras live right
-        # now), or None to search without moving anything. Best-effort.
+        # Optional VLM: given a frame's JPEG bytes, return a short scene
+        # description ("Percy is on the perch with Matcha"). Best-effort.
+        self._describe_frame = describe_frame
         self._make_patrol = make_patrol
+        self._species_members = species_members or DEFAULT_SPECIES_MEMBERS
         self._fresh_seconds = fresh_seconds
         self._timeout_seconds = timeout_seconds
         self._poll_seconds = poll_seconds
@@ -155,58 +163,60 @@ class BirdFinder:
     # -- validation --------------------------------------------------------
 
     def findable_labels(self) -> list[str]:
-        """Roster labels the live model can actually detect (no generic classes)."""
         return self._known_labels()
 
-    def normalise_target(self, target: str) -> str | None:
-        """Return the canonical label for ``target`` if findable, else ``None``."""
-        wanted = target.strip().lower()
-        if not wanted:
-            return None
-        for label in self._known_labels():
-            if label.lower() == wanted:
-                return label.lower()
-        return None
+    def resolve_targets(self, requested: str) -> list[str]:
+        """Expand a free-text request into concrete findable labels."""
+        return expand_targets(requested, self._known_labels(), self._species_members)
+
+    def _options_text(self) -> str:
+        birds = ", ".join(pretty(label) for label in self.findable_labels())
+        return (
+            f"I can look for: {birds or '(no labels)'} — or groups like the "
+            "cockatiels, the lovebirds, or all the birds."
+        )
 
     # -- entry point -------------------------------------------------------
 
-    def start(self, chat_id: int, target: str, stop_event: threading.Event) -> str:
+    def start(self, chat_id: int, requested: str, stop_event: threading.Event) -> str:
         """Validate and launch a search; return the immediate ack/refusal text."""
-        labels = ", ".join(self.findable_labels()) or "(model has no labels)"
-        if not target.strip():
-            return f"Usage: /find <bird>. I can look for: {labels}."
-        canonical = self.normalise_target(target)
-        if canonical is None:
-            return (
-                f"I don't know a bird called \"{target.strip()}\". "
-                f"I can look for: {labels}."
-            )
+        if not requested.strip():
+            return f"Usage: /find <bird>. {self._options_text()}"
+        targets = self.resolve_targets(requested)
+        if not targets:
+            return f"I don't know \"{requested.strip()}\". {self._options_text()}"
 
         with self._active_lock:
             if self._active_target is not None:
-                return f"Already searching for {self._active_target}. One hunt at a time."
-            self._active_target = canonical
+                return (
+                    f"Already searching for {pretty_phrase(self._active_target)}. "
+                    "One hunt at a time."
+                )
+            self._active_target = requested.strip()
 
         thread = threading.Thread(
             target=self._run_guarded,
-            args=(chat_id, canonical, stop_event),
-            name=f"find-{canonical}",
+            args=(chat_id, requested.strip(), targets, stop_event),
+            name="find",
             daemon=True,
         )
         thread.start()
         minutes = int(round(self._timeout_seconds / 60))
+        whom = ", ".join(pretty(label) for label in targets[:4])
+        if len(targets) > 4:
+            whom += f" +{len(targets) - 4} more"
         return (
-            f"🔭 On it — searching all cameras for {canonical} (up to {minutes} min). "
-            "I'll report what I can see and ping you the moment I spot them."
+            f"🔭 On it — searching all cameras for {whom} (up to {minutes} min). "
+            "I'll ping you the moment I spot one."
         )
 
-    def _run_guarded(self, chat_id: int, target: str, stop_event: threading.Event) -> None:
+    def _run_guarded(self, chat_id, requested, targets, stop_event) -> None:
         try:
-            self._run(chat_id, target, stop_event)
+            self._run(chat_id, requested, targets, stop_event)
         except Exception:
-            LOGGER.exception("Find loop failed for target=%s", target)
+            LOGGER.exception("Find loop failed for %r", requested)
             try:
-                self._notify(chat_id, f"Search for {target} hit an error and stopped.")
+                self._notify(chat_id, f"Search for {pretty_phrase(requested)} hit an error and stopped.")
             except Exception:
                 LOGGER.exception("Failed to send find-error message")
         finally:
@@ -215,9 +225,7 @@ class BirdFinder:
 
     # -- the search loop ---------------------------------------------------
 
-    def _run(self, chat_id: int, target: str, stop_event: threading.Event) -> FindOutcome:
-        # Build the patrol for THIS search so it reflects the cameras live right
-        # now; tear it down in the finally so movement always halts.
+    def _run(self, chat_id, requested, targets, stop_event) -> FindOutcome:
         patrol = None
         if self._make_patrol is not None:
             try:
@@ -225,7 +233,7 @@ class BirdFinder:
             except Exception:
                 LOGGER.exception("Building PTZ patrol failed; searching without it")
         try:
-            return self._search(chat_id, target, stop_event, patrol)
+            return self._search(chat_id, requested, targets, stop_event, patrol)
         finally:
             if patrol is not None:
                 try:
@@ -233,13 +241,14 @@ class BirdFinder:
                 except Exception:
                     LOGGER.exception("PTZ patrol stop failed")
 
-    def _search(self, chat_id, target, stop_event, patrol) -> FindOutcome:
+    def _search(self, chat_id, requested, targets, stop_event, patrol) -> FindOutcome:
         start = self._clock()
         deadline = start + self._timeout_seconds
         next_tick = start + self._tick_seconds
         last_visible_keys: frozenset[str] | None = None
         last_message_at = start
         ever_seen: dict[str, list[str]] = {}
+        target_set = set(targets)
 
         if patrol is not None:
             try:
@@ -249,25 +258,23 @@ class BirdFinder:
 
         while not stop_event.is_set() and self._clock() < deadline:
             visible = currently_visible(self._registry.snapshot(), self._fresh_seconds)
-            # Accumulate everything seen during the hunt for the not-found recap.
             for label, cams in visible.items():
-                merged = set(ever_seen.get(label, [])) | set(cams)
-                ever_seen[label] = sorted(merged)
+                ever_seen[label] = sorted(set(ever_seen.get(label, [])) | set(cams))
 
-            if target in visible:
-                cameras = visible[target]
-                self._notify(chat_id, format_found_message(target, cameras))
-                self._send_found_photos(chat_id, target, cameras)
-                return FindOutcome(target, True, cameras, self._clock() - start)
+            found_labels = [label for label in targets if label in visible]
+            if found_labels:
+                cameras = sorted({cam for label in found_labels for cam in visible[label]})
+                description = self._describe_camera(cameras[0]) if cameras else None
+                self._notify(chat_id, format_found_message(found_labels, visible, description))
+                self._send_found_photos(chat_id, found_labels, visible, description)
+                return FindOutcome(requested, True, found_labels, cameras, self._clock() - start)
 
             now = self._clock()
             if now >= next_tick:
                 next_tick = now + self._tick_seconds
                 keys = frozenset(visible)
-                changed = keys != last_visible_keys
-                stale = (now - last_message_at) >= self._heartbeat_seconds
-                if changed or stale:
-                    self._notify(chat_id, format_progress_message(target, visible))
+                if keys != last_visible_keys or (now - last_message_at) >= self._heartbeat_seconds:
+                    self._notify(chat_id, format_progress_message(requested, visible))
                     last_visible_keys = keys
                     last_message_at = now
 
@@ -280,26 +287,47 @@ class BirdFinder:
             stop_event.wait(self._poll_seconds)
 
         elapsed = self._clock() - start
-        self._notify(chat_id, format_not_found_message(target, elapsed, ever_seen))
-        return FindOutcome(target, False, [], elapsed)
+        self._notify(chat_id, format_not_found_message(requested, elapsed, ever_seen))
+        return FindOutcome(requested, False, [], [], elapsed)
 
-    def _send_found_photos(self, chat_id: int, target: str, cameras: list[str]) -> None:
-        """Send the latest frame of each camera that saw the target, as proof.
+    # -- vision + photo helpers -------------------------------------------
 
-        Best-effort: a camera without a current frame is skipped, and any send
-        error is swallowed so it never turns a successful find into a failure.
-        """
+    def _describe_camera(self, camera: str) -> str | None:
+        """Best-effort VLM description of what a camera currently shows."""
+        if self._grab_frame is None or self._describe_frame is None:
+            return None
+        try:
+            image = self._grab_frame(camera)
+            if not image:
+                return None
+            return self._describe_frame(image) or None
+        except Exception:
+            LOGGER.exception("Scene description failed for %s", camera)
+            return None
+
+    def _send_found_photos(self, chat_id, found_labels, visible, description) -> None:
+        """Send the latest frame of each camera that saw a found bird, as proof."""
         if self._grab_frame is None or self._send_album is None:
             return
+        cameras = sorted({cam for label in found_labels for cam in visible.get(label, [])})
         items: list[tuple[bytes, str | None]] = []
-        for camera in cameras:
+        for index, camera in enumerate(cameras):
             try:
                 image = self._grab_frame(camera)
             except Exception:
                 LOGGER.exception("Grabbing proof frame for %s failed", camera)
                 image = None
-            if image:
-                items.append((image, f"{target} — camera {short_camera(camera)}"))
+            if not image:
+                continue
+            # Birds known to be on this camera, capitalised, plus the scene
+            # description on the first photo.
+            here = ", ".join(
+                pretty(label) for label in found_labels if camera in visible.get(label, [])
+            )
+            caption = f"{here} — camera {short_camera(camera)}"
+            if index == 0 and description:
+                caption += f"\n{description}"
+            items.append((image, caption))
         if not items:
             return
         try:

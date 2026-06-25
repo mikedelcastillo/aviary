@@ -16,6 +16,7 @@ from lib.ai.chat import chat_reply
 from lib.ai.client import OllamaClient
 from lib.ai.intent import Intent
 from lib.ai.router import NaturalLanguageRouter
+from lib.ai.vlm import describe_scene
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.config import AppConfig, _as_user_ids, build_config
@@ -26,6 +27,7 @@ from lib.discovery import DiscoveryProgress
 from lib.find import BirdFinder
 from lib.ptz import PtzManager
 from lib.objects import ObjectRegistry
+from lib.roster import load_species_members
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_report
@@ -34,6 +36,10 @@ from lib.telegram.notifier import TelegramNotifier
 
 
 LOGGER = logging.getLogger("lib")
+
+# Upper bound on a single /find scene-description VLM call. Generous enough for a
+# cold vision model, short enough that a stuck one doesn't delay the find reply.
+VLM_DESCRIBE_TIMEOUT_SECONDS = 60.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,6 +100,7 @@ def build_nl_router(
     finder,
     control: RuntimeControl,
     stop_event: threading.Event,
+    client: OllamaClient | None,
     *,
     find_provider,
     discover_provider,
@@ -107,12 +114,9 @@ def build_nl_router(
     providers the slash commands use, so behaviour (privacy refusals, acks) is
     identical whether the user types ``/find percy`` or "where's percy?".
     """
-    if not app_config.ollama.enabled or notifier is None or finder is None:
+    if not app_config.ollama.enabled or notifier is None or finder is None or client is None:
         return None
 
-    client = OllamaClient(
-        app_config.ollama.base_url, timeout_seconds=app_config.ollama.timeout_seconds
-    )
     if client.is_available():
         LOGGER.info(
             "Ollama reachable at %s (llm=%s)",
@@ -201,6 +205,17 @@ def main() -> None:
     # import/load chatter scrolls normally here instead of fighting the render.
     detector = ObjectDetector(app_config.model)
     notifier = build_notifier(app_config)
+
+    # One shared Ollama client for every AI feature (NL routing, chat, vision
+    # scene descriptions, camera naming). None when the AI is disabled.
+    ollama_client = (
+        OllamaClient(
+            app_config.ollama.base_url, timeout_seconds=app_config.ollama.timeout_seconds
+        )
+        if app_config.ollama.enabled
+        else None
+    )
+
     alert_state = AlertState(
         app_config.telegram.last_seen_alert_seconds,
         app_config.telegram.bbox_movement_alert_ratio,
@@ -293,6 +308,18 @@ def main() -> None:
             camera_stats = stats.get(camera_name)
         return latest_frame_jpeg(camera_stats) if camera_stats is not None else None
 
+    def describe_frame(image: bytes) -> str | None:
+        # Best-effort VLM scene description for /find hits. Bounded timeout so a
+        # slow/cold vision model never holds up the find reply for long.
+        if ollama_client is None:
+            return None
+        return describe_scene(
+            ollama_client,
+            app_config.ollama.vlm_model,
+            image,
+            timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
+        )
+
     finder = (
         BirdFinder(
             registry,
@@ -300,7 +327,9 @@ def main() -> None:
             notify=notifier.send_text,
             grab_frame=grab_frame,
             send_album=notifier.send_album,
+            describe_frame=describe_frame if ollama_client is not None else None,
             make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
+            species_members=load_species_members(),
         )
         if notifier is not None
         else None
@@ -327,6 +356,7 @@ def main() -> None:
         finder,
         control,
         stop_event,
+        ollama_client,
         find_provider=find_provider,
         discover_provider=discover_provider,
         status_provider=status_provider,
