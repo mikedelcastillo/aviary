@@ -127,10 +127,13 @@ def describe_scene(
     image_bytes: bytes,
     *,
     context: str | None = None,
+    max_dim: int | None = MAX_VLM_DIM,
     timeout_seconds: float | None = None,
 ) -> str:
+    # max_dim=None lets a caller that already downscaled the frame skip the
+    # re-decode inside describe_image.
     return describe_image(
-        client, model, image_bytes, SCENE_PROMPT, context=context, timeout_seconds=timeout_seconds
+        client, model, image_bytes, SCENE_PROMPT, context=context, max_dim=max_dim, timeout_seconds=timeout_seconds
     )
 
 

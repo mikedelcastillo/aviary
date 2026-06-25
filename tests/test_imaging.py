@@ -23,3 +23,11 @@ def test_is_ir_frame_false_for_colour() -> None:
 
 def test_is_ir_frame_false_on_undecodable() -> None:
     assert is_ir_frame(b"not an image") is False
+
+
+def test_downscale_array_to_jpeg_caps_long_edge() -> None:
+    from lib.imaging import downscale_array_to_jpeg
+    frame = np.zeros((1296, 2304, 3), np.uint8)
+    out = downscale_array_to_jpeg(frame, max_dim=1024)
+    h, w = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR).shape[:2]
+    assert max(h, w) == 1024 and (h, w) == (576, 1024)

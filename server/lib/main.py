@@ -19,7 +19,7 @@ from lib.ai.client import OllamaClient
 from lib.ai.intent import Intent
 from lib.ai.memory import ConversationMemory
 from lib.ai.router import NaturalLanguageRouter
-from lib.ai.vlm import build_detection_context, describe_scene
+from lib.ai.vlm import MAX_VLM_DIM, build_detection_context, describe_scene
 from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
@@ -38,6 +38,7 @@ from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder
+from lib.imaging import downscale_array_to_jpeg
 from lib.ir import IRState
 from lib.labels import pretty_labels
 from lib.ptz import PtzManager
@@ -536,16 +537,21 @@ def main() -> None:
             return None
         frame = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
         context = None
+        vlm_image = image
         if frame is not None:
             height, width = frame.shape[:2]
             context = build_detection_context(
                 detector.predict(frame), width, height, member_species, pronouns
             )
+            # Reuse the frame we just decoded: downscale the array directly so the
+            # VLM call doesn't decode the JPEG a second time.
+            vlm_image = downscale_array_to_jpeg(frame, MAX_VLM_DIM)
         return describe_scene(
             ollama_client,
             app_config.ollama.vlm_model,
-            image,
+            vlm_image,
             context=context,
+            max_dim=None if frame is not None else MAX_VLM_DIM,
             timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
         )
 

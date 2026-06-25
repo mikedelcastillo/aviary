@@ -12,6 +12,22 @@ import cv2
 import numpy as np
 
 
+def downscale_array_to_jpeg(frame, max_dim: int = 1280, quality: int = 80) -> bytes:
+    """JPEG-encode a decoded BGR frame, resizing so the longest edge <= max_dim.
+
+    For callers that already hold the decoded array (the camera/VLM path) — saves
+    a redundant JPEG decode versus :func:`downscale_jpeg`.
+    """
+    height, width = frame.shape[:2]
+    scale = max_dim / max(height, width)
+    if scale < 1.0:
+        # max(1, …) so an extreme aspect ratio can't round the short edge to 0,
+        # which would make cv2.resize raise on the photo-send path.
+        frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))))
+    ok, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    return buffer.tobytes() if ok else b""
+
+
 def downscale_jpeg(image_bytes: bytes, max_dim: int = 1280, quality: int = 80) -> bytes:
     """Re-encode so the longest edge is <= ``max_dim`` at ``quality``.
 
@@ -22,16 +38,10 @@ def downscale_jpeg(image_bytes: bytes, max_dim: int = 1280, quality: int = 80) -
     if array is None:
         return image_bytes
     height, width = array.shape[:2]
-    scale = max_dim / max(height, width)
-    if scale < 1.0:
-        # max(1, …) so an extreme aspect ratio can't round the short edge to 0,
-        # which would make cv2.resize raise on the photo-send path.
-        array = cv2.resize(array, (max(1, int(width * scale)), max(1, int(height * scale))))
-    elif len(image_bytes) < 200_000:
+    if max_dim / max(height, width) >= 1.0 and len(image_bytes) < 200_000:
         # Already small and within size — leave it as-is.
         return image_bytes
-    ok, buffer = cv2.imencode(".jpg", array, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-    return buffer.tobytes() if ok else image_bytes
+    return downscale_array_to_jpeg(array, max_dim, quality) or image_bytes
 
 
 # Mean HSV saturation below this reads as a grayscale (IR / night-mode) frame.
