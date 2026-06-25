@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from lib.ai.chat import chat_reply
 from lib.ai.client import OllamaClient
+from lib.ai.context import build_chat_context, format_system_state
 from lib.ai.intent import Intent
 from lib.ai.memory import ConversationMemory
 from lib.ai.router import NaturalLanguageRouter
@@ -24,6 +25,7 @@ from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
+from lib.clock import now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
 from lib.console import (
     ConsoleDispatcher,
@@ -33,11 +35,11 @@ from lib.console import (
 )
 from lib.control import RuntimeControl, parse_duration
 from lib.memory_maker import MemoryMaker
-from lib.dashboard import Dashboard
+from lib.dashboard import Dashboard, STALE_FRAME_SECONDS
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
-from lib.find import BirdFinder
+from lib.find import BirdFinder, currently_visible, format_visible
 from lib.imaging import downscale_array_to_jpeg
 from lib.ir import IRState
 from lib.labels import pretty_labels
@@ -146,6 +148,7 @@ def build_nl_router(
     autofind_provider=None,
     activity_responder=None,
     memory=None,
+    chat_context=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -171,9 +174,21 @@ def build_nl_router(
 
     def send_chat_reply(chat_id: int, text: str) -> None:
         history = memory.history(chat_id) if memory is not None else None
+        # Ground the reply in live system state + relevant care knowledge so the
+        # caretaker can actually answer questions (status, time, diet, sleep,
+        # toxic foods) instead of only chit-chatting. Best-effort: a context
+        # failure must never block the reply.
+        context = None
+        if chat_context is not None:
+            try:
+                context = chat_context(text)
+            except Exception:
+                LOGGER.exception("Building chat context failed")
         failed = False
         try:
-            reply = chat_reply(client, app_config.ollama.llm_model, text, history=history)
+            reply = chat_reply(
+                client, app_config.ollama.llm_model, text, history=history, context=context
+            )
         except Exception:
             LOGGER.exception("Chat reply failed")
             reply = "🤖 My language brain (Ollama) is unreachable right now."
@@ -318,6 +333,9 @@ def make_console_dispatcher(
         home_provider=lambda: home_report(ptz_manager, supervisor.active_hosts()),
         activity_responder=activity_responder,
         memory=ConversationMemory() if ollama_client is not None else None,
+        # The console has no live-state plumbing here, but care knowledge still
+        # grounds diet/sleep/health questions in the terminal chat.
+        chat_context=lambda text: build_chat_context(text, member_species=member_species),
     )
 
     def nl_handle(chat_id: int, text: str) -> None:
@@ -714,6 +732,37 @@ def main() -> None:
     # "where's percy?") are classified by Ollama and dispatched to the same
     # providers as the slash commands. Wired only when a notifier exists (to
     # reply) and Ollama is enabled; degrades gracefully if Ollama is unreachable.
+    def chat_context_provider(text: str) -> str | None:
+        # Live system state for grounded chat answers ("how are things?", "is it
+        # dark yet?", "are the cameras ok?"). Snapshots the shared stats under its
+        # lock; the care knowledge is folded in by build_chat_context.
+        with stats_lock:
+            snaps = [camera.snapshot() for camera in stats.values()]
+        healthy = sum(
+            1
+            for snap in snaps
+            if snap["status"] == "connected"
+            and (snap["since_frame"] is None or snap["since_frame"] <= STALE_FRAME_SECONDS)
+        )
+        if ir_state.all_ir():
+            daylight = "night"
+        elif ir_state.ir_cameras():
+            daylight = "mixed"
+        else:
+            daylight = "day"
+        visible = currently_visible(registry.snapshot(), 15.0)
+        system_state = format_system_state(
+            now_ph(),
+            paused=control.is_paused(),
+            pause_status=control.status(),
+            cameras_total=len(snaps),
+            cameras_healthy=healthy,
+            visible_text=format_visible(visible, namer.display) if visible else "",
+            daylight=daylight,
+            autofind_on=auto_finder.enabled if auto_finder is not None else None,
+        )
+        return build_chat_context(text, system_state=system_state, member_species=member_species)
+
     nl_router = build_nl_router(
         app_config,
         notifier,
@@ -729,6 +778,7 @@ def main() -> None:
         autofind_provider=autofind_provider,
         activity_responder=activity_responder,
         memory=memory,
+        chat_context=chat_context_provider,
     )
 
     start_command_thread(
