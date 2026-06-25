@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol, Sequence
 
+from lib.labels import pretty
 from lib.roster import DEFAULT_SPECIES_MEMBERS, expand_targets
 
 
@@ -36,11 +37,6 @@ DEFAULT_HEARTBEAT_SECONDS = 60.0
 
 class _Snapshotter(Protocol):
     def snapshot(self) -> list[dict]: ...
-
-
-def pretty(label: str) -> str:
-    """Capitalise a bird label for display: percy -> Percy, unknown_bird -> Unknown Bird."""
-    return label.replace("_", " ").title()
 
 
 def pretty_phrase(text: str) -> str:

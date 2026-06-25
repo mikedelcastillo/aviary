@@ -11,6 +11,7 @@ import requests
 
 from lib.control import parse_duration
 from lib.dashboard import STALE_FRAME_SECONDS
+from lib.labels import pretty, pretty_labels
 from lib.objects import ObjectRegistry
 from lib.stats import CameraStats
 from lib.telegram.userinfo import parse_command
@@ -143,8 +144,9 @@ def build_status_message(
     if not snapshots:
         lines.append("- none")
     for snap in snapshots:
-        detection = snap["last_label"] or "none"
+        detection = "none"
         if snap["last_label"]:
+            detection = pretty_labels(snap["last_label"].split(", "))
             detection += f" ({_format_duration(snap['since_detection'])} ago)"
         frame_age = _format_frame_age(snap["since_frame"])
         frame_text = "never" if frame_age == "never" else f"{frame_age} ago"
@@ -179,7 +181,7 @@ def build_status_message(
             )
             flag = " alert-move" if moved_enough else ""
             lines.append(
-                f"- {row['camera']} {row['label']}: "
+                f"- {pretty(row['label'])} on {row['camera']}: "
                 f"seen {_format_duration(row['since'])} ago, "
                 f"alert {alert}, move {movement}{flag}, "
                 f"count {_format_count(row['count'])}"

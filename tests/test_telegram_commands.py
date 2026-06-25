@@ -40,7 +40,7 @@ def test_status_message_includes_dashboard_data_without_logs() -> None:
     assert "Aviary status" in message
     assert "camera-1: CONNECTED" in message
     assert "1 frames, 1 detections, 1 alerts" in message
-    assert "camera-1 bird:" in message
+    assert "Bird on camera-1:" in message
     assert "Logs" not in message
     assert "Events" not in message
 

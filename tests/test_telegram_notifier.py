@@ -135,8 +135,8 @@ def test_no_photo_sends_text_to_every_recipient(monkeypatch) -> None:
     assert len(post.calls) == 2
     assert all(call["url"].endswith("/sendMessage") for call in post.calls)
     assert {call["json"]["chat_id"] for call in post.calls} == {"A", "B"}
-    # Labels are deduped and sorted into the message text.
-    assert all(call["json"]["text"] == "bird, cat" for call in post.calls)
+    # Labels are deduped, sorted and Capitalised into the message text.
+    assert all(call["json"]["text"] == "Bird, Cat" for call in post.calls)
 
 
 def test_429_pauses_then_retries(monkeypatch, tmp_path) -> None:

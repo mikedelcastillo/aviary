@@ -9,6 +9,7 @@ from pathlib import Path
 import cv2
 
 from lib.config import ModelConfig
+from lib.labels import format_confidence, pretty
 
 
 @dataclass
@@ -93,7 +94,7 @@ def draw_detections(frame, detections: list[Detection]):
     annotated = frame.copy()
     for detection in detections:
         x1, y1, x2, y2 = detection.bbox_xyxy
-        text = f"{detection.label} {detection.confidence:.2f}"
+        text = f"{pretty(detection.label)} {format_confidence(detection.confidence)}"
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 220, 0), 2)
         cv2.putText(
             annotated,

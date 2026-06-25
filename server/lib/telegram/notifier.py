@@ -13,6 +13,7 @@ from pathlib import Path
 import requests
 
 from lib.detector import Detection
+from lib.labels import pretty_labels
 
 
 LOGGER = logging.getLogger("lib.telegram")
@@ -82,7 +83,7 @@ class TelegramNotifier:
         if not self.bot_token or not self.user_ids:
             raise ValueError("Telegram bot token and user IDs are required")
 
-        text = ", ".join(sorted({detection.label for detection in detections}))
+        text = pretty_labels(detection.label for detection in detections)
         has_photo = bool(snapshot_path and snapshot_path.exists())
 
         if not has_photo:
