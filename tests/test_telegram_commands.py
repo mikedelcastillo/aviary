@@ -250,6 +250,53 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
     ]
 
 
+def test_home_command_calls_provider_for_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    calls: list[bool] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/home",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    def home_provider() -> str:
+        calls.append(True)
+        return "🏠 Sent 2/2 pan-tilt camera(s) to their saved viewpoint."
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        home_provider=home_provider,
+    )
+
+    assert calls == [True]
+    assert sent_messages == ["🏠 Sent 2/2 pan-tilt camera(s) to their saved viewpoint."]
+
+
 def test_snapshot_command_requires_allowed_user(monkeypatch) -> None:
     stop_event = threading.Event()
     sent_messages: list[str] = []

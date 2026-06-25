@@ -382,6 +382,31 @@ class PtzManager:
             return None
         return OnvifPatrol(cameras, cols=self._scan_cols, rows=self._scan_rows)
 
+    def go_home(self, hosts) -> tuple[int, int]:
+        """Send every PTZ camera among ``hosts`` to its first saved preset.
+
+        Returns ``(homed, total_ptz)``. Used by ``/home`` and run after discovery
+        so the cameras always face their saved viewpoint.
+        """
+        cameras = [cam for host in sorted(hosts) if (cam := self.camera_for(host))]
+        homed = 0
+        for camera in cameras:
+            try:
+                preset = camera.first_preset_token()
+            except Exception:
+                LOGGER.exception("PTZ get-presets failed on %s", camera.host)
+                preset = None
+            if preset is None:
+                LOGGER.warning("PTZ %s has no saved preset to home to", camera.host)
+                continue
+            try:
+                if camera.goto_preset(preset):
+                    homed += 1
+                    LOGGER.info("PTZ %s sent to home preset %s", camera.host, preset)
+            except Exception:
+                LOGGER.exception("PTZ home failed on %s", camera.host)
+        return homed, len(cameras)
+
 
 class OnvifPatrol:
     """Scans a set of PTZ cameras through a grid of their range while a search runs.

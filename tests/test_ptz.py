@@ -181,3 +181,34 @@ def test_patrol_falls_back_to_home_when_position_unknown() -> None:
     # No captured position -> fall back to the camera's home preset.
     assert camera.homed == 1
     assert camera.restored == []
+
+
+def test_ptz_manager_go_home_sends_each_ptz_camera_to_preset() -> None:
+    from lib.ptz import PtzManager
+    from lib.config import CameraCredentials
+
+    mgr = PtzManager(CameraCredentials(username="u", password="p"))
+    cam1 = FakeCamera("192.168.1.30", preset="1")
+    cam2 = FakeCamera("192.168.1.31", preset="1")
+    # Pre-seed the capability cache: two PTZ cams + one non-PTZ (None).
+    mgr._cache = {"192.168.1.30": cam1, "192.168.1.31": cam2, "192.168.1.99": None}
+
+    homed, total = mgr.go_home(["192.168.1.30", "192.168.1.31", "192.168.1.99"])
+
+    assert (homed, total) == (2, 2)  # the non-PTZ host is ignored
+    assert cam1.preset_gotos == ["1"]
+    assert cam2.preset_gotos == ["1"]
+
+
+def test_ptz_manager_go_home_skips_cameras_without_preset() -> None:
+    from lib.ptz import PtzManager
+    from lib.config import CameraCredentials
+
+    mgr = PtzManager(CameraCredentials(username="u", password="p"))
+    cam = FakeCamera("192.168.1.30", preset=None)  # no saved viewpoint
+    mgr._cache = {"192.168.1.30": cam}
+
+    homed, total = mgr.go_home(["192.168.1.30"])
+
+    assert (homed, total) == (0, 1)
+    assert cam.preset_gotos == []

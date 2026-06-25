@@ -30,6 +30,7 @@ StatusProvider = Callable[[], str]
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/discover": "Scan the local network for cameras",
+    "/home": "Aim the pan-tilt cameras at their saved viewpoint",
     "/stop": "Privacy mode: stop the cameras (optional duration, e.g. /stop 10m)",
     "/start": "Resume the cameras after a pause",
     "/status": "Show camera and detection status",
@@ -257,6 +258,7 @@ def run_command_bot(
     stop_event: Event | None = None,
     poll_timeout_seconds: int = 30,
     discover_provider: Callable[[], str] | None = None,
+    home_provider: Callable[[], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
@@ -278,6 +280,7 @@ def run_command_bot(
         for command, present in (
             ("/activity", activity_provider is not None),
             ("/discover", discover_provider is not None),
+            ("/home", home_provider is not None),
             ("/stop", pause_provider is not None),
             ("/start", resume_provider is not None),
             ("/status", status_provider is not None),
@@ -393,6 +396,18 @@ def run_command_bot(
                         report = f"Discovery failed: {exc}"
                     send(chat_id, report)
                 LOGGER.info("Handled /discover for user %s", user_id)
+                continue
+
+            if command == "/home":
+                if str(user_id) not in allowed or home_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    try:
+                        send(chat_id, home_provider())
+                    except Exception as exc:  # never let a PTZ error kill polling
+                        LOGGER.exception("Home failed")
+                        send(chat_id, f"Homing failed: {exc}")
+                LOGGER.info("Handled /home for user %s", user_id)
                 continue
 
             if command == "/snapshot":

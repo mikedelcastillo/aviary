@@ -37,6 +37,7 @@ HELP_TEXT = (
     "  /find <bird>       e.g. /find percy, /find the cockatiels, /find stop\n"
     "  /stop [time]       privacy mode (/stop 10m); /start to resume\n"
     "  /discover          rescan the network for cameras\n"
+    "  /home              aim pan-tilt cameras at their saved viewpoint\n"
     "  /snapshot          capture all cameras (photos go to Telegram)\n"
     "  /logs              show/hide live server logs\n"
     "  /help   /quit\n"
@@ -92,6 +93,7 @@ class ConsoleDispatcher:
         nl_handle: Callable[[int, str], None],
         parse_duration: Callable[[str | None], float | None],
         activity: Callable[[int, str], None] | None = None,
+        home_text: Callable[[], str] | None = None,
         toggle_logs: Callable[[], str] | None = None,
         on_quit: Callable[[], None] | None = None,
     ) -> None:
@@ -105,6 +107,7 @@ class ConsoleDispatcher:
         self._nl_handle = nl_handle
         self._parse_duration = parse_duration
         self._activity = activity
+        self._home_text = home_text
         self._toggle_logs = toggle_logs
         self._on_quit = on_quit
 
@@ -144,6 +147,8 @@ class ConsoleDispatcher:
         elif command == "/discover":
             self._emit("Scanning the local network for cameras…")
             self._emit(self._discover_text())
+        elif command == "/home":
+            self._emit(self._home_text() if self._home_text is not None else "PTZ control is off.")
         elif command == "/snapshot":
             self._emit("Capturing snapshots from all cameras…")
             self._emit(self._snapshot_text(CONSOLE_CHAT_ID))

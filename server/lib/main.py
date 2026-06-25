@@ -94,6 +94,7 @@ def start_command_thread(
     stop_event: threading.Event,
     status_provider: Callable[[], str] | None = None,
     discover_provider: Callable[[], str] | None = None,
+    home_provider: Callable[[], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
@@ -108,6 +109,7 @@ def start_command_thread(
         args=(bot_token, user_ids, status_provider, stop_event),
         kwargs={
             "discover_provider": discover_provider,
+            "home_provider": home_provider,
             "snapshot_provider": snapshot_provider,
             "pause_provider": pause_provider,
             "resume_provider": resume_provider,
@@ -210,6 +212,14 @@ def build_nl_router(
         notifier.send_text,
         typing=typing,
     )
+
+
+def home_report(ptz_manager, hosts) -> str:
+    """Send PTZ cameras to their saved viewpoint and report how many."""
+    homed, total = ptz_manager.go_home(hosts)
+    if total == 0:
+        return "No pan-tilt cameras to home."
+    return f"🏠 Sent {homed}/{total} pan-tilt camera(s) to their saved viewpoint."
 
 
 def make_console_dispatcher(
@@ -315,6 +325,7 @@ def make_console_dispatcher(
             if activity_responder is not None
             else None
         ),
+        home_text=lambda: home_report(ptz_manager, supervisor.active_hosts()),
         toggle_logs=ConsoleLogToggle().toggle,
         on_quit=stop_event.set,
     )
@@ -594,8 +605,14 @@ def main() -> None:
             daemon=True,
         ).start()
 
+    def home_provider() -> str:
+        return home_report(ptz_manager, supervisor.active_hosts())
+
     def discover_provider() -> str:
         report = format_discovery_report(supervisor.discover_and_apply())
+        # Face the saved viewpoint FIRST so the cameras are aimed right and the
+        # naming below describes the home view, not wherever they were left.
+        ptz_manager.go_home(supervisor.active_hosts())
         # Re-name every camera: new ones get named, and existing pan-tilt cameras
         # that have moved since last time get a fresh, accurate name.
         trigger_camera_naming(force=True)
@@ -660,6 +677,7 @@ def main() -> None:
         stop_event,
         status_provider=status_provider,
         discover_provider=discover_provider,
+        home_provider=home_provider,
         snapshot_provider=snapshot_provider,
         pause_provider=control.pause,
         resume_provider=control.resume,
@@ -756,9 +774,11 @@ def main() -> None:
             return
         if applied.added:
             LOGGER.info("Auto-discovery started %d more camera(s)", len(applied.added))
-        # On the periodic sweep, re-name every camera (force) since pan-tilt
-        # cameras may have moved; the quick post-boot retries just name new ones.
+        # On the periodic sweep, re-home then re-name every camera (force) since
+        # pan-tilt cameras may have moved; the quick post-boot retries just name
+        # new ones.
         if applied.added or force:
+            ptz_manager.go_home(supervisor.active_hosts())
             trigger_camera_naming(force=force)
 
     def _discovery_background() -> None:
