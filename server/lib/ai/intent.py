@@ -69,8 +69,11 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'happening?", "how was matcha today", "did pizza eat today", "did matcha and jynx '
         'spend time together", "did the birds take a bath", "when did the birds go in their '
         'cage", "are the birds asleep", "what did jynx do this morning", "show me recent '
-        'photos of pizza", "where are the birds", "where is everyone". argument = the '
-        'bird(s)/group asked about (e.g. "pizza", "matcha and jynx"), or "" for all birds.\n'
+        'photos of pizza", "show me a photo of percy", "show me photos of budgie with other '
+        'birds", "has bambi spent time with jynx this week", "where are the birds", "where '
+        'is everyone". Time spans (today, this morning, this week, yesterday) and photo '
+        'requests all belong here. argument = the bird(s)/group asked about (e.g. "pizza", '
+        '"matcha and jynx", "budgie"), or "" for all birds.\n'
         '- "chat": greetings, thanks, or anything that isn\'t about the birds\' whereabouts '
         'or activity. argument = "".\n\n'
         "Rules:\n"

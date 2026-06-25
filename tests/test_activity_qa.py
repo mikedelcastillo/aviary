@@ -121,3 +121,26 @@ def test_morning_window_excludes_afternoon(tmp_path) -> None:
     assert "Morning bath" in client.user
     assert "Afternoon nap" not in client.user
     assert "this morning" in client.user
+
+
+def test_together_request_prefers_multi_bird_photos(tmp_path) -> None:
+    duo = tmp_path / "duo.jpg"; duo.write_bytes(b"duo-bytes")
+    solo = tmp_path / "solo.jpg"; solo.write_bytes(b"solo-bytes")
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 9, 0), ["bambi", "jynx"], "Together.", [str(duo)]))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 13, 0), ["bambi"], "Bambi alone.", [str(solo)]))
+    albums: list = []
+    _responder(tmp_path, lambda c, t: None, send_album=lambda c, items: albums.append(items)).respond(
+        7, "show me photos of bambi with other birds", "bambi"
+    )
+    assert albums
+    sent = [img for img, _ in albums[0]]
+    assert duo.read_bytes() in sent and solo.read_bytes() not in sent
+
+
+def test_week_window_includes_earlier_days(tmp_path) -> None:
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 22, 9, 0), ["jynx", "bambi"], "Earlier this week together."))
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "has bambi spent time with jynx this week?", "bambi and jynx"
+    )
+    assert "Earlier this week" in client.user

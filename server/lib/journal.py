@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 
@@ -88,13 +88,15 @@ def load_recent(
     """Entries in ``[since, until]`` across the relevant day file(s), newest last.
 
     ``birds`` (lowercased) filters to entries mentioning at least one of them.
+    Spans every day in the range, so a week-long window reads all seven files.
     """
     entries: list[MemoryEntry] = []
-    # A range almost always spans one or two day files.
-    for day in {since.date(), until.date()}:
+    day = since.date()
+    while day <= until.date():
         for entry in load_entries(memories_dir, day):
             if since <= entry.time <= until:
                 entries.append(entry)
+        day += timedelta(days=1)
     if birds:
         entries = [e for e in entries if any(b in birds for b in e.birds)]
     entries.sort(key=lambda e: e.time)

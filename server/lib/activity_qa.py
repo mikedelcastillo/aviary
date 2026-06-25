@@ -101,11 +101,21 @@ class ActivityResponder:
             return midnight.replace(hour=12), clamp(midnight.replace(hour=17)), "this afternoon"
         if "evening" in t or "tonight" in t or "night" in t:
             return midnight.replace(hour=17), now, "this evening"
+        if "week" in t:
+            return midnight - timedelta(days=6), now, "this week"
+        if "yesterday" in t:
+            y = midnight - timedelta(days=1)
+            return y, midnight, "yesterday"
         if "today" in t or "all day" in t or "whole day" in t or "so far" in t:
             return midnight, now, "today"
         if "hour" in t or "recently" in t or "just now" in t or "lately" in t:
             return now - timedelta(hours=1), now, "in the last hour"
-        if question:
+        # Questions and photo/together requests mean the whole day; only a bare
+        # /activity summary defaults to the last hour.
+        broad = question or any(
+            w in t for w in ("photo", "picture", "show", "together", "with ", "spend")
+        )
+        if broad:
             return midnight, now, "today"
         return now - timedelta(hours=1), now, "in the last hour"
 
@@ -154,10 +164,21 @@ class ActivityResponder:
             summary = ""
         summary = summary or notes[-1]
 
-        # The most recent distinct photos (newest entries first).
+        # Pick the photos that go with the answer. For a "together"/"with other
+        # birds" request, prefer moments where two or more birds were seen at once
+        # (the actual together-shots); otherwise the most recent relevant photos.
+        wants_together = any(
+            phrase in text.lower()
+            for phrase in ("together", "with each other", "with other", "spend", "spending", "with ")
+        )
+        pool = entries
+        if wants_together:
+            multi = [e for e in entries if len(e.birds) >= 2]
+            if multi:
+                pool = multi
         chosen: list[str] = []
         seen: set[str] = set()
-        for entry in reversed(entries):
+        for entry in reversed(pool):
             for photo in entry.photos:
                 if photo not in seen and Path(photo).exists():
                     seen.add(photo)

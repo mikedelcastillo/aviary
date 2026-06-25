@@ -47,3 +47,11 @@ def test_load_recent_filters_by_time_and_bird(tmp_path) -> None:
 
 def test_load_missing_day_is_empty(tmp_path) -> None:
     assert load_entries(tmp_path, date(2026, 1, 1)) == []
+
+
+def test_load_recent_spans_multiple_days(tmp_path) -> None:
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 20, 9, 0), ["jynx"], "monday"))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 23, 9, 0), ["jynx"], "thursday"))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 9, 0), ["jynx"], "saturday"))
+    week = load_recent(tmp_path, datetime(2026, 6, 19, 0, 0), datetime(2026, 6, 25, 23, 59))
+    assert [e.note for e in week] == ["monday", "thursday", "saturday"]
