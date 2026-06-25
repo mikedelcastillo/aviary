@@ -4,11 +4,9 @@ import json
 from datetime import datetime, timezone
 
 from lib.activity import (
-    caption_sighting,
     load_sightings,
     select_highlights,
     summarise_counts,
-    summarise_day,
 )
 
 
@@ -65,32 +63,3 @@ def test_summarise_counts(tmp_path) -> None:
     counts = summarise_counts(load_sightings(tmp_path, 0))
     assert counts.startswith("Percy ×2")
     assert "Matcha ×1" in counts
-
-
-class FakeClient:
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.generate_calls: list[dict] = []
-        self.chat_calls: list[dict] = []
-
-    def generate(self, model, prompt, *, images=None, timeout_seconds=None, **kwargs):
-        self.generate_calls.append({"prompt": prompt, "images": images})
-        return self.text
-
-    def chat(self, model, messages, **kwargs):
-        self.chat_calls.append({"messages": messages})
-        return self.text
-
-
-def test_caption_sighting_grounds_with_detection_context(tmp_path) -> None:
-    _write_sighting(tmp_path, "pizza", 0.9, 1000)
-    sighting = load_sightings(tmp_path, 0)[0]
-    client = FakeClient("Pizza is perched.")
-    out = caption_sighting(client, "qwen2.5vl:7b", sighting, {"pizza": "cockatiel"})
-    assert out == "Pizza is perched."
-    # The detection context (with species) is part of the VLM prompt.
-    assert "Pizza" in client.generate_calls[0]["prompt"]
-
-
-def test_summarise_day_empty_is_blank() -> None:
-    assert summarise_day(FakeClient("x"), "qwen3:4b", []) == ""

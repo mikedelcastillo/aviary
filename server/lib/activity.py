@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib.ai.chat import strip_thinking
-from lib.ai.vlm import build_detection_context, describe_image
 from lib.labels import pretty
 
 
@@ -42,7 +41,8 @@ class Sighting:
 
 @dataclass
 class _BoxDetection:
-    """Minimal duck-typed detection for build_detection_context."""
+    """Minimal duck-typed detection for build_detection_context (used by the
+    activity harness to ground a re-caption in a sighting's saved box)."""
 
     label: str
     bbox_xyxy: tuple[int, int, int, int]
@@ -141,65 +141,6 @@ def summarise_counts(sightings: list[Sighting]) -> str:
 
 
 # -- VLM / LLM wrappers ------------------------------------------------------
-
-
-def caption_sighting(
-    client,
-    vlm_model: str,
-    sighting: Sighting,
-    member_species: dict[str, str] | None = None,
-    pronouns: dict[str, str] | None = None,
-    *,
-    timeout_seconds: float | None = None,
-) -> str:
-    """A short VLM caption for one sighting, grounded by its detection box."""
-    context = build_detection_context(
-        [_BoxDetection(sighting.label, sighting.bbox)],
-        sighting.width,
-        sighting.height,
-        member_species,
-        pronouns,
-    )
-    return describe_image(
-        client,
-        vlm_model,
-        sighting.path.read_bytes(),
-        "In one short sentence, say what this bird is doing.",
-        context=context,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-DIGEST_SYSTEM_PROMPT = (
-    "You are the warm, upbeat caretaker of a home aviary sending a short 'daycare "
-    "update' text about the pet birds. Given timestamped observations, write 2-4 "
-    "friendly sentences: who was active, who was together, what they were up to "
-    "(eating, playing, preening, resting). Use each bird's pronoun exactly as it "
-    "appears in the notes (he/she), and refer to birds by NAME only — never add "
-    "the species. Don't invent things not in the notes. No lists, no preamble — "
-    "just the update."
-)
-
-
-def summarise_day(
-    client, llm_model: str, observations: list[str], *, header: str = "", pronoun_note: str = "", timeout_seconds: float | None = None
-) -> str:
-    """Fold per-photo captions into one warm caretaker summary via the LLM."""
-    if not observations:
-        return ""
-    notes = "\n".join(f"- {line}" for line in observations)
-    pronoun_prefix = f"Bird pronouns (use these exactly): {pronoun_note}\n\n" if pronoun_note else ""
-    user = (f"{header}\n" if header else "") + pronoun_prefix + f"Observations:\n{notes}"
-    reply = client.chat(
-        llm_model,
-        [
-            {"role": "system", "content": DIGEST_SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
-        think=True,
-        timeout_seconds=timeout_seconds,
-    )
-    return strip_thinking(reply)
 
 
 _ACTIVITY_SUMMARY_PROMPT = (
