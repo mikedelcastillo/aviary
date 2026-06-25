@@ -130,6 +130,22 @@ class TelegramNotifier:
             return
         self._broadcast(self.user_ids, lambda user_id: self._send_message(user_id, text))
 
+    def send_chat_action(self, chat_id: int | str, action: str = "typing") -> None:
+        """Show a chat action (e.g. 'typing…') so the user knows we're thinking.
+
+        Best-effort and fire-and-forget — a failed action indicator must never
+        affect the actual reply. Telegram clears it after ~5s, so callers re-send
+        it to keep it alive during a long think.
+        """
+        try:
+            self._post(
+                f"{self.base_url}/sendChatAction",
+                json={"chat_id": chat_id, "action": action},
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            LOGGER.debug("sendChatAction to %s failed: %s", chat_id, exc)
+
     def send_text(self, chat_id: int | str, text: str) -> None:
         """Send a plain text message to a SINGLE chat (used by ``/find`` updates).
 

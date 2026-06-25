@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from lib.ai.intent import Intent
 from lib.ai.router import NaturalLanguageRouter
 
@@ -67,3 +69,35 @@ def test_handle_recovers_from_dispatch_error() -> None:
     # A dispatch exception is caught and surfaced, never crashes the thread.
     assert len(notified) == 1
     assert "wrong" in notified[0][1].lower()
+
+
+def test_coalesces_rapid_messages_into_one_dispatch() -> None:
+    dispatched: list = []
+    router = NaturalLanguageRouter(
+        FakeClient('{"action": "find", "argument": "percy"}'),
+        "qwen3:4b",
+        lambda: ["percy"],
+        dispatch=lambda chat_id, intent, text: dispatched.append(text),
+        notify=lambda chat_id, text: None,
+        debounce_seconds=0.05,
+    )
+    # Three quick bubbles -> debounced into a single combined dispatch.
+    router.handle_async(1, "where")
+    router.handle_async(1, "is")
+    router.handle_async(1, "percy")
+    time.sleep(0.3)
+    assert dispatched == ["where is percy"]
+
+
+def test_typing_indicator_is_pulsed() -> None:
+    typed: list = []
+    router = NaturalLanguageRouter(
+        FakeClient('{"action": "status", "argument": ""}'),
+        "qwen3:4b",
+        lambda: [],
+        dispatch=lambda chat_id, intent, text: None,
+        notify=lambda chat_id, text: None,
+        typing=lambda chat_id: typed.append(chat_id),
+    )
+    router._handle(7, "how are things")
+    assert 7 in typed  # typing was signalled while thinking

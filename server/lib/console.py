@@ -70,6 +70,10 @@ class ConsoleNotifier:
     def broadcast_album(self, items) -> None:
         self.send_album(None, items)
 
+    def send_chat_action(self, chat_id, action: str = "typing") -> None:
+        # No typing indicator in a terminal — the reply just prints when ready.
+        return None
+
 
 class ConsoleDispatcher:
     """Routes a typed line to the right provider and returns/echoes a reply."""

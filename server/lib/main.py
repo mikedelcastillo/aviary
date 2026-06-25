@@ -187,12 +187,20 @@ def build_nl_router(
         else:  # chat (or activity with no responder)
             send_chat_reply(chat_id, text)
 
+    # Show a live "typing…" indicator while thinking when the notifier supports
+    # it (Telegram does; the console no-ops).
+    typing = (
+        (lambda chat_id: notifier.send_chat_action(chat_id, "typing"))
+        if hasattr(notifier, "send_chat_action")
+        else None
+    )
     return NaturalLanguageRouter(
         client,
         app_config.ollama.llm_model,
         finder.findable_labels,
         dispatch,
         notifier.send_text,
+        typing=typing,
     )
 
 
