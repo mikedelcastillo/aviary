@@ -36,9 +36,15 @@ def test_encode_image_is_base64() -> None:
 
 def test_clean_camera_name_normalises() -> None:
     assert clean_camera_name('"Window Perch"') == "Window Perch"
-    assert clean_camera_name("food bowl, top view") == "Food Bowl"
     assert clean_camera_name("The Big Cage\nextra line") == "The Big"
     assert clean_camera_name("") == ""
+
+
+def test_clean_camera_name_splits_camelcase_and_strips_descriptors() -> None:
+    # "BigCageView" -> split -> strip "view" -> "Big Cage".
+    assert clean_camera_name("BigCageView") == "Big Cage"
+    assert clean_camera_name("Window Cam") == "Window"
+    assert clean_camera_name("food bowl camera") == "Food Bowl"
 
 
 def test_position_phrase_thirds() -> None:

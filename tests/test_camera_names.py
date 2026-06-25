@@ -25,10 +25,14 @@ def test_namer_display_falls_back_until_set() -> None:
 
 
 class FakeVlmClient:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, distinct: str | None = None) -> None:
         self.name = name
+        self.distinct = distinct
 
     def generate(self, model, prompt, *, images=None, timeout_seconds=None, **kwargs):
+        # The disambiguation prompt mentions names already taken.
+        if self.distinct is not None and "already" in prompt:
+            return self.distinct
         return self.name
 
 
@@ -47,6 +51,24 @@ def test_name_cameras_assigns_unique_vlm_names() -> None:
     )
     names = {namer.display("camera-192.168.1.8"), namer.display("camera-192.168.1.9")}
     assert names == {"Window Perch", "Window Perch 2"}
+
+
+def test_name_cameras_disambiguates_collision_via_vlm() -> None:
+    namer = CameraNamer()
+    # Both views suggest "Big Cage"; the second re-asks the VLM, which returns a
+    # distinct "Window Ledge" instead of a numeric suffix.
+    client = FakeVlmClient("Big Cage", distinct="Window Ledge")
+    name_cameras(
+        namer,
+        ["camera-192.168.1.8", "camera-192.168.1.9"],
+        grab_frame=lambda cam: b"jpeg",
+        client=client,
+        model="qwen2.5vl:7b",
+        stop_event=threading.Event(),
+        frame_attempts=1,
+    )
+    names = {namer.display("camera-192.168.1.8"), namer.display("camera-192.168.1.9")}
+    assert names == {"Big Cage", "Window Ledge"}
 
 
 def test_name_cameras_skips_cameras_without_frames() -> None:

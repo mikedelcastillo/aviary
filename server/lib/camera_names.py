@@ -16,7 +16,7 @@ import logging
 import threading
 from typing import Callable
 
-from lib.ai.vlm import name_camera_view
+from lib.ai.vlm import clean_camera_name, describe_image, name_camera_view
 
 
 LOGGER = logging.getLogger("lib.camera_names")
@@ -38,6 +38,22 @@ def unique_name(base: str, used: set[str]) -> str:
     while f"{base} {index}" in used:
         index += 1
     return f"{base} {index}"
+
+
+def _distinct_name(client, model: str, image: bytes, taken: set[str], *, timeout_seconds: float) -> str:
+    """Ask the VLM for a name that's DIFFERENT from the ones already taken.
+
+    Used when the first suggestion collides ("Big Cage" vs "Big Cage") — instead
+    of a numeric suffix, the model looks again at THIS view and names what makes
+    it distinct (a colour, an object, a spot).
+    """
+    prompt = (
+        "This is one of several pet-bird camera views. These names are already "
+        f"taken: {', '.join(sorted(taken))}. Give a DIFFERENT, distinctive 1-2 word "
+        "name for THIS specific view, based on something unique in it (a colour, an "
+        "object, a location). Reply with ONLY the name — no 'view', 'cam' or 'camera'."
+    )
+    return clean_camera_name(describe_image(client, model, image, prompt, timeout_seconds=timeout_seconds))
 
 
 class CameraNamer:
@@ -103,6 +119,17 @@ def name_cameras(
         except Exception:
             LOGGER.exception("VLM naming failed for %s", camera_name)
             base = ""
+        # Collision: re-ask the VLM for a name distinct from what's taken, rather
+        # than slapping a number on a duplicate ("Big Cage" + "Big Cage").
+        used = namer.used_names()
+        if base and base in used:
+            try:
+                distinct = _distinct_name(client, model, image, used, timeout_seconds=timeout_seconds)
+            except Exception:
+                LOGGER.exception("VLM disambiguation failed for %s", camera_name)
+                distinct = ""
+            if distinct and distinct not in used:
+                base = distinct
         display = unique_name(base or fallback_name(camera_name), namer.used_names())
         namer.set(camera_name, display)
         LOGGER.info("Named camera %s -> %s", camera_name, display)

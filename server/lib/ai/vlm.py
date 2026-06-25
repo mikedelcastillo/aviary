@@ -140,17 +140,30 @@ def describe_scene(
     )
 
 
+# Generic descriptors that add nothing to a camera name; stripped out so we
+# don't end up with "Big Cage View" / "Window Cam".
+_REDUNDANT_NAME_WORDS = {
+    "view", "cam", "camera", "shot", "angle", "feed", "scene", "area",
+    "image", "picture", "photo", "closeup", "perspective",
+}
+
+
 def clean_camera_name(raw: str) -> str:
     """Normalise a model's free-text into a tidy 1-2 word Title Case label.
 
-    Takes the first line, drops anything but letters/digits/spaces, keeps the
-    first two words, Title-cases them. Returns "" when nothing usable remains.
+    Splits camelCase ("BigCageView" -> "Big Cage View"), drops punctuation and
+    generic descriptor words ("view", "cam", ...), keeps the first two
+    meaningful words and Title-cases them. "" when nothing usable remains.
     """
     if not raw:
         return ""
     first_line = raw.strip().splitlines()[0]
-    cleaned = re.sub(r"[^A-Za-z0-9 ]+", " ", first_line)
-    words = cleaned.split()[:2]
+    # Break camelCase / "BigCage" into separate words before cleaning.
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", first_line)
+    cleaned = re.sub(r"[^A-Za-z0-9 ]+", " ", spaced)
+    words = [
+        word for word in cleaned.split() if word.lower() not in _REDUNDANT_NAME_WORDS
+    ][:2]
     return " ".join(word.capitalize() for word in words)
 
 
