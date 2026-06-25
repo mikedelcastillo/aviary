@@ -155,6 +155,7 @@ def build_nl_router(
     activity_responder=None,
     memory=None,
     chat_context=None,
+    sleep_provider=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -237,6 +238,8 @@ def build_nl_router(
             notifier.send_text(chat_id, snapshot_provider(chat_id))
         elif action == "activity" and activity_responder is not None:
             activity_responder.respond(chat_id, text, intent.argument)
+        elif action == "sleep" and sleep_provider is not None:
+            sleep_provider(chat_id, intent.argument)
         else:  # chat (or activity with no responder)
             send_chat_reply(chat_id, text)
 
@@ -865,6 +868,7 @@ def main() -> None:
         activity_responder=activity_responder,
         memory=memory,
         chat_context=chat_context_provider,
+        sleep_provider=sleep_provider if sleep_tracker is not None else None,
     )
 
     start_command_thread(

@@ -24,7 +24,7 @@ LOGGER = logging.getLogger("lib.ai.intent")
 # conversation, routed to the memory/VLM layer rather than a command.
 ACTIONS = (
     "pause", "resume", "find", "stop_find", "discover", "home", "autofind",
-    "status", "snapshot", "activity", "chat",
+    "status", "snapshot", "activity", "sleep", "chat",
 )
 
 # Ollama ``format`` schema: constrains the model to a valid action + argument.
@@ -81,6 +81,11 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'is everyone". Time spans (today, this morning, this week, yesterday) and photo '
         'requests all belong here. argument = the bird(s)/group asked about (e.g. "pizza", '
         '"matcha and jynx", "budgie"), or "" for all birds.\n'
+        '- "sleep": how the birds SLEPT — last night, sleep score/quality, when they went to '
+        'bed or woke, night-frights, or the multi-night sleep trend. Examples: "how did the '
+        'birds sleep", "how did they sleep last night", "what was their sleep score", "did '
+        'anyone have a night fright", "how have they been sleeping this week", "are they '
+        'sleeping well". argument = "week" for a multi-night trend, else "".\n'
         '- "chat": greetings, thanks, small talk, AND any general bird-CARE or knowledge '
         'question — what is safe or toxic to eat, diet/feeding, sleep and light needs, '
         'temperature, enrichment, illness and "why is X fluffed/plucking/quiet", or how '
@@ -91,6 +96,9 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'too cold for them", "how long should they sleep", "why is percy plucking") is '
         '"chat" (care knowledge). A question about what a bird DID or is DOING ("did pizza '
         'eat today", "what is percy up to") is "activity".\n'
+        '- "how did they sleep" / "sleep score" / "did they sleep well" / "any night '
+        'frights" is "sleep" (last night\'s rest). "how LONG should they sleep" is "chat" '
+        '(care advice). "are they asleep right now" is "chat" (live state).\n'
         '- "where is percy" -> find (locate one specific bird). "where are the birds" / '
         '"where is everyone" -> activity (a summary of all, not a single-bird locate). '
         '"what did percy do today" / "what is percy up to" / "show me photos of percy" -> '

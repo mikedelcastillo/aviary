@@ -36,6 +36,15 @@ def test_parse_intent_tolerates_missing_argument() -> None:
     assert parse_intent('{"action": "status"}') == Intent("status", "")
 
 
+def test_parse_intent_accepts_sleep_action() -> None:
+    assert parse_intent('{"action": "sleep", "argument": "week"}') == Intent("sleep", "week")
+
+
+def test_system_prompt_mentions_sleep_routing() -> None:
+    prompt = build_system_prompt(["percy"]).lower()
+    assert "sleep score" in prompt and "night fright" in prompt
+
+
 def test_parse_intent_handles_none_and_empty() -> None:
     # parse_intent is documented as total: a None/empty model reply must fall
     # back to chat, not raise while formatting the warning log.
