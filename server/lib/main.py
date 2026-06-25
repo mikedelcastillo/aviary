@@ -25,6 +25,7 @@ from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
+from lib.care import toxic_food_in
 from lib.care_scheduler import CareScheduler
 from lib.clock import now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
@@ -203,6 +204,12 @@ def build_nl_router(
             memory.record(chat_id, "assistant", reply)
 
     def dispatch(chat_id: int, intent: Intent, text: str) -> None:
+        # Safety first: a question naming a toxic food ("can percy eat avocado?")
+        # must ALWAYS get the grounded care answer, even if the classifier read it
+        # as activity ("…eat…") and would otherwise reply "I haven't logged that."
+        if toxic_food_in(text) is not None:
+            send_chat_reply(chat_id, text)
+            return
         action = intent.action
         if action == "pause":
             notifier.send_text(chat_id, control.pause(parse_duration(intent.argument)))

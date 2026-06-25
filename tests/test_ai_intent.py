@@ -50,6 +50,14 @@ def test_system_prompt_lists_birds() -> None:
     assert "what did percy do today" in prompt.lower()
 
 
+def test_system_prompt_routes_care_questions_to_chat() -> None:
+    # Care/safety/how-to questions should be steered to chat (care knowledge),
+    # not the activity log, even when they name a bird.
+    prompt = build_system_prompt(["percy"]).lower()
+    assert "care knowledge" in prompt
+    assert "avocado" in prompt  # the safe-vs-toxic example
+
+
 def test_classify_intent_uses_structured_output() -> None:
     client = FakeClient('{"action": "find", "argument": "matcha"}')
     intent = classify_intent(client, "qwen3:4b", "where is matcha?", ["matcha"])
