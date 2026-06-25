@@ -16,14 +16,17 @@ FINDABLE = [
 ]
 
 
-def test_individual_name_resolves_to_itself() -> None:
-    assert expand_targets("percy", FINDABLE) == ["percy"]
-    assert expand_targets("Percy", FINDABLE) == ["percy"]
+def test_individual_resolves_to_itself_plus_species_for_ir() -> None:
+    # An individual also matches its species outline, so an IR/night feed (which
+    # only detects "lovebird", not "percy") still counts as found.
+    assert expand_targets("percy", FINDABLE) == ["percy", "lovebird"]
+    assert expand_targets("Percy", FINDABLE) == ["percy", "lovebird"]
+    assert expand_targets("draft", FINDABLE) == ["draft", "cockatiel"]
 
 
 def test_strips_articles_and_filler() -> None:
-    assert expand_targets("find the percy please", FINDABLE) == ["percy"]
-    assert expand_targets("where is matcha", FINDABLE) == ["matcha"]
+    assert expand_targets("find the percy please", FINDABLE) == ["percy", "lovebird"]
+    assert expand_targets("where is matcha", FINDABLE) == ["matcha", "lovebird"]
 
 
 def test_species_group_expands_to_members_plus_outline() -> None:
@@ -42,7 +45,8 @@ def test_budgies_group() -> None:
 
 
 def test_multiple_birds_union() -> None:
-    assert expand_targets("percy and matcha", FINDABLE) == ["percy", "matcha"]
+    # Each individual brings its species outline (lovebird, deduped).
+    assert expand_targets("percy and matcha", FINDABLE) == ["percy", "lovebird", "matcha"]
 
 
 def test_birds_and_any_mean_everything() -> None:

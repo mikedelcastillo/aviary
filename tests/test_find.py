@@ -89,7 +89,8 @@ def _finder(registry, sent, **kwargs):
 def test_resolve_targets_handles_groups() -> None:
     finder = _finder(FakeRegistry([]), [])
     assert set(finder.resolve_targets("cockatiels")) == {"draft", "pizza", "cockatiel"}
-    assert finder.resolve_targets("percy") == ["percy"]
+    # An individual also resolves to its species outline (so IR feeds match).
+    assert finder.resolve_targets("percy") == ["percy", "lovebird"]
 
 
 def test_start_unknown_lists_options() -> None:

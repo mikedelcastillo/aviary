@@ -120,6 +120,18 @@ def expand_targets(
     species_members = species_members or DEFAULT_SPECIES_MEMBERS
     findable = {label.lower() for label in findable_labels}
     every_bird = sorted(label for label in findable if label != "unknown_bird")
+    # Reverse map (draft -> cockatiel) so an individual also matches its species
+    # outline: on IR/night feeds the model can't tell individuals apart and only
+    # emits the species, so "find draft" must still match a "cockatiel" sighting.
+    member_species = {
+        member: species for species, members in species_members.items() for member in members
+    }
+
+    def _add_individual(label: str) -> None:
+        result.append(label)
+        species = member_species.get(label)
+        if species and species in findable:
+            result.append(species)
 
     tokens = [
         token
@@ -142,9 +154,9 @@ def expand_targets(
                 result.append(singular)
             continue
         if token in findable:
-            result.append(token)
+            _add_individual(token)
         elif singular in findable:
-            result.append(singular)
+            _add_individual(singular)
 
     # De-duplicate, preserving first-seen order.
     seen: set[str] = set()
