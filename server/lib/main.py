@@ -465,7 +465,11 @@ def main() -> None:
     # so it needs a notifier to talk to. Wired only when one exists.
     # PTZ manager discovers (and caches) which cameras are pan-tilt and builds a
     # patrol over the ones live right now; the search restores their facing after.
-    ptz_manager = PtzManager(app_config.credentials)
+    ptz_manager = PtzManager(
+        app_config.credentials,
+        scan_cols=app_config.ptz_scan_cols,
+        scan_rows=app_config.ptz_scan_rows,
+    )
 
     def grab_frame(camera_name: str) -> bytes | None:
         with stats_lock:

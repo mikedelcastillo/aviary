@@ -5,7 +5,7 @@ import hashlib
 
 from lib.ptz import (
     OnvifPatrol,
-    PATROL_LEG_STEPS,
+    grid_cells,
     absolute_move_body,
     build_envelope,
     build_wss_header,
@@ -123,22 +123,35 @@ class FakeCamera:
         return True
 
 
-def test_patrol_sweeps_then_reverses() -> None:
-    camera = FakeCamera("192.168.1.8")
-    patrol = OnvifPatrol([camera], pan_speed=0.4)
+def test_grid_cells_cover_pan_and_tilt() -> None:
+    cells = grid_cells(4, 3)
+    assert len(cells) == 12
+    # Full pan range across 4 columns, full tilt range across 3 rows.
+    assert sorted({c[0] for c in cells}) == [-0.75, -0.25, 0.25, 0.75]
+    assert sorted({c[1] for c in cells}) == [-0.6667, 0.0, 0.6667]
+    # Snake order: row 0 left->right ends at the right, row 1 starts at the right.
+    assert cells[0] == (-0.75, -0.6667)
+    assert cells[3] == (0.75, -0.6667)
+    assert cells[4] == (0.75, 0.0)
+
+
+def test_patrol_scans_grid_cells_in_order() -> None:
+    camera = FakeCamera("192.168.1.8", preset="1")
+    patrol = OnvifPatrol([camera], cols=4, rows=3)
     patrol.start()
-    for _ in range(PATROL_LEG_STEPS * 2):
+    for _ in range(len(patrol.cells)):
         patrol.step()
-    # First leg pans one way, second leg the other.
-    assert camera.moves[:PATROL_LEG_STEPS] == [0.4] * PATROL_LEG_STEPS
-    assert camera.moves[PATROL_LEG_STEPS:] == [-0.4] * PATROL_LEG_STEPS
+    # Every step issued an AbsoluteMove to the next grid cell, covering tilt too.
+    assert camera.restored == patrol.cells
+    # Wraps back to the first cell after a full sweep.
+    patrol.step()
+    assert camera.restored[-1] == patrol.cells[0]
 
 
 def test_patrol_prefers_saved_home_preset_on_stop() -> None:
     camera = FakeCamera("192.168.1.8", position=(0.207, -0.705), preset="1")
     patrol = OnvifPatrol([camera])
     patrol.start()
-    patrol.step()
     patrol.stop()
     assert camera.stopped == 1
     # The user's saved "home" preset wins over a captured position.
@@ -150,7 +163,6 @@ def test_patrol_restores_position_when_no_preset() -> None:
     camera = FakeCamera("192.168.1.8", position=(0.207, -0.705), preset=None)
     patrol = OnvifPatrol([camera])
     patrol.start()
-    patrol.step()
     patrol.stop()
     # No saved preset -> fall back to the exact captured facing.
     assert camera.restored == [(0.207, -0.705)]

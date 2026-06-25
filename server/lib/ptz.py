@@ -54,11 +54,30 @@ _NONCE_ENCODING = (
     "oasis-200401-wss-soap-message-security-1.0#Base64Binary"
 )
 
-# Pan velocity for a patrol sweep leg (ONVIF velocities are normalised -1..1).
-PATROL_PAN_SPEED = 0.4
-# Steps spent panning one way before reversing — the search loop calls step()
-# roughly every couple of seconds, so 4 legs ≈ a full slow sweep each way.
-PATROL_LEG_STEPS = 4
+# The patrol scans a grid of the camera's full range (pan x tilt) so it covers
+# the Y axis too, not just left-right. Defaults: 4 columns x 3 rows = 12 cells.
+DEFAULT_SCAN_COLS = 4
+DEFAULT_SCAN_ROWS = 3
+
+
+def grid_cells(cols: int, rows: int) -> list[tuple[float, float]]:
+    """Cell-centre (pan, tilt) positions covering the normalised -1..1 range.
+
+    Boustrophedon (snake) order — each row scanned in the opposite direction to
+    the last — so the camera travels the shortest path between cells. Centres are
+    inset from the edges (e.g. 4 cols -> -0.75, -0.25, 0.25, 0.75) so a cell looks
+    at the middle of its area rather than the extreme limit.
+    """
+    cols = max(1, cols)
+    rows = max(1, rows)
+    cells: list[tuple[float, float]] = []
+    for row in range(rows):
+        tilt = -1.0 + (row + 0.5) * (2.0 / rows)
+        columns = range(cols) if row % 2 == 0 else range(cols - 1, -1, -1)
+        for col in columns:
+            pan = -1.0 + (col + 0.5) * (2.0 / cols)
+            cells.append((round(pan, 4), round(tilt, 4)))
+    return cells
 
 
 # -- pure SOAP construction -------------------------------------------------
@@ -331,10 +350,14 @@ class PtzManager:
         credentials: CameraCredentials,
         *,
         timeout: float = 6.0,
+        scan_cols: int = DEFAULT_SCAN_COLS,
+        scan_rows: int = DEFAULT_SCAN_ROWS,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._credentials = credentials
         self._timeout = timeout
+        self._scan_cols = scan_cols
+        self._scan_rows = scan_rows
         self._now = now
         self._lock = threading.Lock()
         self._cache: dict[str, OnvifPtzCamera | None] = {}
@@ -357,25 +380,31 @@ class PtzManager:
         cameras = [cam for host in sorted(hosts) if (cam := self.camera_for(host))]
         if not cameras:
             return None
-        return OnvifPatrol(cameras)
+        return OnvifPatrol(cameras, cols=self._scan_cols, rows=self._scan_rows)
 
 
 class OnvifPatrol:
-    """Sweeps a set of PTZ cameras back and forth while a search runs.
+    """Scans a set of PTZ cameras through a grid of their range while a search runs.
 
     Implements the ``PtzPatrol`` protocol (start/step/stop) that
     :class:`lib.find.BirdFinder` drives. ``start`` records each camera's saved
     "home" preset (the user's first Tapo preset) and its current facing. ``step``
-    pans every camera, flipping direction every :data:`PATROL_LEG_STEPS` steps so
-    each scans its full range. ``stop`` halts movement and returns every camera
-    HOME — preferring the user's saved preset (so it lands exactly where they
-    parked it, never on a wall), falling back to the captured position then the
-    ONVIF home command.
+    moves every camera to the NEXT grid cell (an AbsoluteMove), so over a sweep it
+    covers the full pan AND tilt range — not just left-right. ``stop`` halts and
+    returns every camera HOME — preferring the user's saved preset (so it lands
+    exactly where they parked it, never on a wall), falling back to the captured
+    position then the ONVIF home command.
     """
 
-    def __init__(self, cameras: list[OnvifPtzCamera], *, pan_speed: float = PATROL_PAN_SPEED) -> None:
+    def __init__(
+        self,
+        cameras: list[OnvifPtzCamera],
+        *,
+        cols: int = DEFAULT_SCAN_COLS,
+        rows: int = DEFAULT_SCAN_ROWS,
+    ) -> None:
         self._cameras = cameras
-        self._pan_speed = pan_speed
+        self._cells = grid_cells(cols, rows)
         self._steps = 0
         # camera.host -> (pan, tilt) captured at start(), for fallback restore.
         self._home: dict[str, tuple[float, float]] = {}
@@ -385,6 +414,10 @@ class OnvifPatrol:
     @property
     def cameras(self) -> list[OnvifPtzCamera]:
         return self._cameras
+
+    @property
+    def cells(self) -> list[tuple[float, float]]:
+        return self._cells
 
     def start(self) -> None:
         # Capture the user's saved home preset (preferred) and the current facing
@@ -410,12 +443,13 @@ class OnvifPatrol:
                 self._home[camera.host] = position
 
     def step(self) -> None:
-        # Flip pan direction every PATROL_LEG_STEPS so we sweep one way, then back.
-        leg = (self._steps // PATROL_LEG_STEPS) % 2
-        direction = self._pan_speed if leg == 0 else -self._pan_speed
+        # Move every camera to the next grid cell (absolute pan+tilt). The search
+        # loop calls step() roughly every couple of seconds, so each cell gets a
+        # dwell for the detector to catch the bird before moving on.
+        pan, tilt = self._cells[self._steps % len(self._cells)]
         for camera in self._cameras:
             try:
-                camera.move(direction)
+                camera.absolute_move(pan, tilt)
             except Exception:
                 LOGGER.exception("PTZ move failed on %s", camera.host)
         self._steps += 1

@@ -149,6 +149,10 @@ class AppConfig:
     # per-detection photo alerts default OFF so they don't double up.
     memory_interval_minutes: float = 0.0
     raw_photo_alerts: bool = True
+    # /find PTZ patrol scans this grid of each camera's range (columns x rows),
+    # so it sweeps the tilt axis too. 4 x 3 = 12 cells by default.
+    ptz_scan_cols: int = 4
+    ptz_scan_rows: int = 3
 
 
 def _require_env(name: str) -> str:
@@ -290,4 +294,6 @@ def build_config() -> AppConfig:
         ollama=_ollama_config(),
         memory_interval_minutes=memory_minutes,
         raw_photo_alerts=raw_photo_alerts,
+        ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),
+        ptz_scan_rows=max(1, int(_as_float("PTZ_SCAN_ROWS", 3))),
     )
