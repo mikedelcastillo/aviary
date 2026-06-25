@@ -128,6 +128,23 @@ def test_force_finalize_when_no_wake_observed() -> None:
     assert night is not None and night.finalized and night.partial_coverage
 
 
+def test_force_finalize_excludes_a_left_on_light_from_dark() -> None:
+    state = _opened()  # lights_out 20:00
+    step(state, Ir(ev(25, 23, 0), False, 2))  # a light comes on and never returns to dark
+    step(state, Tick(ev(26, 14, 0)))          # force-finalize the next afternoon
+    night = state.just_finalized
+    assert night is not None and night.partial_coverage
+    assert night.dark_minutes == 180  # only 20:00->23:00 was truly dark, not the lit 15h
+
+
+def test_pre_dawn_dark_confirming_after_4am_opens() -> None:
+    # A real bedtime at 03:57 confirmed at 04:02 must still open (guard checks the
+    # dark-start instant, not the confirm instant).
+    state = run([Ir(ev(26, 3, 57), True, 2), Tick(ev(26, 4, 2))])
+    assert state.night is not None
+    assert state.night.lights_out == ev(26, 3, 57)
+
+
 def test_helpers() -> None:
     assert night_of(datetime(2026, 6, 26, 0, 30)) == date(2026, 6, 25)
     assert night_of(datetime(2026, 6, 25, 20, 0)) == date(2026, 6, 25)

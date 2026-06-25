@@ -124,6 +124,12 @@ def classify_motion(movement: float, state: NightState, now: datetime) -> Distur
 def _finalize(state: NightState, first_light: datetime, *, partial: bool, note: str | None = None) -> None:
     night = state.night
     assert night is not None
+    # Close any still-open lit interval (a light left on through finalize) so the
+    # force-finalize path excludes it from the dark window — otherwise a left-on
+    # light would be counted as dark. A no-op for the morning-wake path, which
+    # finalizes exactly at _leave_since.
+    if state._leave_since is not None and first_light > state._leave_since:
+        state._relit_minutes += _mins(state._leave_since, first_light)
     gross = _mins(night.lights_out, first_light) if night.lights_out else 0.0
     night.first_light = first_light
     night.dark_minutes = max(0, round(gross - state._relit_minutes))
@@ -194,7 +200,13 @@ def step(state: NightState, event) -> NightState:
 def _advance(state: NightState, now: datetime) -> None:
     """Time-driven transitions: confirm a dark start, a morning wake, or force-end."""
     if state.night is None:
-        if state._dark_since is not None and _mins(state._dark_since, now) >= DARK_CONFIRM_MIN and should_open(now):
+        # Guard on when the dark ACTUALLY began, not the confirm instant — a real
+        # bedtime at 03:57 that confirms at 04:02 must still open.
+        if (
+            state._dark_since is not None
+            and _mins(state._dark_since, now) >= DARK_CONFIRM_MIN
+            and should_open(state._dark_since)
+        ):
             state.night = start_night(state._dark_since, state._dark_cameras)
             state._dark_since = None
         return
@@ -215,6 +227,8 @@ def _advance(state: NightState, now: datetime) -> None:
     # with still no wake. The next-day guard is essential: a normal evening time
     # like 23:00 is >= 14:00 too and must NOT trip this.
     age_h = _mins(state.night.lights_out, now) / 60.0
-    next_afternoon = now.date() > state.night.lights_out.date() and now.time() >= time(FORCE_FINALIZE_HOUR, 0)
+    # Key the "next afternoon" backstop off the night's evening date so a pre-dawn
+    # start (lights_out after midnight) still resolves on the right calendar day.
+    next_afternoon = now.date() > state.night.night_of and now.time() >= time(FORCE_FINALIZE_HOUR, 0)
     if age_h > MAX_NIGHT_HOURS or next_afternoon:
         _finalize(state, now, partial=True, note="no clear wake observed — estimated")
