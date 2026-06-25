@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from dotenv import load_dotenv
 
+from lib.ai.chat import chat_reply
 from lib.ai.client import OllamaClient
 from lib.ai.intent import Intent
 from lib.ai.router import NaturalLanguageRouter
@@ -87,17 +88,6 @@ def start_command_thread(
     return thread
 
 
-# Persona for free-text chat that isn't a command. Feature 4 enriches this with
-# the activity log + vision Q&A; here it is a warm, brief fallback responder.
-CHAT_SYSTEM_PROMPT = (
-    "You are the friendly caretaker of a home aviary — pet birds including "
-    "percy, matcha and jynx (lovebirds), bambi (budgie), and draft and pizza "
-    "(cockatiels), watched by several cameras. Reply briefly and warmly. If "
-    "someone asks where a bird is right now, tell them you can look — they can "
-    "say \"find <bird>\". Don't invent specific things the birds did."
-)
-
-
 def build_nl_router(
     app_config: AppConfig,
     notifier,
@@ -135,20 +125,13 @@ def build_nl_router(
             app_config.ollama.base_url,
         )
 
-    def chat_reply(chat_id: int, text: str) -> None:
+    def send_chat_reply(chat_id: int, text: str) -> None:
         try:
-            reply = client.chat(
-                app_config.ollama.llm_model,
-                [
-                    {"role": "system", "content": CHAT_SYSTEM_PROMPT},
-                    {"role": "user", "content": text},
-                ],
-                think=False,
-            )
+            reply = chat_reply(client, app_config.ollama.llm_model, text)
         except Exception:
             LOGGER.exception("Chat reply failed")
             reply = "🤖 My language brain (Ollama) is unreachable right now."
-        notifier.send_text(chat_id, reply.strip() or "🤔")
+        notifier.send_text(chat_id, reply or "🤔")
 
     def dispatch(chat_id: int, intent: Intent, text: str) -> None:
         action = intent.action
@@ -167,7 +150,7 @@ def build_nl_router(
             notifier.send_text(chat_id, "Capturing snapshots from all cameras...")
             notifier.send_text(chat_id, snapshot_provider(chat_id))
         else:  # chat
-            chat_reply(chat_id, text)
+            send_chat_reply(chat_id, text)
 
     return NaturalLanguageRouter(
         client,
