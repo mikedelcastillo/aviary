@@ -424,16 +424,24 @@ class OnvifPatrol:
         for camera in self._cameras:
             try:
                 camera.stop()
-                # Prefer the user's saved home preset (lands exactly where they
-                # parked it); fall back to the captured position, then the ONVIF
-                # home command. Never leave a camera staring at a wall.
+                # ALWAYS prefer the user's saved home preset (lands exactly where
+                # they parked it). Use the token captured at start, but if that
+                # capture missed (a transient GetPresets failure), fetch it fresh
+                # NOW — otherwise we'd restore a stale captured position that may
+                # itself be a wall. Fall back to captured position, then the
+                # ONVIF home command, only when there's genuinely no preset.
                 preset = self._home_preset.get(camera.host)
-                home = self._home.get(camera.host)
+                if preset is None:
+                    preset = camera.first_preset_token()
                 if preset is not None and camera.goto_preset(preset):
+                    LOGGER.info("PTZ %s returned to home preset %s", camera.host, preset)
                     continue
+                home = self._home.get(camera.host)
                 if home is not None:
                     camera.absolute_move(home[0], home[1])
+                    LOGGER.info("PTZ %s restored to captured position (no preset)", camera.host)
                 else:
                     camera.goto_home()
+                    LOGGER.info("PTZ %s sent to ONVIF home (no preset/position)", camera.host)
             except Exception:
                 LOGGER.exception("PTZ stop/restore failed on %s", camera.host)
