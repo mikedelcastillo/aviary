@@ -14,7 +14,7 @@ All thresholds are named, tunable constants.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
 from lib.sleep.model import LIGHT, MOTION, NIGHT_FRIGHT, Disturbance, SleepNight
