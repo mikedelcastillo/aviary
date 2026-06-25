@@ -19,6 +19,7 @@ from lib.control import RuntimeControl
 from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
+from lib.find import BirdFinder
 from lib.objects import ObjectRegistry
 from lib.snapshot import capture_snapshots, snapshot_caption
 from lib.stats import CameraStats
@@ -60,6 +61,7 @@ def start_command_thread(
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
+    find_provider: Callable[[int, str], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -70,6 +72,7 @@ def start_command_thread(
             "snapshot_provider": snapshot_provider,
             "pause_provider": pause_provider,
             "resume_provider": resume_provider,
+            "find_provider": find_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -199,6 +202,22 @@ def main() -> None:
             notifier.send_album(chat_id, items)
         return f"Sent {len(saved)} snapshot(s); saved to {snapshot_collect_dir}."
 
+    # /find runs a background search (it pushes its own progress to the chat),
+    # so it needs a notifier to talk to. Wired only when one exists.
+    finder = (
+        BirdFinder(registry, detector.known_labels, notify=notifier.send_text)
+        if notifier is not None
+        else None
+    )
+
+    def find_provider(chat_id: int, target: str) -> str:
+        # Privacy first: a paused server is consuming no streams, so a search
+        # would just stare at frozen registry state. Refuse instead.
+        if control.is_paused():
+            return f"{control.status()} Can't search while paused — /play first."
+        assert finder is not None  # only wired when finder exists
+        return finder.start(chat_id, target, stop_event)
+
     start_command_thread(
         app_config.telegram.bot_token,
         app_config.telegram.user_ids,
@@ -210,6 +229,7 @@ def main() -> None:
         snapshot_provider=snapshot_provider,
         pause_provider=control.pause,
         resume_provider=control.resume,
+        find_provider=find_provider if finder is not None else None,
     )
 
     dashboard = Dashboard(

@@ -28,6 +28,7 @@ StatusProvider = Callable[[], str]
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/status": "Show camera and detection status",
     "/snapshot": "Capture a snapshot from every camera",
+    "/find": "Find a bird across all cameras (e.g. /find percy)",
     "/pause": "Privacy mode: stop the cameras (optional duration, e.g. /pause 10m)",
     "/stop": "Privacy mode: stop the cameras (alias of /pause)",
     "/play": "Resume the cameras after a pause",
@@ -229,6 +230,7 @@ def run_command_bot(
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
+    find_provider: Callable[[int, str], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -243,6 +245,7 @@ def run_command_bot(
         for command, present in (
             ("/status", status_provider is not None),
             ("/snapshot", snapshot_provider is not None),
+            ("/find", find_provider is not None),
             ("/pause", pause_provider is not None),
             ("/stop", pause_provider is not None),
             ("/play", resume_provider is not None),
@@ -337,6 +340,23 @@ def run_command_bot(
                         report = f"Snapshot failed: {exc}"
                     send(chat_id, report)
                 LOGGER.info("Handled /snapshot for user %s", user_id)
+                continue
+
+            if command == "/find":
+                # Validate + launch on a background thread, then ack immediately.
+                # The search (up to 5 min) must never block this poll loop, so it
+                # pushes its own progress + result messages to the chat itself.
+                if str(user_id) not in allowed or find_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    target = command_argument(message.get("text", ""))
+                    try:
+                        ack = find_provider(chat_id, target)
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Find failed")
+                        ack = f"Find failed: {exc}"
+                    send(chat_id, ack)
+                LOGGER.info("Handled /find for user %s", user_id)
                 continue
 
             if command == "/userinfo":

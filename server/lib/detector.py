@@ -31,6 +31,21 @@ class ObjectDetector:
         self.models = [YOLO(str(path)) for path in config.paths]
         self._lock = threading.Lock()
 
+    def known_labels(self) -> list[str]:
+        """Every class label across all loaded models, sorted and de-duplicated.
+
+        This is the authoritative runtime set of things the server can detect —
+        the roster's individual birds (percy, matcha, ...), the IR species
+        labels, and any generic classes from a stock YOLO model. ``/find`` uses
+        it to validate a requested target and to list what is findable.
+        """
+        labels: set[str] = set()
+        for model in self.models:
+            names = model.names
+            values = names.values() if isinstance(names, dict) else names
+            labels.update(str(name) for name in values)
+        return sorted(labels)
+
     def predict(self, frame) -> list[Detection]:
         predict_args = {
             "source": frame,

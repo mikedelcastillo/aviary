@@ -117,6 +117,19 @@ class TelegramNotifier:
         # If no file_id was ever obtained, the loop above already attempted a
         # direct upload to every recipient, so there is nothing left to send.
 
+    def send_text(self, chat_id: int | str, text: str) -> None:
+        """Send a plain text message to a SINGLE chat (used by ``/find`` updates).
+
+        Goes through the shared rate-limit gate like every other send, so a burst
+        of search updates paces alongside alerts under the one bot-token limit. A
+        transient API error is logged and swallowed — a dropped progress line
+        must never tear down the search thread.
+        """
+        try:
+            self._send_message(str(chat_id), text)
+        except requests.RequestException as exc:
+            LOGGER.warning("Text send to %s failed: %s", chat_id, exc)
+
     def send_album(
         self, chat_id: int | str, items: Sequence[tuple[bytes, str | None]]
     ) -> None:
