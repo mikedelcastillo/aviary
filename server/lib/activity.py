@@ -206,10 +206,12 @@ _ACTIVITY_SUMMARY_PROMPT = (
     "You are the aviary caretaker giving an activity update from logged memories. "
     "Write it as bullet points — start each line with '• ' — UP TO 10 bullets. "
     "Cover EVERY bird that appears in the notes: at least one bullet per bird, "
-    "saying what it did and who it was with. Use each bird's correct pronoun from "
-    "the pronouns given (she/he), and refer to birds by NAME only — never add the "
-    "species. Be warm and concrete; don't invent anything not in the notes. No "
-    "preamble or closing line — just the bullets."
+    "saying what it did and who it was with. Refer to each bird by NAME, never its "
+    "species. Write NATURALLY: use a pronoun (she/he, per the pronouns given) only "
+    "where one naturally fits in a sentence — NEVER write a pronoun in parentheses "
+    "or right after a name (no 'Percy (she)', no 'Percy, she,'); the pronouns are "
+    "given for your reference, not to be quoted. Be warm and concrete; don't invent "
+    "anything not in the notes. No preamble or closing line — just the bullets."
 )
 
 

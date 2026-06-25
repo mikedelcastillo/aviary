@@ -169,7 +169,7 @@ class MemoryMaker:
                 LOGGER.exception("Memory describe failed")
                 note = None
             who = ", ".join(pretty(b) for b in birds)
-            observations.append(f"{who} ({self._camera_display(camera)}): {note or 'seen'}")
+            observations.append(f"{who} on {self._camera_display(camera)}: {note or 'seen'}")
         try:
             summary = summarise_activity(
                 self._client, self._llm_model, observations,

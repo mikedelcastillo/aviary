@@ -88,8 +88,11 @@ def build_detection_context(
     return (
         "This is a still from a pet-bird camera. The camera detected these birds: "
         + "; ".join(parts)
-        + ". They may be small or far from the camera. Refer to each bird by its "
-        "NAME and pronoun (he/she) only — do NOT state its species or breed."
+        + ". They may be small or far from the camera. The word in parentheses after "
+        "a name is that bird's pronoun, for your reference only. Describe the scene "
+        "naturally, calling each bird by NAME and using she/he only where it reads "
+        "naturally — do NOT write a pronoun in parentheses, and do NOT mention any "
+        "species or breed."
     )
 
 

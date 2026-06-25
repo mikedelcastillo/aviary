@@ -197,7 +197,7 @@ def pronoun_sentence(pronouns: dict[str, str]) -> str:
     def _clause(names: list[str], word: str, pronoun: str) -> str:
         joined = ", ".join(pretty(n) for n in names)
         verb = "is" if len(names) == 1 else "are"
-        return f"{joined} {verb} {word} ({pronoun})"
+        return f"{joined} {verb} {word} (use {pronoun} for them)"
 
     parts = []
     if she:
