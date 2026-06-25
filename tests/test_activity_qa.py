@@ -15,7 +15,7 @@ class FakeClient:
 
 def _responder(memories_dir, notify, find=None, send_album=None, now=None):
     # Fix "now" so the window is deterministic.
-    clock_value = (now or datetime(2026, 6, 25, 15, 0)).timestamp()
+    when = now or datetime(2026, 6, 25, 15, 0)
     return ActivityResponder(
         memories_dir,
         FakeClient(),
@@ -24,7 +24,7 @@ def _responder(memories_dir, notify, find=None, send_album=None, now=None):
         notify=notify,
         send_album=send_album,
         find=find,
-        clock=lambda: clock_value,
+        now=lambda: when,
     )
 
 

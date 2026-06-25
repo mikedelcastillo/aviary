@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from lib.activity import summarise_activity
+from lib.clock import now_ph
 from lib.find import currently_visible
 from lib.imaging import downscale_jpeg
 from lib.journal import MemoryEntry, append_entry
@@ -65,7 +66,7 @@ class MemoryMaker:
         pronoun_note: str = "",
         max_cameras: int = 3,
         clock: Callable[[], float] = time.monotonic,
-        now: Callable[[], datetime] = datetime.now,
+        now: Callable[[], datetime] = now_ph,
     ) -> None:
         self._memories_dir = Path(memories_dir)
         self._images_dir = self._memories_dir / "images"

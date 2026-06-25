@@ -11,12 +11,12 @@ kicks off a live ``/find`` instead of shrugging.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from lib.activity import summarise_activity
+from lib.clock import now_ph
 from lib.find import pretty_phrase
 from lib.journal import humanize_ago, load_recent
 from lib.roster import expand_targets
@@ -52,7 +52,7 @@ class ActivityResponder:
         send_album: Callable[[int, list[tuple[bytes, str | None]]], object] | None = None,
         find: Callable[[int, str], None] | None = None,
         pronoun_note: str = "",
-        clock: Callable[[], float] = time.time,
+        now: Callable[[], datetime] = now_ph,
     ) -> None:
         self._memories_dir = Path(memories_dir)
         self._client = client
@@ -62,7 +62,7 @@ class ActivityResponder:
         self._send_album = send_album
         self._find = find
         self._pronoun_note = pronoun_note
-        self._clock = clock
+        self._now = now
 
     def _window(self, text: str, argument: str, now: datetime) -> tuple[datetime, str]:
         if "today" in text.lower() or "today" in argument.lower():
@@ -71,7 +71,7 @@ class ActivityResponder:
 
     def respond(self, chat_id: int, text: str, argument: str) -> None:
         bird_text, _ = parse_activity_arg(argument)
-        now = datetime.fromtimestamp(self._clock())
+        now = self._now()
         since, window_phrase = self._window(text, argument, now)
         targets = expand_targets(bird_text, self._known_labels()) if bird_text.strip() else None
 

@@ -6,7 +6,8 @@ import logging
 import math
 import threading
 from collections import deque
-from datetime import datetime
+
+from lib.clock import now_ph
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -221,7 +222,7 @@ class Dashboard:
             stats.record_alert(count)
 
     def add_event(self, message: str, level: str = "INFO") -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = now_ph().strftime("%H:%M:%S")
         with self._events_lock:
             self._events.append((timestamp, level.upper(), message))
 
