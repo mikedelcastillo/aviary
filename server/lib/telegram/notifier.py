@@ -13,6 +13,7 @@ from pathlib import Path
 import requests
 
 from lib.detector import Detection
+from lib.imaging import downscale_jpeg
 from lib.labels import pretty_labels
 
 
@@ -199,7 +200,7 @@ class TelegramNotifier:
         response = self._post(
             f"{self.base_url}/sendPhoto",
             data={"chat_id": user_id, "caption": caption},
-            files={"photo": ("snapshot.jpg", image_bytes, "image/jpeg")},
+            files={"photo": ("snapshot.jpg", downscale_jpeg(image_bytes), "image/jpeg")},
             timeout=self.photo_timeout_seconds,
         )
         response.raise_for_status()
@@ -218,7 +219,7 @@ class TelegramNotifier:
             if caption:
                 entry["caption"] = caption
             media.append(entry)
-            files[key] = (f"{key}.jpg", image_bytes, "image/jpeg")
+            files[key] = (f"{key}.jpg", downscale_jpeg(image_bytes), "image/jpeg")
         response = self._post(
             f"{self.base_url}/sendMediaGroup",
             data={"chat_id": chat_id, "media": json.dumps(media)},
@@ -237,7 +238,7 @@ class TelegramNotifier:
         response = self._post(
             f"{self.base_url}/sendPhoto",
             data=data,
-            files={"photo": ("snapshot.jpg", image_bytes, "image/jpeg")},
+            files={"photo": ("snapshot.jpg", downscale_jpeg(image_bytes), "image/jpeg")},
             timeout=self.photo_timeout_seconds,
         )
         response.raise_for_status()

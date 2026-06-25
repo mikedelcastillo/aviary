@@ -11,9 +11,7 @@ from __future__ import annotations
 import base64
 import re
 
-import cv2
-import numpy as np
-
+from lib.imaging import downscale_jpeg
 from lib.labels import pretty
 
 
@@ -42,20 +40,6 @@ CAMERA_NAME_PROMPT = (
 
 def encode_image(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("ascii")
-
-
-def downscale_jpeg(image_bytes: bytes, max_dim: int = MAX_VLM_DIM) -> bytes:
-    """Re-encode the image so its longest edge is <= ``max_dim`` (else unchanged)."""
-    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
-    if array is None:
-        return image_bytes
-    height, width = array.shape[:2]
-    scale = max_dim / max(height, width)
-    if scale >= 1.0:
-        return image_bytes
-    resized = cv2.resize(array, (int(width * scale), int(height * scale)))
-    ok, buffer = cv2.imencode(".jpg", resized)
-    return buffer.tobytes() if ok else image_bytes
 
 
 def position_phrase(cx: float, cy: float, width: int, height: int) -> str:
