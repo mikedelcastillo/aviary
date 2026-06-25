@@ -129,7 +129,7 @@ class BirdFinder:
         *,
         notify: Callable[[int, str], None],
         grab_frame: "Callable[[str], bytes | None] | None" = None,
-        send_album: "Callable[[int, Sequence[tuple[bytes, str | None]]], None] | None" = None,
+        send_photo: "Callable[[int, bytes, str | None], object] | None" = None,
         describe_frame: "Callable[[bytes], str | None] | None" = None,
         make_patrol: "Callable[[], PtzPatrol | None] | None" = None,
         camera_display: Callable[[str], str] = short_camera,
@@ -145,7 +145,9 @@ class BirdFinder:
         self._known_labels = known_labels
         self._notify = notify
         self._grab_frame = grab_frame
-        self._send_album = send_album
+        # Sends ONE proof photo (individual, reliable) — not a media-group album,
+        # which timed out on a slow uplink and dropped the find photo entirely.
+        self._send_photo = send_photo
         # Optional VLM: given a frame's JPEG bytes, return a short scene
         # description ("Percy is on the perch with Matcha"). Best-effort.
         self._describe_frame = describe_frame
@@ -360,16 +362,17 @@ class BirdFinder:
             return None
 
     def _send_found_photos(self, chat_id, found_labels, visible) -> int:
-        """Send the latest frame of each camera that saw a found bird, as proof.
+        """Send each camera-that-saw-the-bird's frame as proof — one photo at a time.
 
-        Returns how many photos were sent (0 if vision/album wiring is absent or
-        no camera had a current frame). Logged so a missing photo is diagnosable.
+        Individual sends (not a media-group album) so a single slow upload can't
+        drop the whole batch on a flaky uplink. Returns how many were sent;
+        logged so a missing photo is diagnosable.
         """
-        if self._grab_frame is None or self._send_album is None:
-            LOGGER.warning("Find: no grab_frame/send_album wired; cannot send proof photo")
+        if self._grab_frame is None or self._send_photo is None:
+            LOGGER.warning("Find: no grab_frame/send_photo wired; cannot send proof photo")
             return 0
         cameras = sorted({cam for label in found_labels for cam in visible.get(label, [])})
-        items: list[tuple[bytes, str | None]] = []
+        sent = 0
         for camera in cameras:
             try:
                 image = self._grab_frame(camera)
@@ -382,16 +385,13 @@ class BirdFinder:
             here = ", ".join(
                 pretty(label) for label in found_labels if camera in visible.get(label, [])
             )
-            items.append((image, f"{here} — {self._camera_display(camera)}"))
-        if not items:
-            return 0
-        try:
-            self._send_album(chat_id, items)
-            LOGGER.info("Find: sent %d proof photo(s) to chat %s", len(items), chat_id)
-            return len(items)
-        except Exception:
-            LOGGER.exception("Sending found photos failed")
-            return 0
+            try:
+                if self._send_photo(chat_id, image, f"{here} — {self._camera_display(camera)}"):
+                    sent += 1
+            except Exception:
+                LOGGER.exception("Sending proof photo for %s failed", camera)
+        LOGGER.info("Find: sent %d proof photo(s) to chat %s", sent, chat_id)
+        return sent
 
 
 class PtzPatrol(Protocol):

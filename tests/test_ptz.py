@@ -11,6 +11,8 @@ from lib.ptz import (
     build_wss_header,
     capabilities_have_ptz,
     continuous_move_body,
+    goto_preset_body,
+    parse_first_preset_token,
     parse_pantilt_position,
     parse_profile_token,
 )
@@ -63,6 +65,17 @@ def test_parse_profile_token() -> None:
     assert parse_profile_token("<Profiles>no token</Profiles>") is None
 
 
+def test_parse_first_preset_token() -> None:
+    text = '<tptz:Preset token="1"><tt:Name>Viewpoint 1</tt:Name></tptz:Preset>'
+    assert parse_first_preset_token(text) == "1"
+    assert parse_first_preset_token("<tptz:GetPresetsResponse/>") is None
+
+
+def test_goto_preset_body_carries_tokens() -> None:
+    body = goto_preset_body("profile_1", "1")
+    assert "profile_1" in body and "<PresetToken>1</PresetToken>" in body
+
+
 def test_parse_pantilt_position() -> None:
     text = '<tt:Position><tt:PanTilt x="0.207243" y="-0.705128"></tt:PanTilt></tt:Position>'
     assert parse_pantilt_position(text) == (0.207243, -0.705128)
@@ -73,16 +86,25 @@ def test_parse_pantilt_position() -> None:
 
 
 class FakeCamera:
-    def __init__(self, host: str, position=(0.1, 0.2)) -> None:
+    def __init__(self, host: str, position=(0.1, 0.2), preset=None) -> None:
         self.host = host
         self._position = position
+        self._preset = preset
         self.moves: list[float] = []
         self.stopped = 0
         self.restored: list[tuple[float, float]] = []
         self.homed = 0
+        self.preset_gotos: list[str] = []
 
     def get_position(self):
         return self._position
+
+    def first_preset_token(self):
+        return self._preset
+
+    def goto_preset(self, token: str) -> bool:
+        self.preset_gotos.append(token)
+        return True
 
     def move(self, pan: float, tilt: float = 0.0) -> bool:
         self.moves.append(pan)
@@ -112,16 +134,27 @@ def test_patrol_sweeps_then_reverses() -> None:
     assert camera.moves[PATROL_LEG_STEPS:] == [-0.4] * PATROL_LEG_STEPS
 
 
-def test_patrol_restores_exact_position_on_stop() -> None:
-    camera = FakeCamera("192.168.1.8", position=(0.207, -0.705))
+def test_patrol_prefers_saved_home_preset_on_stop() -> None:
+    camera = FakeCamera("192.168.1.8", position=(0.207, -0.705), preset="1")
     patrol = OnvifPatrol([camera])
     patrol.start()
     patrol.step()
     patrol.stop()
     assert camera.stopped == 1
-    # Returns to the EXACT pre-patrol facing, not a generic home.
+    # The user's saved "home" preset wins over a captured position.
+    assert camera.preset_gotos == ["1"]
+    assert camera.restored == []
+
+
+def test_patrol_restores_position_when_no_preset() -> None:
+    camera = FakeCamera("192.168.1.8", position=(0.207, -0.705), preset=None)
+    patrol = OnvifPatrol([camera])
+    patrol.start()
+    patrol.step()
+    patrol.stop()
+    # No saved preset -> fall back to the exact captured facing.
     assert camera.restored == [(0.207, -0.705)]
-    assert camera.homed == 0
+    assert camera.preset_gotos == []
 
 
 def test_patrol_falls_back_to_home_when_position_unknown() -> None:

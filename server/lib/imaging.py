@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 
-def downscale_jpeg(image_bytes: bytes, max_dim: int = 1600, quality: int = 85) -> bytes:
+def downscale_jpeg(image_bytes: bytes, max_dim: int = 1280, quality: int = 80) -> bytes:
     """Re-encode so the longest edge is <= ``max_dim`` at ``quality``.
 
     Returns the input unchanged if it can't be decoded or is already small

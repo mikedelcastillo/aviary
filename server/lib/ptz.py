@@ -148,6 +148,23 @@ def goto_home_body(token: str) -> str:
     )
 
 
+def get_presets_body(token: str) -> str:
+    return f'<GetPresets xmlns="{_NS_PTZ}"><ProfileToken>{token}</ProfileToken></GetPresets>'
+
+
+def goto_preset_body(profile_token: str, preset_token: str) -> str:
+    return (
+        f'<GotoPreset xmlns="{_NS_PTZ}"><ProfileToken>{profile_token}</ProfileToken>'
+        f"<PresetToken>{preset_token}</PresetToken></GotoPreset>"
+    )
+
+
+def parse_first_preset_token(response_text: str) -> str | None:
+    """Token of the FIRST saved preset — the Tapo cameras' user-set "home"."""
+    match = re.search(r'<\w*:?Preset\b[^>]*token="([^"]+)"', response_text)
+    return match.group(1) if match else None
+
+
 def capabilities_have_ptz(response_text: str) -> bool:
     """True if a GetCapabilities response advertises a PTZ service."""
     # The PTZ capability block carries an <XAddr> with a /ptz or /onvif URL; a
@@ -275,6 +292,25 @@ class OnvifPtzCamera:
         )
         return code == 200
 
+    def first_preset_token(self) -> str | None:
+        """The first saved preset's token (the camera's user-set home), if any."""
+        token = self.profile_token()
+        if token is None:
+            return None
+        code, text = self._call(get_presets_body(token), f"{_NS_PTZ}/GetPresets")
+        if code != 200:
+            return None
+        return parse_first_preset_token(text)
+
+    def goto_preset(self, preset_token: str) -> bool:
+        token = self.profile_token()
+        if token is None:
+            return False
+        code, _ = self._call(
+            goto_preset_body(token, preset_token), f"{_NS_PTZ}/GotoPreset"
+        )
+        return code == 200
+
     def goto_home(self) -> bool:
         token = self._token
         if token is None:
@@ -328,31 +364,43 @@ class OnvifPatrol:
     """Sweeps a set of PTZ cameras back and forth while a search runs.
 
     Implements the ``PtzPatrol`` protocol (start/step/stop) that
-    :class:`lib.find.BirdFinder` drives. ``start`` records each camera's current
-    facing so it can be restored. ``step`` pans every camera, flipping direction
-    every :data:`PATROL_LEG_STEPS` steps so each scans its full range. ``stop``
-    halts movement and returns every camera to the EXACT position it held before
-    the patrol — a search must never leave a camera pointing somewhere new.
+    :class:`lib.find.BirdFinder` drives. ``start`` records each camera's saved
+    "home" preset (the user's first Tapo preset) and its current facing. ``step``
+    pans every camera, flipping direction every :data:`PATROL_LEG_STEPS` steps so
+    each scans its full range. ``stop`` halts movement and returns every camera
+    HOME — preferring the user's saved preset (so it lands exactly where they
+    parked it, never on a wall), falling back to the captured position then the
+    ONVIF home command.
     """
 
     def __init__(self, cameras: list[OnvifPtzCamera], *, pan_speed: float = PATROL_PAN_SPEED) -> None:
         self._cameras = cameras
         self._pan_speed = pan_speed
         self._steps = 0
-        # camera.host -> (pan, tilt) captured at start(), for exact restore.
+        # camera.host -> (pan, tilt) captured at start(), for fallback restore.
         self._home: dict[str, tuple[float, float]] = {}
+        # camera.host -> the user's saved "home" preset token (preferred restore).
+        self._home_preset: dict[str, str] = {}
 
     @property
     def cameras(self) -> list[OnvifPtzCamera]:
         return self._cameras
 
     def start(self) -> None:
-        # Capture where each camera is pointing now so stop() can put it back
-        # exactly. Resetting the counter makes a fresh patrol always start the
-        # same way.
+        # Capture the user's saved home preset (preferred) and the current facing
+        # (fallback) so stop() can put each camera back. Resetting the counter
+        # makes a fresh patrol always start the same way.
         self._steps = 0
         self._home = {}
+        self._home_preset = {}
         for camera in self._cameras:
+            try:
+                preset = camera.first_preset_token()
+            except Exception:
+                LOGGER.exception("PTZ get-presets failed on %s", camera.host)
+                preset = None
+            if preset is not None:
+                self._home_preset[camera.host] = preset
             try:
                 position = camera.get_position()
             except Exception:
@@ -376,9 +424,13 @@ class OnvifPatrol:
         for camera in self._cameras:
             try:
                 camera.stop()
-                # Return to the exact pre-patrol facing when we have it; fall
-                # back to the camera's home preset only if we never captured one.
+                # Prefer the user's saved home preset (lands exactly where they
+                # parked it); fall back to the captured position, then the ONVIF
+                # home command. Never leave a camera staring at a wall.
+                preset = self._home_preset.get(camera.host)
                 home = self._home.get(camera.host)
+                if preset is not None and camera.goto_preset(preset):
+                    continue
                 if home is not None:
                     camera.absolute_move(home[0], home[1])
                 else:

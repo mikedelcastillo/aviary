@@ -50,7 +50,7 @@ class TelegramNotifier:
         bot_token: str,
         user_ids: list[str],
         timeout_seconds: int = 15,
-        photo_timeout_seconds: int = 60,
+        photo_timeout_seconds: int = 120,
         min_send_interval_seconds: float = DEFAULT_MIN_SEND_INTERVAL_SECONDS,
         max_send_retries: int = DEFAULT_MAX_SEND_RETRIES,
     ) -> None:
@@ -129,6 +129,21 @@ class TelegramNotifier:
         if not self.bot_token or not self.user_ids:
             return
         self._broadcast(self.user_ids, lambda user_id: self._send_message(user_id, text))
+
+    def send_photo(self, chat_id: int | str, image_bytes: bytes, caption: str | None = None) -> bool:
+        """Send ONE photo to a chat, downscaled and best-effort.
+
+        Used where reliability matters more than grouping (find proof, Q&A):
+        individual uploads are small and each is retried by the rate gate, so a
+        single slow upload can't sink a whole media-group album the way it did
+        before. Returns True on success.
+        """
+        try:
+            self._send_photo_to_chat(chat_id, image_bytes, caption)
+            return True
+        except requests.RequestException as exc:
+            LOGGER.warning("Photo to %s failed: %s", chat_id, exc)
+            return False
 
     def send_chat_action(self, chat_id: int | str, action: str = "typing") -> None:
         """Show a chat action (e.g. 'typing…') so the user knows we're thinking.

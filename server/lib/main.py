@@ -240,7 +240,7 @@ def make_console_dispatcher(
         detector.known_labels,
         notify=console_notifier.send_text,
         grab_frame=grab_frame,
-        send_album=None,  # no images in the terminal
+        send_photo=None,  # no images in the terminal
         describe_frame=describe_frame if ollama_client is not None else None,
         make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
         camera_display=namer.display,
@@ -262,7 +262,7 @@ def make_console_dispatcher(
             app_config.ollama.vlm_model,
             detector.known_labels,
             notify=console_notifier.send_text,
-            send_album=None,
+            send_photo=None,
             find=lambda cid, arg: emit(console_find(cid, arg)),
             member_species=member_species,
             camera_display=namer.display,
@@ -494,7 +494,7 @@ def main() -> None:
             detector.known_labels,
             notify=notifier.send_text,
             grab_frame=grab_frame,
-            send_album=notifier.send_album,
+            send_photo=notifier.send_photo,
             describe_frame=describe_frame if ollama_client is not None else None,
             make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
             camera_display=namer.display,
@@ -577,7 +577,7 @@ def main() -> None:
             app_config.ollama.vlm_model,
             detector.known_labels,
             notify=notifier.send_text,
-            send_album=notifier.send_album,
+            send_photo=notifier.send_photo,
             # A "what is X doing now?" with no recent sighting kicks off a live
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),

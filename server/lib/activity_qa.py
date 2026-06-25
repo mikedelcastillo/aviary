@@ -43,7 +43,7 @@ class ActivityResponder:
         known_labels: Callable[[], list[str]],
         *,
         notify: Callable[[int, str], None],
-        send_album: Callable[[int, list], None] | None = None,
+        send_photo: Callable[[int, bytes, str | None], object] | None = None,
         find: Callable[[int, str], None] | None = None,
         member_species: dict[str, str] | None = None,
         camera_display: Callable[[str], str] = lambda name: name,
@@ -55,7 +55,7 @@ class ActivityResponder:
         self._vlm_model = vlm_model
         self._known_labels = known_labels
         self._notify = notify
-        self._send_album = send_album
+        self._send_photo = send_photo
         self._find = find
         self._member_species = member_species or {}
         self._camera_display = camera_display
@@ -118,5 +118,9 @@ class ActivityResponder:
             summary = "; ".join(observations)
 
         self._notify(chat_id, summary or "; ".join(observations))
-        if photos and self._send_album is not None:
-            self._send_album(chat_id, photos[:MAX_QA_PHOTOS])
+        if self._send_photo is not None:
+            for image, caption in photos[:MAX_QA_PHOTOS]:
+                try:
+                    self._send_photo(chat_id, image, caption)
+                except Exception:
+                    LOGGER.exception("Sending QA photo failed")

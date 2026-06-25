@@ -34,7 +34,7 @@ class FakeClient:
         return "Percy spent the afternoon preening on the perch."
 
 
-def _responder(collect_dir, notify, find=None, send_album=None, now=2000.0):
+def _responder(collect_dir, notify, find=None, send_photo=None, now=2000.0):
     return ActivityResponder(
         collect_dir,
         FakeClient(),
@@ -42,7 +42,7 @@ def _responder(collect_dir, notify, find=None, send_album=None, now=2000.0):
         "qwen2.5vl:7b",
         lambda: KNOWN,
         notify=notify,
-        send_album=send_album,
+        send_photo=send_photo,
         find=find,
         camera_display=lambda name: "Big Cage",
         clock=lambda: now,
@@ -52,12 +52,14 @@ def _responder(collect_dir, notify, find=None, send_album=None, now=2000.0):
 def test_respond_summarises_a_birds_day(tmp_path) -> None:
     _write_sighting(tmp_path, "percy", 0.9, 1900)
     sent: list = []
-    albums: list = []
-    _responder(tmp_path, lambda c, t: sent.append(t), send_album=lambda c, items: albums.append(items)).respond(
-        7, "what did percy do today?", "percy"
-    )
+    photos: list = []
+    _responder(
+        tmp_path,
+        lambda c, t: sent.append(t),
+        send_photo=lambda c, img, cap: photos.append((img, cap)),
+    ).respond(7, "what did percy do today?", "percy")
     assert any("preening" in t for t in sent)
-    assert albums and len(albums[0]) >= 1
+    assert len(photos) >= 1
 
 
 def test_respond_triggers_find_when_unseen_and_live(tmp_path) -> None:

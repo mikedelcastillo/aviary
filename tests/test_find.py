@@ -118,14 +118,14 @@ def test_run_finds_any_member_of_a_group() -> None:
 
 def test_run_includes_vlm_description_and_photos_on_hit() -> None:
     sent: list = []
-    albums: list = []
+    photos: list = []
     registry = FakeRegistry([row("camera-192.168.1.8", "percy", 1.0)])
     finder = BirdFinder(
         registry,
         lambda: FINDABLE,
         notify=lambda c, t: sent.append((c, t)),
         grab_frame=lambda cam: b"jpeg",
-        send_album=lambda c, items: albums.append((c, list(items))),
+        send_photo=lambda c, img, cap: photos.append((c, img, cap)) or True,
         describe_frame=lambda image: "Percy is preening near the window.",
         clock=lambda: 0.0,
         poll_seconds=0.0,
@@ -133,9 +133,9 @@ def test_run_includes_vlm_description_and_photos_on_hit() -> None:
     )
     outcome = finder._run(7, "percy", ["percy"], threading.Event(), threading.Event())
     assert outcome.found is True
-    # Photo is sent (caption names the bird); the VLM description arrives as a
-    # separate follow-up message so a slow vision model never blocks the photo.
-    assert albums and "Percy" in albums[0][1][0][1]
+    # Photo is sent individually (caption names the bird); the VLM description
+    # arrives as a separate follow-up so a slow vision model never blocks it.
+    assert photos and "Percy" in photos[0][2]
     assert any("Percy is preening" in text for _, text in sent)
 
 
