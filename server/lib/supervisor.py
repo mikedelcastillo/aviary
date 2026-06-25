@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 
 from lib.alerts import AlertDispatcher, AlertState
@@ -229,8 +230,13 @@ class CameraSupervisor:
 
         ``stop_event`` is expected to already be set by the caller; the monitor
         loops observe it and exit, so this just waits for them to wind down.
+
+        ``timeout`` bounds the TOTAL wait, not each thread: a shared deadline is
+        used so a fleet of cameras all stalled inside a blocking ``capture.read``
+        can't stretch shutdown to ``len(threads) * timeout``.
         """
         with self._threads_lock:
             threads = list(self._threads.values())
+        deadline = time.monotonic() + timeout
         for thread in threads:
-            thread.join(timeout=timeout)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
