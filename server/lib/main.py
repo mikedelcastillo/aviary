@@ -697,6 +697,25 @@ def main() -> None:
     # Name the freshly-discovered cameras from a live frame (background, VLM).
     trigger_camera_naming()
 
+    # Retry discovery a couple of times shortly after boot. A camera whose RTSP
+    # session was still busy from a previous run (e.g. right after a restart)
+    # won't answer the single initial sweep; these retries pick it up without the
+    # user needing to /discover. Idempotent — start_camera dedups by host.
+    def _discovery_retry() -> None:
+        for delay in (15.0, 45.0):
+            if stop_event.wait(delay):
+                return
+            try:
+                applied = supervisor.discover_and_apply()
+            except Exception:
+                LOGGER.exception("Retry discovery failed")
+                continue
+            if applied.added:
+                LOGGER.info("Retry discovery started %d more camera(s)", len(applied.added))
+                trigger_camera_naming()
+
+    threading.Thread(target=_discovery_retry, name="discovery-retry", daemon=True).start()
+
     # Announce we're live (with the camera count) so the user knows monitoring
     # has resumed — e.g. after a restart. Best-effort; never block startup.
     if notifier is not None:
