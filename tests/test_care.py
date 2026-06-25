@@ -46,8 +46,11 @@ def test_toxic_food_detection_handles_plurals() -> None:
     assert toxic_food_in("are leeks safe for percy").name == "onion"
     assert toxic_food_in("can they have shallots").name == "onion"
     assert toxic_food_in("can i give them beers").name == "alcohol"
-    assert toxic_food_in("are cherries safe").name == "fruit pits"
-    assert toxic_food_in("what about peaches").name == "fruit pits"
+    # Only the PIT is toxic — bare fruit flesh (cherries/peaches) is safe, so a
+    # bare fruit name must NOT trip the gate (it would hijack benign questions).
+    assert toxic_food_in("are cherry pits safe").name == "fruit pits"
+    assert toxic_food_in("are cherries safe") is None
+    assert toxic_food_in("what about peaches") is None
 
 
 def test_budgie_avocado_fact_surfaces_for_natural_phrasing() -> None:
@@ -147,3 +150,18 @@ def test_care_reply_species_returns_that_species_facts() -> None:
 def test_care_reply_unknown_query_gives_hint() -> None:
     text = care_reply("xyzzy")
     assert "don't have specific care notes" in text
+
+
+def test_care_reply_bird_name_wins_over_keyword_collision() -> None:
+    # "draft" is a cockatiel AND a temperature keyword — the bird must win.
+    text = care_reply("draft", member_species=MEMBER_SPECIES)
+    assert "[cockatiel]" in text  # the cockatiel profile, not generic temperature
+
+
+def test_care_reply_permission_question_is_not_a_toxic_warning() -> None:
+    # Grapes are safe — "can I give them grapes" must not dump the toxic list.
+    assert "keep AWAY" not in care_reply("can i give them grapes")
+
+
+def test_care_reply_safe_is_not_the_toxic_list() -> None:
+    assert "keep AWAY" not in care_reply("safe")

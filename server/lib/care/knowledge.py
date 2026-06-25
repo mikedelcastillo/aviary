@@ -41,8 +41,9 @@ TOPIC_KEYWORDS: dict[str, frozenset[str]] = {
         "water", "drink", "drinking",
     }),
     "toxic_foods": frozenset({
-        "toxic", "poison", "poisonous", "dangerous", "danger", "safe", "harmful", "harm",
-        "ok", "okay", "allowed", "give",
+        # Hard danger words only — generic permission/"safe" words are deliberately
+        # excluded so "can I give them grapes" / "/care safe" don't read as toxic.
+        "toxic", "poison", "poisonous", "dangerous", "danger", "harmful", "harm",
     }),
     "sleep_light": frozenset({
         "sleep", "sleeping", "asleep", "bed", "bedtime", "dark", "darkness", "light",
@@ -266,15 +267,28 @@ def care_reply(query: str, *, member_species: dict[str, str] | None = None, limi
     lower = q.lower()
 
     food = toxic_food_in(lower)
-    topics = detected_topics(lower)
     species = detect_species(lower, member_species)
+    topics = detected_topics(lower)
+    # A bird NAME that collides with a topic keyword ("draft" the cockatiel vs the
+    # temperature word) must not pull in that topic — recompute topics with the
+    # known names dropped, so a bare name resolves to that species' care.
+    if member_species:
+        names = {token for token in _words(lower) if token in member_species}
+        if names:
+            topics = detected_topics(" ".join(t for t in _words(lower) if t not in names))
 
-    # Toxic-food intent: a named food, or asking about toxic/unsafe foods.
-    if food is not None or topics == {"toxic_foods"} or any(
-        word in lower for word in ("toxic", "poison", "unsafe", "dangerous", "can't eat", "cannot eat")
+    # Explicit "show me the toxic foods" -> the full list (only on a hard danger
+    # word, never on bare permission words like "give"/"ok"/"safe").
+    if food is None and any(
+        word in lower for word in ("toxic", "poison", "unsafe", "dangerous", "what can't", "can't eat", "cannot eat", "avoid", "bad food")
     ):
-        head = f"⚠️ {food.name.title()} is dangerous: {food.reason}.\n\n" if food is not None else ""
-        return head + toxic_food_list()
+        return toxic_food_list()
+
+    # A named toxic food leads with its specific warning; if nothing else matched,
+    # that warning IS the answer (e.g. /care avocado).
+    head: list[str] = []
+    if food is not None:
+        head.append(f"⚠️ {food.name.title()} is dangerous: {food.reason}.")
 
     matched: list[CareFact] = []
     for fact in CARE_FACTS:
@@ -287,6 +301,8 @@ def care_reply(query: str, *, member_species: dict[str, str] | None = None, limi
         matched.append(fact)
 
     if not matched:
+        if head:
+            return "\n".join(head)
         return (
             f'I don\'t have specific care notes for "{q}". Try /care diet, /care sleep, '
             "/care temperature, /care health, /care toxic, or a bird/species name."
@@ -295,17 +311,19 @@ def care_reply(query: str, *, member_species: dict[str, str] | None = None, limi
     # Species-specific facts first, then general; safety-critical first within each.
     matched.sort(key=lambda f: (0 if (species and f.species in species) else 1, 0 if f.safety_critical else 1))
 
-    parts = []
+    parts = list(head)
     label = next((_TOPIC_LABELS[t] for t in _TOPIC_LABELS if t in topics), None)
     if species and not label:
         label = ", ".join(sorted(s.title() for s in species)) + " care"
     if label:
         parts.append(f"🐦 {label}")
-    if "sleep_light" in topics:
+    # Headline numbers — only when a matched fact doesn't already state them.
+    shown = matched[:limit]
+    if "sleep_light" in topics and not any("10-12" in f.fact for f in shown):
         parts.append(f"• {SLEEP_HOURS_TEXT}")
-    if "temperature" in topics:
+    if "temperature" in topics and not any("65-80" in f.fact for f in shown):
         parts.append(f"• {TEMPERATURE_RANGE_TEXT}")
-    for fact in matched[:limit]:
+    for fact in shown:
         scope = "" if fact.species == "general" else f"[{fact.species}] "
         tag = " ⚠️" if fact.safety_critical else ""
         parts.append(f"• {scope}{fact.fact}{tag}")

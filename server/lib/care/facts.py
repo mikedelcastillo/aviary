@@ -143,10 +143,10 @@ TOXIC_FOODS: tuple[ToxicFood, ...] = (
     ),
     ToxicFood(
         "fruit pits",
-        (
-            "fruit pit", "stone fruit", "cherry pit", "peach pit", "apricot pit", "plum pit",
-            "apple core", "cherry", "cherries", "peach", "peaches", "apricot", "plum",
-        ),
+        # Only the PIT/seed/core is toxic — the fruit flesh (cherry, peach, plum…)
+        # is safe, so bare fruit names are deliberately NOT aliases (they'd wrongly
+        # trip the safety gate on "did they eat the cherries").
+        ("fruit pit", "fruit pits", "stone fruit", "cherry pit", "peach pit", "apricot pit", "plum pit", "apple core"),
         "cherry/plum/apricot/peach pits release cyanide; the depitted fruit flesh itself is safe",
     ),
     ToxicFood(
