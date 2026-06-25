@@ -187,6 +187,37 @@ def test_start_while_active_replaces() -> None:
     assert "Switching" in msg
 
 
+def test_run_guarded_does_not_clear_a_slot_it_no_longer_owns() -> None:
+    # A finishing search must not wipe _active if a REPLACEMENT has taken the
+    # slot — the token-ownership invariant the find loop relies on.
+    finder = _finder(FakeRegistry([]), [])
+    token_b = object()
+    active_b = {"token": token_b, "requested": "b", "cancel": threading.Event()}
+    finder._active = active_b  # B owns the slot now
+
+    stop, cancel = threading.Event(), threading.Event()
+    stop.set()  # so the (older) search A exits its loop immediately
+    cancel.set()
+    finder._run_guarded(object(), 7, "a", ["percy"], stop, cancel)
+
+    assert finder._active is active_b  # B's slot is untouched
+    assert finder.is_searching()
+
+
+def test_run_guarded_clears_its_own_slot_on_exit() -> None:
+    finder = _finder(FakeRegistry([]), [])
+    token_a = object()
+    finder._active = {"token": token_a, "requested": "a", "cancel": threading.Event()}
+
+    stop, cancel = threading.Event(), threading.Event()
+    stop.set()
+    cancel.set()
+    finder._run_guarded(token_a, 7, "a", ["percy"], stop, cancel)
+
+    assert finder._active is None  # the owner clears its own slot
+    assert not finder.is_searching()
+
+
 def test_bird_last_seen_picks_most_recent_camera() -> None:
     from lib.find import bird_last_seen
     rows = [
