@@ -297,3 +297,40 @@ def test_retry_after_falls_back_to_header(monkeypatch) -> None:
     notifier.send_detections("camera-1", [detection()], None)
 
     assert clock.slept == [4.0 + RETRY_AFTER_BUFFER_SECONDS]
+
+
+def test_broadcast_album_tracked_downscales_each_image_once(monkeypatch) -> None:
+    # The digest goes to every recipient; downscaling must happen once per image,
+    # not once per (image, recipient) — otherwise N recipients pay N re-encodes.
+    calls = {"n": 0}
+
+    def counting_downscale(image: bytes) -> bytes:
+        calls["n"] += 1
+        return image
+
+    monkeypatch.setattr("lib.telegram.notifier.downscale_jpeg", counting_downscale)
+    post = RecordingPost([FakeResponse(200, {"result": [{"message_id": 7}]})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A", "B", "C"], min_send_interval_seconds=0.0)
+    sent = notifier.broadcast_album_tracked([(b"img-a", "cap"), (b"img-b", None)])
+
+    assert calls["n"] == 2  # two images, downscaled once each (not 2 * 3 recipients)
+    assert sent == {"A": 7, "B": 7, "C": 7}
+
+
+def test_broadcast_album_downscales_each_image_once(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    def counting_downscale(image: bytes) -> bytes:
+        calls["n"] += 1
+        return image
+
+    monkeypatch.setattr("lib.telegram.notifier.downscale_jpeg", counting_downscale)
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A", "B", "C"], min_send_interval_seconds=0.0)
+    notifier.broadcast_album([(b"img-a", "cap"), (b"img-b", None)])
+
+    assert calls["n"] == 2  # downscaled once per image across all three recipients
