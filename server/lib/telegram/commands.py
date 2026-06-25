@@ -12,7 +12,7 @@ import requests
 from lib.control import parse_duration
 from lib.dashboard import STALE_FRAME_SECONDS
 from lib.find import bird_last_seen
-from lib.labels import pretty, pretty_labels
+from lib.labels import pretty
 from lib.objects import ObjectRegistry
 from lib.stats import CameraStats
 from lib.telegram.userinfo import parse_command
