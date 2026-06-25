@@ -47,6 +47,27 @@ def test_consistency_deviation_bands(dev, expected) -> None:
     assert out_only == pytest.approx(expected, abs=1e-9)
 
 
+def test_consistency_handles_midnight_wrap() -> None:
+    # Baseline bedtime 23:50; tonight 00:10 is 20 min apart around the clock, not 23h.
+    baseline = Baseline(lights_out_min=23 * 60 + 50, first_light_min=7 * 60)
+    night = _night(lights_out=datetime(2026, 6, 26, 0, 10), first_light=datetime(2026, 6, 26, 7, 0))
+    assert consistency_score(night, baseline) == pytest.approx(1.0)
+
+
+def test_rolling_baseline_circular_median_near_midnight() -> None:
+    prior = [
+        SleepNight(night_of=date(2026, 6, 24), lights_out=datetime(2026, 6, 24, 23, 50),
+                   first_light=datetime(2026, 6, 25, 7, 0), finalized=True),
+        SleepNight(night_of=date(2026, 6, 25), lights_out=datetime(2026, 6, 26, 0, 10),
+                   first_light=datetime(2026, 6, 26, 7, 0), finalized=True),
+    ]
+    baseline = rolling_baseline(prior)
+    assert baseline is not None
+    # Median bedtime should sit near midnight (0/1440), NOT collapse to noon (~720).
+    near_midnight = min(baseline.lights_out_min, 1440 - baseline.lights_out_min)
+    assert near_midnight <= 30
+
+
 def test_consistency_neutral_without_baseline() -> None:
     night = _night(lights_out=datetime(2026, 6, 25, 20, 40), first_light=datetime(2026, 6, 26, 7, 0))
     assert consistency_score(night, None) == 0.7

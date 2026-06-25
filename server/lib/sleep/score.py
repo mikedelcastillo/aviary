@@ -72,26 +72,42 @@ def _median(values: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
+def _circular_dev(a_min: float, b_min: float) -> float:
+    """The shortest distance between two minutes-of-day around the 24h clock, so a
+    00:10 bedtime is 20 min from a 23:50 baseline, not 23h."""
+    diff = abs(a_min - b_min)
+    return min(diff, 1440 - diff)
+
+
+def _circular_median(values: list[float]) -> float:
+    """A clock-aware median: unwrap each value to within ±12h of an anchor before
+    taking the median, so times straddling midnight don't average to noon."""
+    anchor = values[0]
+    unwrapped = [anchor + ((v - anchor + 720) % 1440 - 720) for v in values]
+    return _median(unwrapped) % 1440
+
+
 def rolling_baseline(prior: list[SleepNight]) -> Baseline | None:
     """Median bedtime/wake over the most recent prior finalized nights (<=7).
 
     Returns None with fewer than 2 usable nights — the caller then uses a neutral
-    consistency so a cold start isn't penalised. Median (not mean) so a single
-    odd night doesn't poison the baseline.
+    consistency so a cold start isn't penalised. A clock-aware median (not mean)
+    so a single odd night doesn't poison the baseline and times near midnight
+    don't collapse to noon.
     """
     recent = [n for n in prior if n.finalized][-7:]
     outs = [_minutes_of_day(n.lights_out) for n in recent if n.lights_out is not None]
     lights = [_minutes_of_day(n.first_light) for n in recent if n.first_light is not None]
     if len(outs) < 2 or len(lights) < 2:
         return None
-    return Baseline(_median(outs), _median(lights))
+    return Baseline(_circular_median(outs), _circular_median(lights))
 
 
 def consistency_score(night: SleepNight, baseline: Baseline | None) -> float:
     if baseline is None or night.lights_out is None or night.first_light is None:
         return NEUTRAL_CONSISTENCY
-    out_dev = abs(_minutes_of_day(night.lights_out) - baseline.lights_out_min)
-    light_dev = abs(_minutes_of_day(night.first_light) - baseline.first_light_min)
+    out_dev = _circular_dev(_minutes_of_day(night.lights_out), baseline.lights_out_min)
+    light_dev = _circular_dev(_minutes_of_day(night.first_light), baseline.first_light_min)
     return (_deviation_score(out_dev) + _deviation_score(light_dev)) / 2.0
 
 
