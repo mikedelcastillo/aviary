@@ -139,3 +139,22 @@ def test_name_cameras_force_keeps_old_name_when_vlm_fails() -> None:
     )
     # Re-name failed -> keep the existing good name.
     assert namer.display("camera-192.168.1.8") == "Good Name"
+
+
+def test_camera_namer_persists_and_reloads(tmp_path) -> None:
+    cache = tmp_path / "camera_names.json"
+    namer = CameraNamer(cache_path=cache)
+    namer.set("camera-192.168.1.8", "Window Perch")
+    namer.set("camera-192.168.1.9", "Food Bowl")
+    assert cache.exists()
+    # A fresh namer (e.g. after a restart) loads the cached names immediately.
+    reloaded = CameraNamer(cache_path=cache)
+    assert reloaded.display("camera-192.168.1.8") == "Window Perch"
+    assert reloaded.display("camera-192.168.1.9") == "Food Bowl"
+    assert reloaded.has("camera-192.168.1.8")
+
+
+def test_camera_namer_missing_cache_is_fine(tmp_path) -> None:
+    namer = CameraNamer(cache_path=tmp_path / "nope.json")
+    # Nothing cached yet -> IP fallback, no crash.
+    assert namer.display("camera-192.168.1.8") == "192.168.1.8"

@@ -386,7 +386,9 @@ def main() -> None:
     control = RuntimeControl()
 
     # Friendly, VLM-derived display names per camera (identity stays IP-based).
-    namer = CameraNamer()
+    # Cached to disk so a restart shows the last known names instantly, before
+    # the VLM has re-confirmed them.
+    namer = CameraNamer(cache_path=app_config.collect.directory.parent / "camera_names.json")
 
     # The shared, dynamically-grown camera state. The supervisor is the sole
     # writer of `stats`; the dashboard render thread and the /status provider are
@@ -734,8 +736,10 @@ def main() -> None:
         LOGGER.warning(
             "Initial discovery found no cameras; send /discover once they are online"
         )
-    # Name the freshly-discovered cameras from a live frame (background, VLM).
-    trigger_camera_naming()
+    # Name cameras from a live frame (background, VLM). force=True so cached
+    # names loaded from disk get re-confirmed now that the machine is up — a
+    # camera may have moved since last run — rather than only on the 30-min sweep.
+    trigger_camera_naming(force=True)
 
     # Keep discovering in the background: two quick retries after boot (to catch
     # cameras whose RTSP was still busy from a previous run — common right after a

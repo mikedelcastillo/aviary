@@ -6,14 +6,17 @@ stats and registry use), but everything the USER sees — /status, /find,
 each camera's view and proposes a 1-2 word name ("Window Perch", "Food Bowl");
 :class:`CameraNamer` keeps the identity→display map and guarantees uniqueness.
 
-Until a camera is named (or if the VLM is off), it falls back to ``Cam 8`` — the
-host's last octet, NOT the bare ``.8`` that read like a stray decimal.
+Until a camera is named (or if the VLM is off), it falls back to the camera's
+IP. The map is cached to disk, so a restart shows the last known names instantly
+(keyed by ``camera-<ip>``) while the VLM re-confirms them in the background.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
+from pathlib import Path
 from typing import Callable
 
 from lib.ai.vlm import clean_camera_name, describe_image, name_camera_view
@@ -59,15 +62,50 @@ def _distinct_name(client, model: str, image: bytes, taken: set[str], *, timeout
 
 
 class CameraNamer:
-    """Thread-safe identity -> friendly-name map with a sensible fallback."""
+    """Thread-safe identity -> friendly-name map with a sensible fallback.
 
-    def __init__(self) -> None:
+    When given ``cache_path`` the map is persisted to JSON and reloaded on
+    start, so a restart shows the last known names immediately (the VLM then
+    re-confirms them in the background).
+    """
+
+    def __init__(self, cache_path: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._names: dict[str, str] = {}
+        self._cache_path = Path(cache_path) if cache_path else None
+        if self._cache_path is not None:
+            self._load()
+
+    def _load(self) -> None:
+        try:
+            data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except Exception:
+            LOGGER.exception("Could not read camera-name cache %s", self._cache_path)
+            return
+        if isinstance(data, dict):
+            with self._lock:
+                self._names.update({str(k): str(v) for k, v in data.items()})
+            LOGGER.info("Loaded %d cached camera name(s) from %s", len(data), self._cache_path)
+
+    def _save(self) -> None:
+        if self._cache_path is None:
+            return
+        with self._lock:
+            snapshot = dict(self._names)
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._cache_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
+            tmp.replace(self._cache_path)
+        except Exception:
+            LOGGER.exception("Could not write camera-name cache %s", self._cache_path)
 
     def set(self, camera_name: str, display: str) -> None:
         with self._lock:
             self._names[camera_name] = display
+        self._save()
 
     def has(self, camera_name: str) -> bool:
         with self._lock:
