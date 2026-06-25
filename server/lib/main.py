@@ -17,8 +17,10 @@ from dotenv import load_dotenv
 from lib.ai.chat import chat_reply
 from lib.ai.client import OllamaClient
 from lib.ai.intent import Intent
+from lib.ai.memory import ConversationMemory
 from lib.ai.router import NaturalLanguageRouter
 from lib.ai.vlm import build_detection_context, describe_scene
+from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
@@ -110,6 +112,8 @@ def build_nl_router(
     discover_provider,
     status_provider,
     snapshot_provider,
+    activity_responder=None,
+    memory=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -134,12 +138,16 @@ def build_nl_router(
         )
 
     def send_chat_reply(chat_id: int, text: str) -> None:
+        history = memory.history(chat_id) if memory is not None else None
         try:
-            reply = chat_reply(client, app_config.ollama.llm_model, text)
+            reply = chat_reply(client, app_config.ollama.llm_model, text, history=history)
         except Exception:
             LOGGER.exception("Chat reply failed")
             reply = "🤖 My language brain (Ollama) is unreachable right now."
         notifier.send_text(chat_id, reply or "🤔")
+        if memory is not None:
+            memory.record(chat_id, "user", text)
+            memory.record(chat_id, "assistant", reply)
 
     def dispatch(chat_id: int, intent: Intent, text: str) -> None:
         action = intent.action
@@ -159,7 +167,9 @@ def build_nl_router(
         elif action == "snapshot":
             notifier.send_text(chat_id, "Capturing snapshots from all cameras...")
             notifier.send_text(chat_id, snapshot_provider(chat_id))
-        else:  # chat
+        elif action == "activity" and activity_responder is not None:
+            activity_responder.respond(chat_id, text, intent.argument)
+        else:  # chat (or activity with no responder)
             send_chat_reply(chat_id, text)
 
     return NaturalLanguageRouter(
@@ -400,6 +410,28 @@ def main() -> None:
         trigger_camera_naming()  # name any newly-found cameras
         return report
 
+    # Activity Q&A ("what did percy do today?") reads the collected-photos log;
+    # conversation memory keeps ~20 turns per chat for coherent follow-ups.
+    memory = ConversationMemory() if ollama_client is not None else None
+    activity_responder = (
+        ActivityResponder(
+            app_config.collect.directory,
+            ollama_client,
+            app_config.ollama.llm_model,
+            app_config.ollama.vlm_model,
+            detector.known_labels,
+            notify=notifier.send_text,
+            send_album=notifier.send_album,
+            # A "what is X doing now?" with no recent sighting kicks off a live
+            # find; send its ack and let the search push its own photo + report.
+            find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),
+            member_species=member_species,
+            camera_display=namer.display,
+        )
+        if (ollama_client is not None and notifier is not None and finder is not None)
+        else None
+    )
+
     # Natural-language routing: free-text Telegram messages ("stop the cams",
     # "where's percy?") are classified by Ollama and dispatched to the same
     # providers as the slash commands. Wired only when a notifier exists (to
@@ -415,6 +447,8 @@ def main() -> None:
         discover_provider=discover_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_provider,
+        activity_responder=activity_responder,
+        memory=memory,
     )
 
     start_command_thread(

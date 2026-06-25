@@ -22,7 +22,10 @@ LOGGER = logging.getLogger("lib.ai.intent")
 
 # Every action the router can emit. "chat" is the catch-all for questions and
 # conversation, routed to the memory/VLM layer rather than a command.
-ACTIONS = ("pause", "resume", "find", "stop_find", "discover", "status", "snapshot", "chat")
+ACTIONS = (
+    "pause", "resume", "find", "stop_find", "discover",
+    "status", "snapshot", "activity", "chat",
+)
 
 # Ollama ``format`` schema: constrains the model to a valid action + argument.
 INTENT_SCHEMA = {
@@ -59,14 +62,16 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '- "discover": rescan / reload / refresh the cameras on the network. argument = "".\n'
         '- "status": how the cameras or system are doing, health, what is online. argument = "".\n'
         '- "snapshot": take or show pictures from all cameras right now. argument = "".\n'
-        '- "chat": ANYTHING else — questions about the birds\' day or behaviour, history '
-        '("what did X do today", "what are the birds doing"), greetings, or unclear '
-        'requests. argument = "".\n\n'
+        '- "activity": what a bird IS or WAS doing / its day / behaviour — "what did percy '
+        'do today", "what is draft up to", "what are the birds doing right now", "how was '
+        'matcha today". argument = the bird/group named, or "" for all birds.\n'
+        '- "chat": greetings, thanks, or anything that isn\'t about the birds\' whereabouts '
+        'or activity. argument = "".\n\n'
         "Rules:\n"
-        '- "where is percy" -> find, argument "percy". "find the cockatiels" -> find, '
-        'argument "cockatiels". "find any bird" -> find, argument "any bird". '
-        '"what did percy do today" -> chat (history, not current location). Only use find '
-        "when the user wants a bird's CURRENT whereabouts.\n"
+        '- "where is percy" -> find, argument "percy" (WHERE it is). "what did percy do '
+        'today" / "what is percy up to" -> activity, argument "percy" (WHAT it is doing). '
+        '"find the cockatiels" -> find, argument "cockatiels". "find any bird" -> find, '
+        'argument "any bird". Use find for location, activity for behaviour.\n'
         f"- Known birds: {birds}. Groups: cockatiels, lovebirds, budgies, birds. If a find "
         "target is not known, still put what they said in argument.\n"
         "- Output ONLY the JSON object."
