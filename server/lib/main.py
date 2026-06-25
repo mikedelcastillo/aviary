@@ -204,13 +204,14 @@ def build_nl_router(
             memory.record(chat_id, "assistant", reply)
 
     def dispatch(chat_id: int, intent: Intent, text: str) -> None:
+        action = intent.action
         # Safety first: a question naming a toxic food ("can percy eat avocado?")
-        # must ALWAYS get the grounded care answer, even if the classifier read it
-        # as activity ("…eat…") and would otherwise reply "I haven't logged that."
-        if toxic_food_in(text) is not None:
+        # must get the grounded care answer instead of "I haven't logged that" —
+        # but ONLY when it was read as conversation/activity, never when it's a
+        # real command (a "pause" that happens to mention a food must still pause).
+        if action in ("chat", "activity") and toxic_food_in(text) is not None:
             send_chat_reply(chat_id, text)
             return
-        action = intent.action
         if action == "pause":
             notifier.send_text(chat_id, control.pause(parse_duration(intent.argument)))
         elif action == "resume":
