@@ -28,13 +28,21 @@ def test_system_state_paused_hides_sightings() -> None:
     state = format_system_state(
         NOON,
         paused=True,
-        pause_status="Paused for 10m.",
+        pause_status="Privacy mode on — cameras paused for 10m.",
         cameras_total=2,
         cameras_healthy=0,
         visible_text="Percy (Big Cage)",  # must be ignored while paused
     )
-    assert "PRIVACY MODE IS ON" in state
+    assert "paused for 10m" in state  # the pause status is surfaced verbatim
     assert "Big Cage" not in state  # no sightings claimed while paused
+    assert "daylight" not in state  # no daylight claim while paused
+
+
+def test_system_state_no_cameras_makes_no_daylight_claim() -> None:
+    # With no cameras online, don't assert "the cameras are in daylight".
+    state = format_system_state(NOON, cameras_total=0, cameras_healthy=0)
+    assert "No cameras are online" in state
+    assert "daylight" not in state and "night/IR" not in state
 
 
 def test_system_state_night_mode() -> None:

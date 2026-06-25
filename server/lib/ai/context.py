@@ -40,27 +40,30 @@ def format_system_state(
     """
     lines = [f"- It is {now.strftime('%H:%M')} on {now.strftime('%A')}, Philippine time."]
 
-    if daylight == "night":
-        lines.append("- Every camera is in night/IR mode — it is dark and the birds are most likely roosting/asleep.")
-    elif daylight == "mixed":
-        lines.append("- Some cameras are in night/IR (dark) and some in daylight.")
-    else:
-        lines.append("- The cameras are in daylight.")
-
     if paused:
-        status = pause_status or "Privacy mode is on."
-        lines.append(f"- PRIVACY MODE IS ON — cameras are not watching or recording right now ({status.strip()}).")
+        # control.status() is already a complete, user-facing sentence; use it
+        # directly rather than wrapping it (which double-printed "privacy mode").
+        # No daylight/sightings lines while paused — the cameras aren't watching.
+        lines.append(
+            f"- {pause_status.strip()}"
+            if pause_status
+            else "- Privacy mode is ON — the cameras are not watching or recording right now."
+        )
     elif cameras_total <= 0:
         lines.append("- No cameras are online yet (none discovered).")
     else:
+        # Daylight/IR and sightings only make sense when cameras are watching.
         lines.append(f"- {cameras_healthy} of {cameras_total} camera(s) are healthy and live.")
-
-    if paused:
-        pass  # nothing is visible while paused; don't claim sightings
-    elif visible_text:
-        lines.append(f"- Seen in the last few seconds: {visible_text}.")
-    else:
-        lines.append("- No birds are visible on any camera right this second (they may be out of frame or resting).")
+        if daylight == "night":
+            lines.append("- Every camera is in night/IR mode — it is dark and the birds are most likely roosting/asleep.")
+        elif daylight == "mixed":
+            lines.append("- Some cameras are in night/IR (dark) and some in daylight.")
+        else:
+            lines.append("- The cameras are in daylight.")
+        if visible_text:
+            lines.append(f"- Seen in the last few seconds: {visible_text}.")
+        else:
+            lines.append("- No birds are visible on any camera right this second (they may be out of frame or resting).")
 
     if autofind_on is not None:
         lines.append(f"- Auto-find (auto-search for missing birds) is {'ON' if autofind_on else 'OFF'}.")
