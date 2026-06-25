@@ -41,3 +41,6 @@ venv/
 ghiasi.pdf
 ghiasi.txt
 _*.sh
+
+.venv-train/
+backups/

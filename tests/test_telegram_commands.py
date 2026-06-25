@@ -363,9 +363,9 @@ def test_registers_available_bot_commands_on_startup(monkeypatch) -> None:
     # Every wired-up command is offered to Telegram's slash-menu, in a stable
     # display order, as bare names (no leading slash) with non-empty descriptions.
     assert [entry["command"] for entry in registered] == [
+        "discover",
         "status",
         "snapshot",
-        "discover",
         "userinfo",
     ]
     assert all(entry["description"] for entry in registered)

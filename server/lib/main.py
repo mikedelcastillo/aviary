@@ -32,7 +32,7 @@ from lib.console import (
     run_terminal_chat,
 )
 from lib.control import RuntimeControl, parse_duration
-from lib.daycare import DaycareNarrator
+from lib.memory_maker import MemoryMaker
 from lib.dashboard import Dashboard
 from lib.detector import ObjectDetector
 from lib.discovery import DiscoveryProgress
@@ -100,6 +100,7 @@ def start_command_thread(
     find_provider: Callable[[int, str], str] | None = None,
     nl_provider: Callable[[int, str], None] | None = None,
     photo_provider: Callable[[bytes], str] | None = None,
+    activity_provider: Callable[[int, str], None] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -113,6 +114,7 @@ def start_command_thread(
             "find_provider": find_provider,
             "nl_provider": nl_provider,
             "photo_provider": photo_provider,
+            "activity_provider": activity_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -221,6 +223,7 @@ def make_console_dispatcher(
     member_species: dict[str, str],
     species_members: dict[str, tuple[str, ...]],
     pronouns: dict[str, str],
+    memories_dir,
     grab_frame,
     describe_frame,
     ptz_manager,
@@ -263,17 +266,13 @@ def make_console_dispatcher(
 
     activity_responder = (
         ActivityResponder(
-            app_config.collect.directory,
+            memories_dir,
             ollama_client,
             app_config.ollama.llm_model,
-            app_config.ollama.vlm_model,
             detector.known_labels,
             notify=console_notifier.send_text,
             send_photo=None,
             find=lambda cid, arg: emit(console_find(cid, arg)),
-            member_species=member_species,
-            pronouns=pronouns,
-            camera_display=namer.display,
         )
         if ollama_client is not None
         else None
@@ -310,6 +309,11 @@ def make_console_dispatcher(
         find=console_find,
         nl_handle=nl_handle,
         parse_duration=parse_duration,
+        activity=(
+            (lambda cid, arg: activity_responder.respond(cid, arg, arg))
+            if activity_responder is not None
+            else None
+        ),
         toggle_logs=ConsoleLogToggle().toggle,
         on_quit=stop_event.set,
     )
@@ -475,6 +479,8 @@ def main() -> None:
     }
     # name -> "he"/"she" so descriptions use the right pronoun.
     pronouns = pronoun_map(load_sexes())
+    # The caretaker's persistent day memory lives beside the collect tree.
+    memories_dir = app_config.collect.directory.parent / "memories"
 
     def describe_frame(image: bytes) -> str | None:
         # Best-effort VLM scene description for /find hits. We FIRST run the
@@ -581,23 +587,33 @@ def main() -> None:
     memory = ConversationMemory() if ollama_client is not None else None
     activity_responder = (
         ActivityResponder(
-            app_config.collect.directory,
+            memories_dir,
             ollama_client,
             app_config.ollama.llm_model,
-            app_config.ollama.vlm_model,
             detector.known_labels,
             notify=notifier.send_text,
             send_photo=notifier.send_photo,
-            # A "what is X doing now?" with no recent sighting kicks off a live
+            # A "what is X doing now?" with no logged memory kicks off a live
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),
-            member_species=member_species,
-            pronouns=pronouns,
-            camera_display=namer.display,
         )
         if (ollama_client is not None and notifier is not None and finder is not None)
         else None
     )
+
+    def activity_provider(chat_id: int, argument: str) -> None:
+        # Backgrounded: reading the memory + an LLM summary takes a few seconds,
+        # and must not block the Telegram poll loop. The responder sends the
+        # summary + photos itself. The argument is used as both the bird filter
+        # and the text (so "today" is detected from /activity percy today).
+        if activity_responder is None:
+            notifier.send_text(chat_id, "Activity memory is off (needs Ollama).")
+            return
+        threading.Thread(
+            target=lambda: activity_responder.respond(chat_id, argument, argument),
+            name="activity",
+            daemon=True,
+        ).start()
 
     # Natural-language routing: free-text Telegram messages ("stop the cams",
     # "where's percy?") are classified by Ollama and dispatched to the same
@@ -630,30 +646,35 @@ def main() -> None:
         find_provider=find_provider if finder is not None else None,
         nl_provider=nl_router.handle_async if nl_router is not None else None,
         photo_provider=photo_provider if ollama_client is not None else None,
+        activity_provider=activity_provider if activity_responder is not None else None,
     )
 
-    # Daycare digest: periodic "wave" updates instead of per-detection spam.
-    # Only when the AI is on, there's someone to send to, and a cadence is set.
+    # The caretaker: smart activity reports (immediate on new birds, edit-in-place
+    # otherwise) + persistent day memory under data/server/memories. Only when the
+    # AI is on, there's someone to send to, and a beat is set.
+    memories_dir = app_config.collect.directory.parent / "memories"
     if (
         ollama_client is not None
         and notifier is not None
-        and app_config.daycare_digest_minutes > 0
+        and app_config.memory_interval_minutes > 0
     ):
-        DaycareNarrator(
+        MemoryMaker(
             app_config.collect.directory,
+            memories_dir,
+            registry,
             ollama_client,
             app_config.ollama.llm_model,
             app_config.ollama.vlm_model,
             notifier,
             stop_event,
-            interval_seconds=app_config.daycare_digest_minutes * 60.0,
+            interval_seconds=app_config.memory_interval_minutes * 60.0,
             member_species=member_species,
             pronouns=pronouns,
             camera_display=namer.display,
         ).start()
         LOGGER.info(
-            "Daycare digest every %.0f min; raw photo alerts %s",
-            app_config.daycare_digest_minutes,
+            "Caretaker reports every ~%.0f min; raw photo alerts %s",
+            app_config.memory_interval_minutes,
             "on" if app_config.raw_photo_alerts else "off",
         )
 
@@ -761,6 +782,7 @@ def main() -> None:
                 member_species=member_species,
                 species_members=species_members,
                 pronouns=pronouns,
+                memories_dir=memories_dir,
                 grab_frame=grab_frame,
                 describe_frame=describe_frame,
                 ptz_manager=ptz_manager,

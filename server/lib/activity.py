@@ -198,3 +198,32 @@ def summarise_day(
         timeout_seconds=timeout_seconds,
     )
     return strip_thinking(reply)
+
+
+_ACTIVITY_SUMMARY_PROMPT = (
+    "You are the aviary caretaker giving a quick activity update from logged "
+    "memories. Write AT MOST 3 short sentences, warm and concrete: which birds, "
+    "who was with whom, what they did. Use each bird's pronoun as it appears in "
+    "the notes (he/she). Don't invent anything not in the notes. No lists or "
+    "preamble — just the update."
+)
+
+
+def summarise_activity(
+    client, model: str, notes: list[str], subject: str = "", *, timeout_seconds: float | None = None
+) -> str:
+    """Fold journal memory notes into a <=3-sentence activity report."""
+    if not notes:
+        return ""
+    body = "\n".join(f"- {line}" for line in notes)
+    ask = f"Summarise {subject}'s activity from these notes:\n{body}" if subject else f"Notes:\n{body}"
+    reply = client.chat(
+        model,
+        [
+            {"role": "system", "content": _ACTIVITY_SUMMARY_PROMPT},
+            {"role": "user", "content": ask},
+        ],
+        think=True,
+        timeout_seconds=timeout_seconds,
+    )
+    return strip_thinking(reply)

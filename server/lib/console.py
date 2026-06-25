@@ -32,9 +32,10 @@ CONSOLE_CHAT_ID = 0
 
 HELP_TEXT = (
     "Talk to the aviary — commands or plain language:\n"
+    "  /activity [bird] [today]   activity summary (e.g. /activity percy today)\n"
     "  /status            camera + detection status boxes\n"
     "  /find <bird>       e.g. /find percy, /find the cockatiels, /find stop\n"
-    "  /pause [time]      privacy mode (/pause 10m); /play to resume\n"
+    "  /stop [time]       privacy mode (/stop 10m); /start to resume\n"
     "  /discover          rescan the network for cameras\n"
     "  /snapshot          capture all cameras (photos go to Telegram)\n"
     "  /logs              show/hide live server logs\n"
@@ -90,6 +91,7 @@ class ConsoleDispatcher:
         find: Callable[[int, str], str],
         nl_handle: Callable[[int, str], None],
         parse_duration: Callable[[str | None], float | None],
+        activity: Callable[[int, str], None] | None = None,
         toggle_logs: Callable[[], str] | None = None,
         on_quit: Callable[[], None] | None = None,
     ) -> None:
@@ -102,6 +104,7 @@ class ConsoleDispatcher:
         self._find = find
         self._nl_handle = nl_handle
         self._parse_duration = parse_duration
+        self._activity = activity
         self._toggle_logs = toggle_logs
         self._on_quit = on_quit
 
@@ -124,11 +127,17 @@ class ConsoleDispatcher:
             self._emit(HELP_TEXT)
         elif command in ("/logs",):
             self._emit(self._toggle_logs() if self._toggle_logs else "Logs toggle unavailable.")
+        elif command == "/activity":
+            if self._activity is not None:
+                self._emit("📋 Looking back…")
+                self._activity(CONSOLE_CHAT_ID, argument)
+            else:
+                self._emit("Activity memory is off (needs Ollama).")
         elif command in ("/status", "/cams"):
             self._emit(self._status_text())
         elif command in ("/pause", "/stop"):
             self._emit(self._pause(self._parse_duration(argument)))
-        elif command in ("/play", "/resume"):
+        elif command in ("/play", "/resume", "/start"):
             self._emit(self._resume())
         elif command == "/find":
             self._emit(self._find(CONSOLE_CHAT_ID, argument))

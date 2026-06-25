@@ -1,81 +1,75 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 
-from lib.activity_qa import ActivityResponder
+from lib.activity_qa import ActivityResponder, parse_activity_arg
+from lib.journal import MemoryEntry, append_entry
 
 KNOWN = ["bambi", "draft", "matcha", "percy", "pizza"]
 
 
-def _write_sighting(collect_dir, label, conf, when_epoch) -> None:
-    folder = collect_dir / label
-    folder.mkdir(parents=True, exist_ok=True)
-    stem = f"{label}_{int(when_epoch)}"
-    (folder / f"{stem}.jpg").write_bytes(b"\xff\xd8jpeg")
-    (folder / f"{stem}.json").write_text(
-        json.dumps(
-            {
-                "object": label,
-                "camera": {"name": "camera-192.168.1.8"},
-                "collected_at": datetime.fromtimestamp(when_epoch, timezone.utc).isoformat(),
-                "frame": {"width": 100, "height": 100},
-                "detection": {"confidence": conf, "bbox_xyxy": {"x1": 1, "y1": 1, "x2": 9, "y2": 9}},
-            }
-        )
-    )
-
-
 class FakeClient:
-    def generate(self, model, prompt, *, images=None, timeout_seconds=None, **kwargs):
-        return "perched and preening"
-
     def chat(self, model, messages, **kwargs):
-        return "Percy spent the afternoon preening on the perch."
+        return "Percy preened on the perch while Matcha napped nearby."
 
 
-def _responder(collect_dir, notify, find=None, send_photo=None, now=2000.0):
+def _responder(memories_dir, notify, find=None, send_photo=None, now=None):
+    # Fix "now" so the window is deterministic.
+    clock_value = (now or datetime(2026, 6, 25, 15, 0)).timestamp()
     return ActivityResponder(
-        collect_dir,
+        memories_dir,
         FakeClient(),
         "qwen3:4b",
-        "qwen2.5vl:7b",
         lambda: KNOWN,
         notify=notify,
         send_photo=send_photo,
         find=find,
-        camera_display=lambda name: "Big Cage",
-        clock=lambda: now,
+        clock=lambda: clock_value,
     )
 
 
-def test_respond_summarises_a_birds_day(tmp_path) -> None:
-    _write_sighting(tmp_path, "percy", 0.9, 1900)
+def test_parse_activity_arg() -> None:
+    assert parse_activity_arg("percy today") == ("percy", True)
+    assert parse_activity_arg("today") == ("", True)
+    assert parse_activity_arg("percy") == ("percy", False)
+    assert parse_activity_arg("") == ("", False)
+
+
+def test_respond_summarises_recent_memory(tmp_path) -> None:
+    photo = tmp_path / "p.jpg"
+    photo.write_bytes(b"\xff\xd8jpeg")
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy", "matcha"], "Percy preens.", str(photo)))
     sent: list = []
     photos: list = []
-    _responder(
-        tmp_path,
-        lambda c, t: sent.append(t),
-        send_photo=lambda c, img, cap: photos.append((img, cap)),
-    ).respond(7, "what did percy do today?", "percy")
-    assert any("preening" in t for t in sent)
-    assert len(photos) >= 1
+    _responder(tmp_path, lambda c, t: sent.append(t), send_photo=lambda c, img, cap: photos.append(img)).respond(
+        7, "/activity percy", "percy"
+    )
+    assert any("preened" in t for t in sent)
+    assert len(photos) == 1
 
 
-def test_respond_triggers_find_when_unseen_and_live(tmp_path) -> None:
+def test_respond_today_window(tmp_path) -> None:
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 8, 0), ["bambi"], "Bambi ate early."))
+    sent: list = []
+    # "today" -> since midnight, so the 08:00 entry is included even though it's
+    # well outside the last hour.
+    _responder(tmp_path, lambda c, t: sent.append(t)).respond(7, "/activity bambi today", "bambi today")
+    assert sent  # a summary was produced from the morning entry
+
+
+def test_respond_triggers_find_when_unlogged_and_live(tmp_path) -> None:
     found: list = []
     sent: list = []
     _responder(tmp_path, lambda c, t: sent.append(t), find=lambda cid, arg: found.append((cid, arg))).respond(
         7, "what is draft doing right now?", "draft"
     )
-    # No recent draft sighting + a "now" question -> go look live.
     assert found == [(7, "draft")]
     assert any("check the cameras" in t for t in sent)
 
 
-def test_respond_says_unseen_when_not_live(tmp_path) -> None:
+def test_respond_says_unlogged_when_not_live(tmp_path) -> None:
     sent: list = []
     _responder(tmp_path, lambda c, t: sent.append(t), find=lambda cid, arg: None).respond(
-        7, "did matcha appear today?", "matcha"
+        7, "/activity matcha", "matcha"
     )
-    assert sent and "haven't seen" in sent[0].lower()
+    assert sent and "haven't logged" in sent[0].lower()

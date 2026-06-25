@@ -130,6 +130,38 @@ class TelegramNotifier:
             return
         self._broadcast(self.user_ids, lambda user_id: self._send_message(user_id, text))
 
+    def broadcast_text_tracked(self, text: str) -> dict[str, int]:
+        """Broadcast text and return ``{user_id: message_id}`` for later editing.
+
+        Sent serially (small N) so the returned ids are reliable; used by the
+        caretaker so it can EDIT the latest activity message instead of sending a
+        new one when nothing has changed.
+        """
+        sent: dict[str, int] = {}
+        for user_id in self.user_ids:
+            try:
+                message_id = self._send_message(user_id, text)
+            except requests.RequestException as exc:
+                LOGGER.warning("Tracked send to %s failed: %s", user_id, exc)
+                continue
+            if message_id is not None:
+                sent[user_id] = message_id
+        return sent
+
+    def edit_message_text(self, chat_id: int | str, message_id: int, text: str) -> bool:
+        """Edit an already-sent text message (the "last updated …" refresh)."""
+        try:
+            response = self._post(
+                f"{self.base_url}/editMessageText",
+                json={"chat_id": chat_id, "message_id": message_id, "text": text},
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as exc:
+            LOGGER.debug("editMessageText for %s/%s failed: %s", chat_id, message_id, exc)
+            return False
+
     def send_photo(self, chat_id: int | str, image_bytes: bytes, caption: str | None = None) -> bool:
         """Send ONE photo to a chat, downscaled and best-effort.
 
@@ -219,13 +251,14 @@ class TelegramNotifier:
 
         list(self._pool.map(safe, user_ids))
 
-    def _send_message(self, user_id: str, text: str) -> None:
+    def _send_message(self, user_id: str, text: str) -> int | None:
         response = self._post(
             f"{self.base_url}/sendMessage",
             json={"chat_id": user_id, "text": text},
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
+        return self._extract_message_id(response)
 
     def _send_photo_upload(self, user_id: str, caption: str, image_bytes: bytes) -> str | None:
         response = self._post(
@@ -348,6 +381,14 @@ class TelegramNotifier:
         if retry_after is None:
             retry_after = RETRY_AFTER_FALLBACK_SECONDS
         return float(retry_after) + RETRY_AFTER_BUFFER_SECONDS
+
+    @staticmethod
+    def _extract_message_id(response) -> int | None:
+        try:
+            result = response.json().get("result")
+        except ValueError:
+            return None
+        return result.get("message_id") if isinstance(result, dict) else None
 
     @staticmethod
     def _extract_file_id(response) -> str | None:

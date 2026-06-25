@@ -26,22 +26,25 @@ StatusProvider = Callable[[], str]
 # ``setMyCommands`` so the app autocompletes the commands this bot answers. The
 # order here is the menu's display order; only commands whose handler is wired
 # up for a given run are actually registered (see ``run_command_bot``).
+# Order here is the slash-menu display order (the user-requested order leads).
 COMMAND_DESCRIPTIONS: dict[str, str] = {
-    "/status": "Show camera and detection status",
-    "/snapshot": "Capture a snapshot from every camera",
-    "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
-    "/pause": "Privacy mode: stop the cameras (optional duration, e.g. /pause 10m)",
-    "/stop": "Privacy mode: stop the cameras (alias of /pause)",
-    "/play": "Resume the cameras after a pause",
-    "/resume": "Resume the cameras after a pause (alias of /play)",
+    "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/discover": "Scan the local network for cameras",
+    "/stop": "Privacy mode: stop the cameras (optional duration, e.g. /stop 10m)",
+    "/start": "Resume the cameras after a pause",
+    "/status": "Show camera and detection status",
+    "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
+    "/snapshot": "Capture a snapshot from every camera",
+    "/pause": "Privacy mode: stop the cameras (alias of /stop)",
+    "/play": "Resume the cameras (alias of /start)",
+    "/resume": "Resume the cameras (alias of /start)",
     "/userinfo": "Show your Telegram user ID",
 }
 
 # Commands that turn privacy mode ON; the trailing text is parsed as a duration.
 PAUSE_COMMANDS = ("/pause", "/stop")
 # Commands that turn privacy mode OFF.
-RESUME_COMMANDS = ("/play", "/resume")
+RESUME_COMMANDS = ("/play", "/resume", "/start")
 
 
 def download_telegram_file(base_url: str, file_id: str, timeout: int = 30) -> bytes | None:
@@ -260,6 +263,7 @@ def run_command_bot(
     find_provider: Callable[[int, str], str] | None = None,
     nl_provider: Callable[[int, str], None] | None = None,
     photo_provider: Callable[[bytes], str] | None = None,
+    activity_provider: Callable[[int, str], None] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -272,14 +276,16 @@ def run_command_bot(
     available = [
         command
         for command, present in (
-            ("/status", status_provider is not None),
-            ("/snapshot", snapshot_provider is not None),
-            ("/find", find_provider is not None),
-            ("/pause", pause_provider is not None),
+            ("/activity", activity_provider is not None),
+            ("/discover", discover_provider is not None),
             ("/stop", pause_provider is not None),
+            ("/start", resume_provider is not None),
+            ("/status", status_provider is not None),
+            ("/find", find_provider is not None),
+            ("/snapshot", snapshot_provider is not None),
+            ("/pause", pause_provider is not None),
             ("/play", resume_provider is not None),
             ("/resume", resume_provider is not None),
-            ("/discover", discover_provider is not None),
             ("/userinfo", True),
         )
         if present
@@ -406,6 +412,22 @@ def run_command_bot(
                         report = f"Snapshot failed: {exc}"
                     send(chat_id, report)
                 LOGGER.info("Handled /snapshot for user %s", user_id)
+                continue
+
+            if command == "/activity":
+                # Reads the day memory + summarises; can take a bird and/or
+                # "today" (/activity percy today). Backgrounded by the provider,
+                # so ack immediately.
+                if str(user_id) not in allowed or activity_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    send(chat_id, "📋 Looking back…")
+                    try:
+                        activity_provider(chat_id, command_argument(message.get("text", "")))
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Activity failed")
+                        send(chat_id, f"Activity failed: {exc}")
+                LOGGER.info("Handled /activity for user %s", user_id)
                 continue
 
             if command == "/find":
