@@ -36,6 +36,13 @@ def test_parse_intent_tolerates_missing_argument() -> None:
     assert parse_intent('{"action": "status"}') == Intent("status", "")
 
 
+def test_parse_intent_handles_none_and_empty() -> None:
+    # parse_intent is documented as total: a None/empty model reply must fall
+    # back to chat, not raise while formatting the warning log.
+    assert parse_intent(None) == Intent("chat", "")  # type: ignore[arg-type]
+    assert parse_intent("") == Intent("chat", "")
+
+
 def test_system_prompt_lists_birds() -> None:
     prompt = build_system_prompt(["percy", "matcha"])
     assert "percy" in prompt and "matcha" in prompt

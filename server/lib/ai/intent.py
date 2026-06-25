@@ -113,7 +113,7 @@ def parse_intent(content: str) -> Intent:
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        LOGGER.warning("Intent response was not JSON: %r", content[:200])
+        LOGGER.warning("Intent response was not JSON: %r", (content or "")[:200])
         return Intent("chat", "")
     if not isinstance(data, dict):
         return Intent("chat", "")
