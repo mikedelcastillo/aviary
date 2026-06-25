@@ -6,7 +6,11 @@ from lib.detector import Detection
 from lib.dashboard import _format_frame_age
 from lib.objects import ObjectRegistry
 from lib.stats import CameraStats
-from lib.telegram.commands import build_status_message, run_command_bot
+from lib.telegram.commands import (
+    _register_bot_commands,
+    build_status_message,
+    run_command_bot,
+)
 
 
 class Response:
@@ -80,6 +84,9 @@ def test_status_command_requires_allowed_user(monkeypatch) -> None:
         )
 
     def post(_url, json, timeout):
+        # Skip the startup setMyCommands registration; record only replies.
+        if "text" not in json:
+            return Response()
         sent_messages.append(json["text"])
         stop_event.set()
         return Response()
@@ -125,6 +132,9 @@ def test_status_command_replies_for_allowed_user(monkeypatch) -> None:
         )
 
     def post(_url, json, timeout):
+        # Skip the startup setMyCommands registration; record only replies.
+        if "text" not in json:
+            return Response()
         sent_messages.append(json["text"])
         stop_event.set()
         return Response()
@@ -165,6 +175,9 @@ def test_discover_command_requires_allowed_user(monkeypatch) -> None:
         )
 
     def post(_url, json, timeout):
+        # Skip the startup setMyCommands registration; record only replies.
+        if "text" not in json:
+            return Response()
         sent_messages.append(json["text"])
         stop_event.set()
         return Response()
@@ -210,6 +223,9 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
         )
 
     def post(_url, json, timeout):
+        # Skip the startup setMyCommands registration; record only replies.
+        if "text" not in json:
+            return Response()
         sent_messages.append(json["text"])
         # Stop only once both the ack and the report have been sent so the loop
         # doesn't exit before the second message.
@@ -256,6 +272,9 @@ def test_snapshot_command_requires_allowed_user(monkeypatch) -> None:
         )
 
     def post(_url, json, timeout):
+        # Skip the startup setMyCommands registration; record only replies.
+        if "text" not in json:
+            return Response()
         sent_messages.append(json["text"])
         stop_event.set()
         return Response()
@@ -280,6 +299,107 @@ def test_snapshot_command_requires_allowed_user(monkeypatch) -> None:
     assert provider_called is False
 
 
+def test_register_bot_commands_skips_unknown_command(monkeypatch) -> None:
+    posted: list[dict] = []
+
+    def post(_url, json, timeout):
+        posted.append(json)
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    # A command with no menu description is a wiring mistake, not a Telegram API
+    # failure. It must be skipped so the rest of the menu still registers and the
+    # bot still starts — never crash startup with a KeyError.
+    _register_bot_commands("https://api.telegram.org/bottoken", ["/status", "/bogus"])
+
+    assert len(posted) == 1
+    assert [entry["command"] for entry in posted[0]["commands"]] == ["status"]
+
+
+def test_register_bot_commands_sends_nothing_when_all_unknown(monkeypatch) -> None:
+    posted: list[dict] = []
+
+    def post(_url, json, timeout):
+        posted.append(json)
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    # An empty payload would CLEAR the bot's menu, so skip the call entirely.
+    _register_bot_commands("https://api.telegram.org/bottoken", ["/bogus"])
+
+    assert posted == []
+
+
+def test_registers_available_bot_commands_on_startup(monkeypatch) -> None:
+    stop_event = threading.Event()
+    registered: list[dict] = []
+
+    def get(_url, params, timeout):
+        # First poll has nothing to handle; stop so the loop exits after the
+        # startup registration has already run.
+        stop_event.set()
+        return Response({"result": []})
+
+    def post(url, json, timeout):
+        if url.endswith("/setMyCommands"):
+            registered.extend(json["commands"])
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        status_provider=lambda: "status",
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        discover_provider=lambda: "report",
+        snapshot_provider=lambda _chat_id: "album",
+    )
+
+    # Every wired-up command is offered to Telegram's slash-menu, in a stable
+    # display order, as bare names (no leading slash) with non-empty descriptions.
+    assert [entry["command"] for entry in registered] == [
+        "status",
+        "snapshot",
+        "discover",
+        "userinfo",
+    ]
+    assert all(entry["description"] for entry in registered)
+    assert all(not entry["command"].startswith("/") for entry in registered)
+
+
+def test_registers_only_userinfo_when_no_providers(monkeypatch) -> None:
+    stop_event = threading.Event()
+    registered: list[dict] = []
+
+    def get(_url, params, timeout):
+        stop_event.set()
+        return Response({"result": []})
+
+    def post(url, json, timeout):
+        if url.endswith("/setMyCommands"):
+            registered.extend(json["commands"])
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    # user_id mode: no allowed users and no providers, so only /userinfo works
+    # and only /userinfo should appear in the autocomplete menu.
+    run_command_bot(
+        "token",
+        allowed_user_ids=[],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+    )
+
+    assert [entry["command"] for entry in registered] == ["userinfo"]
+
+
 def test_snapshot_command_acks_then_reports_with_chat_id(monkeypatch) -> None:
     stop_event = threading.Event()
     sent_messages: list[str] = []
@@ -302,6 +422,9 @@ def test_snapshot_command_acks_then_reports_with_chat_id(monkeypatch) -> None:
         )
 
     def post(_url, json, timeout):
+        # Skip the startup setMyCommands registration; record only replies.
+        if "text" not in json:
+            return Response()
         sent_messages.append(json["text"])
         # Stop only once both the ack and the report have been sent.
         if len(sent_messages) >= 2:

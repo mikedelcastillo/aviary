@@ -19,6 +19,18 @@ LOGGER = logging.getLogger("lib.telegram.commands")
 
 StatusProvider = Callable[[], str]
 
+# Descriptions for Telegram's slash-command menu — the list that pops up when a
+# user types "/" in a chat with the bot. Registered at startup via
+# ``setMyCommands`` so the app autocompletes the commands this bot answers. The
+# order here is the menu's display order; only commands whose handler is wired
+# up for a given run are actually registered (see ``run_command_bot``).
+COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "/status": "Show camera and detection status",
+    "/snapshot": "Capture a snapshot from every camera",
+    "/discover": "Scan the local network for cameras",
+    "/userinfo": "Show your Telegram user ID",
+}
+
 
 def _format_duration(seconds: float | None) -> str:
     if seconds is None:
@@ -156,6 +168,36 @@ def build_status_message(
     return "\n".join(lines)
 
 
+def _register_bot_commands(base_url: str, commands: list[str]) -> None:
+    """Populate Telegram's slash-command menu so typing "/" autocompletes.
+
+    Best-effort: ``setMyCommands`` failing must never stop the bot from polling,
+    so a transient API error is logged and swallowed.
+    """
+    payload = []
+    for command in commands:
+        description = COMMAND_DESCRIPTIONS.get(command)
+        if description is None:
+            # A command with no menu description is a wiring mistake, not an API
+            # failure; skip it so the rest of the menu still registers and the
+            # bot still starts rather than dying on a KeyError here.
+            LOGGER.warning("No menu description for %s; skipping", command)
+            continue
+        payload.append({"command": command.removeprefix("/"), "description": description})
+    if not payload:
+        # An empty list would *clear* the menu via setMyCommands, so don't call.
+        return
+    try:
+        requests.post(
+            f"{base_url}/setMyCommands",
+            json={"commands": payload},
+            timeout=15,
+        ).raise_for_status()
+        LOGGER.info("Registered %d Telegram bot command(s)", len(payload))
+    except requests.RequestException as exc:
+        LOGGER.warning("Failed to register bot commands: %s", exc)
+
+
 def run_command_bot(
     bot_token: str,
     allowed_user_ids: list[str],
@@ -169,6 +211,22 @@ def run_command_bot(
     base_url = f"https://api.telegram.org/bot{bot_token}"
     allowed = {str(user_id) for user_id in allowed_user_ids}
     offset: int | None = None
+
+    # Advertise only the commands this run can actually answer. /userinfo is
+    # always live; the rest depend on their provider being wired up. The order
+    # follows COMMAND_DESCRIPTIONS so the menu is stable.
+    available = [
+        command
+        for command, present in (
+            ("/status", status_provider is not None),
+            ("/snapshot", snapshot_provider is not None),
+            ("/discover", discover_provider is not None),
+            ("/userinfo", True),
+        )
+        if present
+    ]
+    _register_bot_commands(base_url, available)
+
     LOGGER.info("Started Telegram command bot")
 
     def send(chat_id: int, text: str) -> None:
