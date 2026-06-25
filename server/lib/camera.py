@@ -113,6 +113,13 @@ def monitor_camera(
         # /status show why the camera has gone quiet.
         if control is not None and control.is_paused():
             stats.set_status("paused")
+            # Drop this camera's stale IR vote while paused: it produces no frames
+            # to refresh it, so a camera paused at night would otherwise keep
+            # "voting IR" forever — wedging all_ir()/known() (caretaker night mode,
+            # auto-find's day/night re-enable). A resume re-stamps it on the next
+            # decoded frame.
+            if ir_state is not None:
+                ir_state.forget(camera.name)
             stop_event.wait(PAUSE_POLL_SECONDS)
             continue
 
