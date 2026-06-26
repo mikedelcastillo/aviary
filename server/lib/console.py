@@ -22,6 +22,7 @@ import sys
 from typing import Callable
 
 from lib.telegram.userinfo import parse_command
+from lib.textfmt import to_plain
 
 
 LOGGER = logging.getLogger("lib.console")
@@ -59,7 +60,7 @@ class ConsoleNotifier:
         self.bot_token = "console"
 
     def send_text(self, chat_id, text: str) -> None:
-        self._emit(text)
+        self._emit(to_plain(text))
 
     def send_album(self, chat_id, items) -> None:
         count = len(list(items))
@@ -67,7 +68,7 @@ class ConsoleNotifier:
             self._emit(f"[sent {count} photo(s) to Telegram]")
 
     def broadcast_text(self, text: str) -> None:
-        self._emit(text)
+        self._emit(to_plain(text))
 
     def broadcast_album(self, items) -> None:
         self.send_album(None, items)

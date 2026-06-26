@@ -13,6 +13,7 @@ import re
 from collections import Counter
 
 from lib.ai.client import OllamaClient
+from lib.textfmt import flatten_tables
 
 
 LOGGER = logging.getLogger("lib.ai.chat")
@@ -32,83 +33,6 @@ def strip_thinking(text: str) -> str:
     guard against a model that inlines ``<think>`` tags anyway.
     """
     return _THINK_BLOCK.sub("", text).strip()
-
-
-def _is_table_sep(line: str) -> bool:
-    """A GFM table separator row, e.g. ``| --- | :--: |`` — only pipes, dashes,
-    colons and spaces, with at least one pipe and one dash."""
-    s = line.strip()
-    if "|" not in s or "-" not in s:
-        return False
-    return all(ch in "|-: \t" for ch in s)
-
-
-def _table_cells(line: str) -> list[str]:
-    s = line.strip()
-    if s.startswith("|"):
-        s = s[1:]
-    if s.endswith("|"):
-        s = s[:-1]
-    return [cell.strip() for cell in s.split("|")]
-
-
-def _render_table(block: list[str]) -> list[str]:
-    """Turn one pipe-table block into plain readable lines (header-paired)."""
-    header: list[str] | None = None
-    rows: list[list[str]] = []
-    for line in block:
-        if _is_table_sep(line):
-            continue
-        cells = _table_cells(line)
-        if header is None:
-            header = cells
-        else:
-            rows.append(cells)
-    out: list[str] = []
-    if header and not rows:  # a header with no body — just list its cells
-        joined = " — ".join(c for c in header if c)
-        if joined:
-            out.append(joined)
-        return out
-    for cells in rows:
-        if header and len(header) == len(cells) and any(header):
-            pairs = [f"{h}: {v}" for h, v in zip(header, cells) if h or v]
-            out.append(", ".join(pairs))
-        else:
-            joined = " — ".join(c for c in cells if c)
-            if joined:
-                out.append(joined)
-    return out
-
-
-def flatten_tables(text: str) -> str:
-    """Flatten any GFM pipe tables into plain lines.
-
-    Telegram messages are sent as PLAIN text (no parse mode), so a markdown
-    table arrives as raw ``| --- |`` noise. A block of consecutive pipe lines
-    that includes a ``---`` separator row is a table; everything else (a stray
-    pipe in prose) is left untouched.
-    """
-    if "|" not in text:
-        return text
-    lines = text.split("\n")
-    out: list[str] = []
-    i, n = 0, len(lines)
-    while i < n:
-        if "|" in lines[i]:
-            j = i
-            while j < n and "|" in lines[j]:
-                j += 1
-            block = lines[i:j]
-            if len(block) >= 2 and any(_is_table_sep(b) for b in block):
-                out.extend(_render_table(block))
-            else:
-                out.extend(block)
-            i = j
-        else:
-            out.append(lines[i])
-            i += 1
-    return "\n".join(out)
 
 
 def _longest_run(s: str) -> int:

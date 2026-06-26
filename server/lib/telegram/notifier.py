@@ -15,6 +15,13 @@ import requests
 from lib.detector import Detection
 from lib.imaging import downscale_jpeg
 from lib.labels import pretty_labels
+from lib.textfmt import render_telegram_html, to_plain
+
+
+def _why(response) -> str:
+    """A short reason from a Telegram error response, tolerant of fakes/None."""
+    body = getattr(response, "text", "") or ""
+    return body[:200] if body else getattr(response, "status_code", "?")
 
 
 LOGGER = logging.getLogger("lib.telegram")
@@ -153,9 +160,20 @@ class TelegramNotifier:
         try:
             response = self._post(
                 f"{self.base_url}/editMessageText",
-                json={"chat_id": chat_id, "message_id": message_id, "text": text},
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": render_telegram_html(text),
+                    "parse_mode": "HTML",
+                },
                 timeout=self.timeout_seconds,
             )
+            if response.status_code == 400:
+                response = self._post(
+                    f"{self.base_url}/editMessageText",
+                    json={"chat_id": chat_id, "message_id": message_id, "text": to_plain(text)},
+                    timeout=self.timeout_seconds,
+                )
             response.raise_for_status()
             return True
         except requests.RequestException as exc:
@@ -262,11 +280,21 @@ class TelegramNotifier:
         list(self._pool.map(safe, user_ids))
 
     def _send_message(self, user_id: str, text: str) -> int | None:
+        # Send as HTML so **bold** markers render; on a parse rejection (a stray
+        # tag we didn't anticipate) resend as plain text so a message is never
+        # dropped over formatting.
         response = self._post(
             f"{self.base_url}/sendMessage",
-            json={"chat_id": user_id, "text": text},
+            json={"chat_id": user_id, "text": render_telegram_html(text), "parse_mode": "HTML"},
             timeout=self.timeout_seconds,
         )
+        if response.status_code == 400:
+            LOGGER.warning("HTML message rejected (%s); resending plain", _why(response))
+            response = self._post(
+                f"{self.base_url}/sendMessage",
+                json={"chat_id": user_id, "text": to_plain(text)},
+                timeout=self.timeout_seconds,
+            )
         response.raise_for_status()
         return self._extract_message_id(response)
 
