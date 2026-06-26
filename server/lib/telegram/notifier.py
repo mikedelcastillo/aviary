@@ -18,10 +18,26 @@ from lib.labels import pretty_labels
 from lib.textfmt import render_telegram_html, to_plain
 
 
-def _why(response) -> str:
-    """A short reason from a Telegram error response, tolerant of fakes/None."""
-    body = getattr(response, "text", "") or ""
-    return body[:200] if body else getattr(response, "status_code", "?")
+def _error_description(response) -> str:
+    """Telegram's error ``description`` (lowercased), tolerant of fakes/None."""
+    try:
+        desc = (response.json() or {}).get("description", "")
+    except Exception:
+        desc = getattr(response, "text", "") or ""
+    return (desc or "").lower()
+
+
+def _is_parse_error(response) -> bool:
+    """A 400 caused by malformed HTML (so a plain-text resend is worth trying),
+    as opposed to a non-formatting 400 like chat-not-found or not-modified."""
+    desc = _error_description(response)
+    return "parse" in desc or "entit" in desc
+
+
+def _is_not_modified(response) -> bool:
+    """A 400 from editing a message to identical content — a no-op, not a failure
+    (must NOT be resent as plain, which would silently drop the formatting)."""
+    return "not modified" in _error_description(response)
 
 
 LOGGER = logging.getLogger("lib.telegram")
@@ -169,11 +185,14 @@ class TelegramNotifier:
                 timeout=self.timeout_seconds,
             )
             if response.status_code == 400:
-                response = self._post(
-                    f"{self.base_url}/editMessageText",
-                    json={"chat_id": chat_id, "message_id": message_id, "text": to_plain(text)},
-                    timeout=self.timeout_seconds,
-                )
+                if _is_not_modified(response):
+                    return True  # edited to identical content — a no-op, not a failure
+                if _is_parse_error(response):
+                    response = self._post(
+                        f"{self.base_url}/editMessageText",
+                        json={"chat_id": chat_id, "message_id": message_id, "text": to_plain(text)},
+                        timeout=self.timeout_seconds,
+                    )
             response.raise_for_status()
             return True
         except requests.RequestException as exc:
@@ -288,8 +307,8 @@ class TelegramNotifier:
             json={"chat_id": user_id, "text": render_telegram_html(text), "parse_mode": "HTML"},
             timeout=self.timeout_seconds,
         )
-        if response.status_code == 400:
-            LOGGER.warning("HTML message rejected (%s); resending plain", _why(response))
+        if response.status_code == 400 and _is_parse_error(response):
+            LOGGER.warning("HTML message rejected; resending plain")
             response = self._post(
                 f"{self.base_url}/sendMessage",
                 json={"chat_id": user_id, "text": to_plain(text)},
@@ -301,7 +320,7 @@ class TelegramNotifier:
     def _send_photo_upload(self, user_id: str, caption: str, image_bytes: bytes) -> str | None:
         response = self._post(
             f"{self.base_url}/sendPhoto",
-            data={"chat_id": user_id, "caption": caption},
+            data={"chat_id": user_id, "caption": to_plain(caption or "")},
             files={"photo": ("snapshot.jpg", downscale_jpeg(image_bytes), "image/jpeg")},
             timeout=self.photo_timeout_seconds,
         )
@@ -323,7 +342,7 @@ class TelegramNotifier:
             key = f"photo{index}"
             entry = {"type": "photo", "media": f"attach://{key}"}
             if caption:
-                entry["caption"] = caption
+                entry["caption"] = to_plain(caption)
             media.append(entry)
             jpeg = image_bytes if prescaled else downscale_jpeg(image_bytes)
             files[key] = (f"{key}.jpg", jpeg, "image/jpeg")
@@ -371,7 +390,7 @@ class TelegramNotifier:
         try:
             response = self._post(
                 f"{self.base_url}/editMessageCaption",
-                json={"chat_id": chat_id, "message_id": message_id, "caption": caption},
+                json={"chat_id": chat_id, "message_id": message_id, "caption": to_plain(caption)},
                 timeout=self.timeout_seconds,
             )
             response.raise_for_status()
@@ -392,7 +411,7 @@ class TelegramNotifier:
         # A single image can't be a media group, so it ships as a plain upload.
         data: dict[str, int | str] = {"chat_id": chat_id}
         if caption:
-            data["caption"] = caption
+            data["caption"] = to_plain(caption)
         jpeg = image_bytes if prescaled else downscale_jpeg(image_bytes)
         response = self._post(
             f"{self.base_url}/sendPhoto",
@@ -408,7 +427,7 @@ class TelegramNotifier:
         # post and uses the regular (short) timeout.
         response = self._post(
             f"{self.base_url}/sendPhoto",
-            data={"chat_id": user_id, "caption": caption, "photo": file_id},
+            data={"chat_id": user_id, "caption": to_plain(caption or ""), "photo": file_id},
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()

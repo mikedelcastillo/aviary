@@ -35,27 +35,16 @@ def strip_thinking(text: str) -> str:
     return _THINK_BLOCK.sub("", text).strip()
 
 
-def _longest_run(s: str) -> int:
-    """Longest run of one identical NON-whitespace character."""
-    best = run = 0
-    prev = ""
-    for ch in s:
-        if ch.isspace():
-            prev, run = "", 0
-            continue
-        run = run + 1 if ch == prev else 1
-        prev = ch
-        if run > best:
-            best = run
-    return best
-
-
 def looks_degenerate(text: str) -> bool:
     """True when a reply is repetition garbage rather than real content.
 
     Small models occasionally fall into a loop and emit a wall of one symbol
     (``@@@@@@@@``), a single character dominating the message, or one short token
     over and over. That must never reach the user, so the caller falls back.
+
+    We flag a reply only when the junk DOMINATES it — a long reply that merely
+    contains a divider like ``=====`` keeps its real content rather than being
+    thrown away wholesale.
     """
     s = text.strip()
     if not s:
@@ -66,10 +55,6 @@ def looks_degenerate(text: str) -> bool:
         ch = no_space[0]
         if ch.isascii() and not ch.isalnum():
             return True
-    # A pathological unbroken run of one character (no real reply has 25 of the
-    # same char in a row — but a short divider like "----" must NOT trip this).
-    if _longest_run(s) >= 25:
-        return True
     # One non-alphanumeric symbol dominates a long reply.
     if len(no_space) >= 16:
         ch, count = Counter(no_space).most_common(1)[0]

@@ -103,22 +103,48 @@ def flatten_tables(text: str) -> str:
 
 # -- markdown -> Telegram HTML --------------------------------------------------
 
-_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+# A URL stops at whitespace, a closing paren, or a quote/angle bracket that would
+# break the href attribute — so a stray `"` can't terminate the tag early.
+_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)\"<>]+)\)")
 _HEADER = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*$")
 _BULLET = re.compile(r"(?m)^([ \t]*)[-*+][ \t]+")
 _BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
 _CODE = re.compile(r"`([^`\n]+)`")
+_TAG = re.compile(r"<(/?)([a-z]+)(?: [^<>]*)?>")
+
+
+def _html_balanced(s: str) -> bool:
+    """True if every tag we generated is properly LIFO-nested and closed.
+
+    Sloppy markdown (a ``**bold**`` span that opens inside a link and closes
+    outside it) can produce overlapping tags Telegram rejects. We check nesting
+    so :func:`render_telegram_html` can fall back to plain text BEFORE sending,
+    rather than eating a rejected round-trip.
+    """
+    stack: list[str] = []
+    for closing, tag in _TAG.findall(s):
+        if closing:
+            if not stack or stack.pop() != tag:
+                return False
+        else:
+            stack.append(tag)
+    return not stack
 
 
 def render_telegram_html(text: str) -> str:
-    """Plain text (with optional ``**markers**``) -> safe Telegram HTML."""
+    """Plain text (with optional ``**markers**``) -> safe Telegram HTML.
+
+    Always returns valid Telegram HTML: if the markdown converts to overlapping
+    or unbalanced tags, it returns the escaped, marker-stripped plain form (still
+    valid under parse_mode=HTML) instead of malformed tags.
+    """
     s = escape_html(flatten_tables(text))
     s = _LINK.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', s)
     s = _HEADER.sub(lambda m: f"<b>{m.group(1)}</b>", s)
     s = _BULLET.sub(lambda m: f"{m.group(1)}• ", s)
     s = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", s)
     s = _CODE.sub(lambda m: f"<code>{m.group(1)}</code>", s)
-    return s
+    return s if _html_balanced(s) else escape_html(to_plain(text))
 
 
 def to_plain(text: str) -> str:

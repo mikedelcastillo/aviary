@@ -104,10 +104,13 @@ def test_looks_degenerate_passes_normal_replies() -> None:
     assert not looks_degenerate("😴")  # a lone emoji is fine
 
 
-def test_looks_degenerate_keeps_a_reply_with_a_short_divider() -> None:
-    # A real reply that merely CONTAINS a short rule of dashes is not garbage —
-    # dropping the whole message over a divider would be a false positive.
+def test_looks_degenerate_keeps_a_reply_with_a_divider() -> None:
+    # A real reply that merely CONTAINS a rule of dashes/equals — even a long one
+    # — is not garbage; dropping the whole message over a divider is a false pos.
     assert not looks_degenerate("Status:\n--------\nPercy is fine, everyone's settled.")
+    assert not looks_degenerate(
+        "Here's the rundown:\n" + "=" * 30 + "\nPercy, Matcha and Jynx are all on the perch."
+    )
 
 
 def test_clean_reply_returns_empty_for_degenerate() -> None:

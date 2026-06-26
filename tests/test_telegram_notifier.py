@@ -151,10 +151,11 @@ def test_text_is_sent_as_html_with_bold(monkeypatch) -> None:
     assert call["json"]["text"] == "🌙 <b>Last night</b> was calm"
 
 
-def test_html_rejection_falls_back_to_plain(monkeypatch) -> None:
-    # First HTML attempt is rejected (400); the message is resent as plain text
-    # with the markers stripped, so it's never dropped over formatting.
-    post = RecordingPost([FakeResponse(400, {"ok": False}), FakeResponse(200, {"ok": True})])
+def test_html_parse_error_falls_back_to_plain(monkeypatch) -> None:
+    # A 400 "can't parse entities" resends as plain text with markers stripped,
+    # so the message is never dropped over formatting.
+    parse_400 = FakeResponse(400, {"ok": False, "description": "Bad Request: can't parse entities"})
+    post = RecordingPost([parse_400, FakeResponse(200, {"ok": True})])
     monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
 
     notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
@@ -165,6 +166,31 @@ def test_html_rejection_falls_back_to_plain(monkeypatch) -> None:
     plain = post.calls[1]["json"]
     assert "parse_mode" not in plain
     assert plain["text"] == "hi there"  # markers gone, no tags
+
+
+def test_non_parse_400_is_not_retried_as_plain(monkeypatch) -> None:
+    # A non-formatting 400 (e.g. chat not found) must NOT be silently resent —
+    # it surfaces as an error rather than wasting a round-trip.
+    bad = FakeResponse(400, {"ok": False, "description": "Bad Request: chat not found"})
+    post = RecordingPost([bad])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("hello")  # broadcast swallows the surfaced error
+
+    assert len(post.calls) == 1  # only the HTML attempt, no plain resend
+
+
+def test_edit_not_modified_is_a_noop_not_a_plain_resend(monkeypatch) -> None:
+    # Editing to identical content 400s "message is not modified"; that's a no-op,
+    # not a parse failure, so we must NOT resend a (downgraded) plain version.
+    not_mod = FakeResponse(400, {"ok": False, "description": "Bad Request: message is not modified"})
+    post = RecordingPost([not_mod])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    assert notifier.edit_message_text("A", 5, "**unchanged**") is True
+    assert len(post.calls) == 1  # no plain resend that would drop the formatting
 
 
 def test_429_pauses_then_retries(monkeypatch, tmp_path) -> None:
