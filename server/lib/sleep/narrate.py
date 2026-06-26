@@ -198,7 +198,7 @@ def llm_summary(client, model: str, night: SleepNight, *, care_context: str = ""
     if client is None:
         return fallback
     try:
-        from lib.ai.chat import strip_thinking
+        from lib.ai.chat import clean_reply
 
         facts = (
             f"dark {_hm(night.dark_minutes)} ({_clock(night.lights_out)}–{_clock(night.first_light)}), "
@@ -215,7 +215,7 @@ def llm_summary(client, model: str, night: SleepNight, *, care_context: str = ""
             think=True,
             timeout_seconds=timeout_seconds,
         )
-        return strip_thinking(reply) or fallback
+        return clean_reply(reply) or fallback
     except Exception:
         LOGGER.exception("LLM sleep summary failed; using template")
         return fallback

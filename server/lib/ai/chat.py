@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 
 from lib.ai.client import OllamaClient
 
 
 LOGGER = logging.getLogger("lib.ai.chat")
+
+# Shown when the model only ever returns garbage (see ``looks_degenerate``).
+CHAT_FALLBACK = "Sorry — I garbled that one. Mind asking me again?"
 
 # Strips an inline <think>...</think> block some models/Ollama versions emit.
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
@@ -28,6 +32,145 @@ def strip_thinking(text: str) -> str:
     guard against a model that inlines ``<think>`` tags anyway.
     """
     return _THINK_BLOCK.sub("", text).strip()
+
+
+def _is_table_sep(line: str) -> bool:
+    """A GFM table separator row, e.g. ``| --- | :--: |`` — only pipes, dashes,
+    colons and spaces, with at least one pipe and one dash."""
+    s = line.strip()
+    if "|" not in s or "-" not in s:
+        return False
+    return all(ch in "|-: \t" for ch in s)
+
+
+def _table_cells(line: str) -> list[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [cell.strip() for cell in s.split("|")]
+
+
+def _render_table(block: list[str]) -> list[str]:
+    """Turn one pipe-table block into plain readable lines (header-paired)."""
+    header: list[str] | None = None
+    rows: list[list[str]] = []
+    for line in block:
+        if _is_table_sep(line):
+            continue
+        cells = _table_cells(line)
+        if header is None:
+            header = cells
+        else:
+            rows.append(cells)
+    out: list[str] = []
+    if header and not rows:  # a header with no body — just list its cells
+        joined = " — ".join(c for c in header if c)
+        if joined:
+            out.append(joined)
+        return out
+    for cells in rows:
+        if header and len(header) == len(cells) and any(header):
+            pairs = [f"{h}: {v}" for h, v in zip(header, cells) if h or v]
+            out.append(", ".join(pairs))
+        else:
+            joined = " — ".join(c for c in cells if c)
+            if joined:
+                out.append(joined)
+    return out
+
+
+def flatten_tables(text: str) -> str:
+    """Flatten any GFM pipe tables into plain lines.
+
+    Telegram messages are sent as PLAIN text (no parse mode), so a markdown
+    table arrives as raw ``| --- |`` noise. A block of consecutive pipe lines
+    that includes a ``---`` separator row is a table; everything else (a stray
+    pipe in prose) is left untouched.
+    """
+    if "|" not in text:
+        return text
+    lines = text.split("\n")
+    out: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if "|" in lines[i]:
+            j = i
+            while j < n and "|" in lines[j]:
+                j += 1
+            block = lines[i:j]
+            if len(block) >= 2 and any(_is_table_sep(b) for b in block):
+                out.extend(_render_table(block))
+            else:
+                out.extend(block)
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+def _longest_run(s: str) -> int:
+    """Longest run of one identical NON-whitespace character."""
+    best = run = 0
+    prev = ""
+    for ch in s:
+        if ch.isspace():
+            prev, run = "", 0
+            continue
+        run = run + 1 if ch == prev else 1
+        prev = ch
+        if run > best:
+            best = run
+    return best
+
+
+def looks_degenerate(text: str) -> bool:
+    """True when a reply is repetition garbage rather than real content.
+
+    Small models occasionally fall into a loop and emit a wall of one symbol
+    (``@@@@@@@@``), a single character dominating the message, or one short token
+    over and over. That must never reach the user, so the caller falls back.
+    """
+    s = text.strip()
+    if not s:
+        return False  # empty is "no content", handled separately by the caller
+    no_space = re.sub(r"\s+", "", s)
+    # Entirely one repeated ASCII symbol — the classic "@@@@@@@" / "------" dump.
+    if len(no_space) >= 4 and len(set(no_space)) == 1:
+        ch = no_space[0]
+        if ch.isascii() and not ch.isalnum():
+            return True
+    # A pathological unbroken run of one character (no real reply has 25 of the
+    # same char in a row — but a short divider like "----" must NOT trip this).
+    if _longest_run(s) >= 25:
+        return True
+    # One non-alphanumeric symbol dominates a long reply.
+    if len(no_space) >= 16:
+        ch, count = Counter(no_space).most_common(1)[0]
+        if not ch.isalnum() and count / len(no_space) > 0.5:
+            return True
+    # One short token repeated over and over ("bird bird bird ...").
+    tokens = s.split()
+    if len(tokens) >= 8:
+        tok, count = Counter(tokens).most_common(1)[0]
+        if len(tok) <= 15 and count / len(tokens) > 0.6:
+            return True
+    return False
+
+
+def clean_reply(text: str) -> str:
+    """Post-process raw model text into something safe to send, or ``""``.
+
+    Strips leaked thinking, flattens markdown tables Telegram can't render, and
+    returns an EMPTY string when the output is degenerate (so callers fall back
+    to a template or a friendly retry message instead of forwarding garbage).
+    """
+    cleaned = flatten_tables(strip_thinking(text))
+    if looks_degenerate(cleaned):
+        return ""
+    return cleaned.strip()
 
 # The caretaker persona for free-text chit-chat. Deliberately conservative: it
 # must NOT invent specific bird activities (that's the memory/VLM layer's job).
@@ -84,10 +227,15 @@ def chat_reply(
     Ollama return the chain-of-thought in a separate field and keep ``content``
     clean. (Counterintuitively, ``think=False`` makes qwen3 dump its reasoning
     straight into ``content`` — the "it replied with its own thinking" bug.)
+
+    The raw reply is run through :func:`clean_reply` (strip thinking, flatten
+    tables, reject degenerate ``@@@@`` loops). A degenerate/empty result is
+    retried ONCE — the loop is usually a sampling fluke a fresh draw clears — and
+    only if that also fails does it return the friendly :data:`CHAT_FALLBACK`.
     """
-    reply = client.chat(
-        model,
-        build_chat_messages(text, history, context=context),
-        think=True,
-    )
-    return strip_thinking(reply)
+    messages = build_chat_messages(text, history, context=context)
+    for _ in range(2):
+        reply = clean_reply(client.chat(model, messages, think=True))
+        if reply:
+            return reply
+    return CHAT_FALLBACK

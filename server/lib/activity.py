@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib.ai.chat import strip_thinking
+from lib.ai.chat import clean_reply
 from lib.labels import pretty
 
 
@@ -202,7 +202,7 @@ def answer_activity_question(
         think=True,
         timeout_seconds=timeout_seconds,
     )
-    return strip_thinking(reply)
+    return clean_reply(reply)
 
 
 def summarise_activity(
@@ -228,4 +228,4 @@ def summarise_activity(
         think=True,
         timeout_seconds=timeout_seconds,
     )
-    return strip_thinking(reply)
+    return clean_reply(reply)
