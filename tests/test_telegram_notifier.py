@@ -139,6 +139,34 @@ def test_no_photo_sends_text_to_every_recipient(monkeypatch) -> None:
     assert all(call["json"]["text"] == "Bird, Cat" for call in post.calls)
 
 
+def test_text_is_sent_as_html_with_bold(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("🌙 **Last night** was calm")
+
+    call = post.calls[0]
+    assert call["json"]["parse_mode"] == "HTML"
+    assert call["json"]["text"] == "🌙 <b>Last night</b> was calm"
+
+
+def test_html_rejection_falls_back_to_plain(monkeypatch) -> None:
+    # First HTML attempt is rejected (400); the message is resent as plain text
+    # with the markers stripped, so it's never dropped over formatting.
+    post = RecordingPost([FakeResponse(400, {"ok": False}), FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("**hi** there")
+
+    assert len(post.calls) == 2
+    assert post.calls[0]["json"]["parse_mode"] == "HTML"
+    plain = post.calls[1]["json"]
+    assert "parse_mode" not in plain
+    assert plain["text"] == "hi there"  # markers gone, no tags
+
+
 def test_429_pauses_then_retries(monkeypatch, tmp_path) -> None:
     snapshot = tmp_path / "snap.jpg"
     snapshot.write_bytes(b"bytes")

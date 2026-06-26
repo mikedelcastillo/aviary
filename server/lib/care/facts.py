@@ -39,7 +39,21 @@ COLD_DANGER_F = 50
 # Perishable fresh produce should be pulled after roughly this long (food safety).
 FRESH_FOOD_MINUTES = 120
 
-CARE_SUMMARY = "This flock — lovebirds Percy, Matcha and Jynx, budgie Bambi, and cockatiels Draft and Pizza — thrives on consistency and a pellet-based diet: make 75-80% formulated pellets the foundation (60-80% for Bambi), with washed, small-cut greens and veggies as the bulk of the rest, fruit only sparingly, and minimal seed; never offer grit. Keep every toxic food (avocado, chocolate, caffeine, alcohol, onion/garlic, fruit pits and apple seeds, xylitol, salty/fatty/sugary scraps) completely out of reach, and protect their sensitive lungs from Teflon fumes, aerosols, candles and smoke. Anchor their day to observed lights-on and PH sunrise/sunset: fresh food and water each morning, fresh produce pulled after ~2 hours, midday enrichment and out-of-cage time, a calm wind-down before a consistent bedtime, and a reliable 10-12 hours of dark — with a dim red/amber nightlight for the cockatiels, who are highly prone to injurious night frights. Hold the room around 65-80°F with no drafts or sudden swings. Weigh each bird weekly before breakfast and log the trend, because birds hide illness and a ~10% drop, refused food, tail-bobbing or open-mouth breathing means an avian vet now, not later. The biggest caveat for mixed housing is the lovebirds: they are intensely territorial and aggressive (hens most of all, especially around nests) and will attack birds of any size, so do not house them with the budgie or cockatiels in a standard cage — use a large walk-in or divided aviary with multiple separated food/water stations and retreat zones, introduce cautiously, and never leave them unsupervised together."
+CARE_SUMMARY = (
+    "Lovebirds Percy, Matcha, Jynx · budgie Bambi · cockatiels Draft, Pizza.\n"
+    "• **Diet:** mostly pellets (75–80%; ~60–80% for Bambi), then washed greens/veggies, "
+    "fruit sparingly, little seed, no grit.\n"
+    "• **Never:** avocado, chocolate, caffeine, alcohol, onion/garlic, fruit pits, apple "
+    "seeds, xylitol, salty/fatty/sugary scraps — and no Teflon fumes, aerosols or smoke.\n"
+    "• **Day:** fresh food + water at wake, pull produce after ~2h, midday play and "
+    "out-of-cage time, calm wind-down, consistent bedtime.\n"
+    "• **Sleep:** 10–12h of dark; dim red nightlight for the cockatiels (night frights).\n"
+    "• **Comfort:** 65–80°F, no drafts.\n"
+    "• **Health:** weigh weekly before breakfast — a ~10% drop, refused food, tail-bobbing "
+    "or open-mouth breathing means an avian vet now.\n"
+    "• **Housing:** lovebirds are very territorial — don't cage them with Bambi or the "
+    "cockatiels; use a large or divided aviary with separate food/water stations."
+)
 
 
 # -- the knowledge base ------------------------------------------------------

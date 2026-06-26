@@ -244,16 +244,16 @@ _TOPIC_LABELS = {
 def care_overview() -> str:
     """The bare ``/care`` reply: the flock summary + how to dig deeper."""
     return (
-        "🐦 Caring for the flock\n"
+        "🐦 **Caring for the flock**\n"
         + CARE_SUMMARY
-        + "\n\nAsk for more: /care diet · /care sleep · /care temperature · /care health · "
-        "/care toxic · or a bird/species (e.g. /care cockatiel, /care percy)."
+        + "\n\nMore: /care diet · sleep · temperature · health · toxic · "
+        "or a bird/species (e.g. /care cockatiel, /care percy)."
     )
 
 
 def toxic_food_list() -> str:
     """The full toxic-food list, for ``/care toxic``."""
-    lines = ["⚠️ Foods to keep AWAY from the birds:"]
+    lines = ["⚠️ **Foods to keep AWAY** from the birds:"]
     for food in TOXIC_FOODS:
         lines.append(f"• {food.name.title()} — {food.reason}")
     return "\n".join(lines)
@@ -288,7 +288,7 @@ def care_reply(query: str, *, member_species: dict[str, str] | None = None, limi
     # that warning IS the answer (e.g. /care avocado).
     head: list[str] = []
     if food is not None:
-        head.append(f"⚠️ {food.name.title()} is dangerous: {food.reason}.")
+        head.append(f"⚠️ **{food.name.title()} is dangerous:** {food.reason}.")
 
     matched: list[CareFact] = []
     for fact in CARE_FACTS:
@@ -316,7 +316,7 @@ def care_reply(query: str, *, member_species: dict[str, str] | None = None, limi
     if species and not label:
         label = ", ".join(sorted(s.title() for s in species)) + " care"
     if label:
-        parts.append(f"🐦 {label}")
+        parts.append(f"🐦 **{label}**")
     # Headline numbers — only when a matched fact doesn't already state them.
     shown = matched[:limit]
     if "sleep_light" in topics and not any("10-12" in f.fact for f in shown):
@@ -335,4 +335,4 @@ def care_tip(index: int) -> str:
     fact = CARE_FACTS[index % len(CARE_FACTS)]
     scope = "" if fact.species == "general" else f"({fact.species}) "
     flag = " ⚠️" if fact.safety_critical else ""
-    return f"💡 Care tip of the week: {scope}{fact.fact}{flag}"
+    return f"💡 **Care tip of the week:** {scope}{fact.fact}{flag}"

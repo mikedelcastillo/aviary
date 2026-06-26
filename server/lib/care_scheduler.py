@@ -36,36 +36,31 @@ LOGGER = logging.getLogger("lib.care_scheduler")
 # The reminder copy (warm, specific, grounded in the verified care research).
 MESSAGES: dict[str, str] = {
     "morning": (
-        "🌅 Good morning! Time to gently uncover the cage and let Percy, Matcha, Jynx, "
-        "Bambi, Draft and Pizza wake with the light. Swap in fresh pellets, clear "
-        "yesterday's leftovers, and give every dish clean water."
+        "🌅 **Good morning!** Uncover the cage and let the flock wake with the light. "
+        "Fresh pellets, clean water, and clear yesterday's leftovers."
     ),
     "food_pickup": (
-        "🥗 It's been about 2 hours — pull any leftover fresh veggies and greens before "
-        "they spoil (sooner if the room is warm) so nobody nibbles something off."
+        "🥗 Been about 2 hours — pull any leftover veggies and greens before they spoil."
     ),
     "midday": (
-        "🧸 Enrichment break! Rotate in some fresh foraging and shredding toys and offer "
-        "supervised out-of-cage time — the lovebirds love paper to shred and the "
-        "cockatiels need a good 1–3 hours out."
+        "🧸 **Enrichment break!** Rotate in fresh foraging and shredding toys, and offer "
+        "out-of-cage time — the cockatiels need a good 1–3 hours out."
     ),
     "winddown": (
-        "🌇 Winding down — start dimming the lights and lowering the noise so the flock can "
-        "settle. They need 10–12 hours of uninterrupted dark, so aim for a consistent bedtime."
+        "🌇 **Winding down** — dim the lights and lower the noise so the flock can settle. "
+        "They need 10–12h of uninterrupted dark, so keep bedtime consistent."
     ),
     "bedtime": (
-        "🌙 Lights out for the flock. Cover the cage (leave a dim red/amber nightlight for "
-        "the cockatiels — they're prone to night frights) and keep the room quiet and calm."
+        "🌙 **Lights out.** Cover the cage — leave a dim red nightlight for the cockatiels "
+        "(prone to night frights) — and keep the room quiet."
     ),
     "weekly_clean": (
-        "🧽 Weekly deep-clean day: wash perches, toys and dishes in hot water with bird-safe "
-        "soap and replace the substrate. With six birds sharing space, don't let it slide "
-        "past a week."
+        "🧽 **Weekly deep-clean day:** wash perches, toys and dishes in hot water with "
+        "bird-safe soap and replace the substrate. Six birds — don't let it slide."
     ),
     "weekly_weigh": (
-        "⚖️ Weigh-in day! Pop each bird on the gram scale before breakfast and log it — "
-        "you're watching the trend, since a ~10% drop is the early warning that a bird "
-        "hiding illness needs a vet."
+        "⚖️ **Weigh-in day!** Each bird on the gram scale before breakfast, and log it — "
+        "a ~10% drop is the early warning a bird needs a vet."
     ),
 }
 

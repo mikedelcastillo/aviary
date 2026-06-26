@@ -101,8 +101,8 @@ def _fright_note(night: SleepNight) -> str | None:
         return None
     when = _clock(frights[0].time)
     return (
-        f"⚠️ A possible night-fright around {when} — worth a quick check for any pulled "
-        "feathers on Draft or Pizza, and keep that dim red nightlight on for the cockatiels."
+        f"⚠️ **Possible night-fright** around {when} — check Draft and Pizza for pulled "
+        "feathers, and keep the dim red nightlight on."
     )
 
 
@@ -122,8 +122,8 @@ def _dark_phrase(night: SleepNight) -> str:
 def format_last(night: SleepNight, *, streak: int = 0) -> str:
     """The full last-night report. ``streak`` is the run of good nights so far."""
     lines = [
-        f"🌙 Last night ({night.night_of:%a %b %d})",
-        f"Sleep score: {night.score}/100 · {_band(night.score or 0)}",
+        f"🌙 **Last night** ({night.night_of:%a %b %d})",
+        f"Score **{night.score}/100** · {_band(night.score or 0)}",
         _dark_phrase(night),
         _disturbance_line(night),
     ]
@@ -143,7 +143,7 @@ def format_last(night: SleepNight, *, streak: int = 0) -> str:
 def format_morning(night: SleepNight) -> str:
     """A single warm morning one-liner fired right after 'Good morning'."""
     base = (
-        f"😴 Sleep report — the flock got {_hm(night.dark_minutes)} of dark last night "
+        f"😴 **Sleep report** — {_hm(night.dark_minutes)} of dark last night "
         f"({_clock(night.lights_out)}–{_clock(night.first_light)}), score {night.score}/100. "
         f"{_disturbance_line(night)}"
     )
@@ -172,8 +172,8 @@ def format_week(nights: list[SleepNight]) -> str:
     avg_dark = round(sum(n.dark_minutes or 0 for n in scored) / len(scored))
     frights = sum(1 for n in scored for d in n.disturbances if d.kind == NIGHT_FRIGHT)
     lines = [
-        f"🌙 The birds' sleep — last {len(scored)} night{'s' if len(scored) > 1 else ''}",
-        f"Avg score {avg}/100 · trend {_spark(scores)}",
+        f"🌙 **The birds' sleep** — last {len(scored)} night{'s' if len(scored) > 1 else ''}",
+        f"Avg score **{avg}/100** · trend {_spark(scores)}",
         f"• Best: {best.night_of:%a} — {best.score}, a {_hm(best.dark_minutes)} night.",
         f"• Worst: {worst.night_of:%a} — {worst.score}.",
         f"Dark hours: avg {_hm(avg_dark)} (aim {SLEEP_HOURS[0]}–{SLEEP_HOURS[1]}h).",
@@ -188,7 +188,7 @@ def format_status_line(in_progress: SleepNight | None, now: datetime) -> str | N
     if in_progress is None or in_progress.lights_out is None:
         return None
     minutes = max(0, int((now - in_progress.lights_out).total_seconds() / 60))
-    return f"🌙 Night in progress — dark {_hm(minutes)} so far"
+    return f"🌙 **Night in progress** — dark {_hm(minutes)} so far"
 
 
 def llm_summary(client, model: str, night: SleepNight, *, care_context: str = "", timeout_seconds: float | None = None) -> str:

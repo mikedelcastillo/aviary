@@ -131,7 +131,8 @@ def test_care_reply_toxic_lists_foods() -> None:
 
 def test_care_reply_named_toxic_food_leads_with_warning() -> None:
     text = care_reply("avocado")
-    assert text.startswith("⚠️ Avocado is dangerous")
+    assert text.startswith("⚠️ ")
+    assert "Avocado is dangerous" in text  # bold markers may wrap the lead
 
 
 def test_care_reply_topic_returns_relevant_facts() -> None:
@@ -169,6 +170,6 @@ def test_care_reply_safe_is_not_the_toxic_list() -> None:
 
 
 def test_care_tip_rotates_deterministically() -> None:
-    assert care_tip(0).startswith("💡 Care tip of the week")
+    assert "Care tip of the week" in care_tip(0)
     assert care_tip(len(CARE_FACTS)) == care_tip(0)  # wraps around
     assert care_tip(1) != care_tip(0)  # rotates

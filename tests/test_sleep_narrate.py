@@ -64,7 +64,8 @@ def test_format_last_shows_streak() -> None:
 
 def test_format_morning_one_liner() -> None:
     text = format_morning(_night(score=89))
-    assert text.startswith("😴 Sleep report")
+    assert text.startswith("😴 ")
+    assert "Sleep report" in text
     assert "89/100" in text
 
 

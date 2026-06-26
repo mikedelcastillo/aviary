@@ -169,12 +169,12 @@ def build_status_message(
         and (snap["since_frame"] is None or snap["since_frame"] <= STALE_FRAME_SECONDS)
     )
 
-    lines = [f"🐦 Aviary — {healthy}/{len(snapshots)} cameras healthy", ""]
+    lines = [f"🐦 **Aviary — {healthy}/{len(snapshots)} cameras healthy**", ""]
 
     # Birds, most-recently-seen first. Show EVERY label that has a sighting —
     # roster individuals AND any species/IR outline (e.g. "cockatiel" at night),
     # so /status isn't blank-looking during IR even though cameras are detecting.
-    lines.append("Birds — last seen:")
+    lines.append("**Birds — last seen:**")
     roster = known_birds if known_birds is not None else []
     shown = sorted(last_seen.items(), key=lambda kv: kv[1][0])
     for label, (since, camera) in shown:
@@ -186,7 +186,7 @@ def build_status_message(
         lines.append("  • nothing seen yet")
 
     # Cameras.
-    lines.extend(["", "Cameras:"])
+    lines.extend(["", "**Cameras:**"])
     if not snapshots:
         lines.append("  • none — send /discover")
     for snap in snapshots:
