@@ -38,6 +38,49 @@ def test_render_converts_links_and_code() -> None:
     assert "<code>code</code>" in out
 
 
+def test_render_converts_italic_strike_and_bold_italic() -> None:
+    assert render_telegram_html("a *soft* word") == "a <i>soft</i> word"
+    assert render_telegram_html("an _emphasised_ note") == "an <i>emphasised</i> note"
+    assert render_telegram_html("~~nope~~") == "<s>nope</s>"
+    assert render_telegram_html("***wow***") == "<b><i>wow</i></b>"
+
+
+def test_render_italic_leaves_identifiers_and_math_alone() -> None:
+    # snake_case and "2 * 3" must NOT be mangled into italics.
+    assert render_telegram_html("set TELEGRAM_USER_IDS now") == "set TELEGRAM_USER_IDS now"
+    assert render_telegram_html("2 * 3 = 6") == "2 * 3 = 6"
+
+
+def test_render_converts_blockquote_rule_and_fence() -> None:
+    assert "quoted" in render_telegram_html("> quoted") and ">" not in render_telegram_html("> quoted")
+    assert render_telegram_html("---").strip() == ""  # a horizontal rule is dropped
+    out = render_telegram_html("```py\nx = 1\n```")
+    assert "<pre>" in out and "```" not in out
+
+
+_MARKDOWN_LEAK_SAMPLES = [
+    "**bold** and *italic* and _under_ and ~~strike~~",
+    "# Heading\n## Sub\n- a\n* b\n+ c",
+    "> a quote\n\n---\n\n`inline` and ```fenced```",
+    "[link](https://e.io/x) plus ***all three***",
+    "no markdown here at all, just words.",
+]
+
+
+def test_no_raw_markdown_markers_survive_rendering() -> None:
+    import re
+
+    for sample in _MARKDOWN_LEAK_SAMPLES:
+        out = render_telegram_html(sample)
+        assert "**" not in out, out
+        assert "~~" not in out, out
+        assert "```" not in out, out
+        assert "](" not in out, out  # no leftover [text](url)
+        assert not re.search(r"(?m)^\s{0,3}#{1,6}\s", out), out  # no heading marker
+        assert not re.search(r"(?m)^\s{0,3}[-*+]\s", out), out  # no bullet marker
+        assert not re.search(r"(?m)^\s{0,3}>\s", out), out  # no blockquote marker
+
+
 def test_render_flattens_a_pipe_table() -> None:
     out = render_telegram_html("| Bird | Where |\n|---|---|\n| Percy | perch |")
     assert "|" not in out

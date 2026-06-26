@@ -16,6 +16,7 @@ from lib.labels import pretty
 from lib.objects import ObjectRegistry
 from lib.stats import CameraStats
 from lib.telegram.userinfo import parse_command
+from lib.textfmt import render_telegram_html, to_plain
 
 
 LOGGER = logging.getLogger("lib.telegram.commands")
@@ -286,15 +287,27 @@ def run_command_bot(
     LOGGER.info("Started Telegram command bot")
 
     def send(chat_id: int, text: str) -> None:
-        """Best-effort sendMessage; a transient API failure must not kill polling."""
+        """Best-effort sendMessage; a transient API failure must not kill polling.
+
+        Renders as HTML (so **bold** markers show as real bold, never raw
+        markdown) and, if Telegram rejects the HTML, retries once as plain text
+        so a reply is never dropped over formatting."""
         try:
             requests.post(
                 f"{base_url}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
+                json={"chat_id": chat_id, "text": render_telegram_html(text), "parse_mode": "HTML"},
                 timeout=15,
             ).raise_for_status()
         except requests.RequestException as exc:
-            LOGGER.warning("Failed to send message: %s", exc)
+            LOGGER.warning("HTML send failed (%s); retrying plain", exc)
+            try:
+                requests.post(
+                    f"{base_url}/sendMessage",
+                    json={"chat_id": chat_id, "text": to_plain(text)},
+                    timeout=15,
+                ).raise_for_status()
+            except requests.RequestException as exc2:
+                LOGGER.warning("Failed to send message: %s", exc2)
 
     while stop_event is None or not stop_event.is_set():
         try:

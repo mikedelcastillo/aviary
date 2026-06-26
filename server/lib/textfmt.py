@@ -102,15 +102,32 @@ def flatten_tables(text: str) -> str:
 
 
 # -- markdown -> Telegram HTML --------------------------------------------------
+#
+# These cover the markdown small models actually emit. A URL stops at whitespace,
+# a closing paren, or a quote/angle bracket so a stray `"` can't break the href.
+# The single-`*`/`_` italic rules are boundary-guarded so snake_case identifiers
+# and "2 * 3" arithmetic are left alone.
 
-# A URL stops at whitespace, a closing paren, or a quote/angle bracket that would
-# break the href attribute — so a stray `"` can't terminate the tag early.
-_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)\"<>]+)\)")
+_FENCE = re.compile(r"```[^\n]*\n?(.*?)```", re.DOTALL)
+_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_LINK = re.compile(r"!?\[([^\]\n]+)\]\((https?://[^\s)\"<>]+)\)")
 _HEADER = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*#*$")
+_QUOTE = re.compile(r"(?m)^[ \t]{0,3}>[ \t]?")
+_HR = re.compile(r"(?m)^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$")
 _BULLET = re.compile(r"(?m)^([ \t]*)[-*+][ \t]+")
+_BOLDITALIC = re.compile(r"\*\*\*(.+?)\*\*\*|___(.+?)___", re.DOTALL)
 _BOLD = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.DOTALL)
-_CODE = re.compile(r"`([^`\n]+)`")
+_STRIKE = re.compile(r"~~(.+?)~~", re.DOTALL)
+_ITALIC = re.compile(
+    r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])"
+    r"|(?<![\w_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])"
+)
 _TAG = re.compile(r"<(/?)([a-z]+)(?: [^<>]*)?>")
+
+
+def _grp(m: re.Match) -> str:
+    """The first capturing group that actually matched (for multi-alt patterns)."""
+    return next((g for g in m.groups() if g is not None), "")
 
 
 def _html_balanced(s: str) -> bool:
@@ -132,28 +149,42 @@ def _html_balanced(s: str) -> bool:
 
 
 def render_telegram_html(text: str) -> str:
-    """Plain text (with optional ``**markers**``) -> safe Telegram HTML.
+    """Plain text (with optional markdown) -> safe Telegram HTML.
 
-    Always returns valid Telegram HTML: if the markdown converts to overlapping
-    or unbalanced tags, it returns the escaped, marker-stripped plain form (still
-    valid under parse_mode=HTML) instead of malformed tags.
+    Converts the markdown small models emit (bold, italic, bold-italic,
+    strikethrough, headers, bullets, blockquotes, rules, inline/fenced code,
+    links) into Telegram's HTML subset, leaving NO raw markdown. Always returns
+    valid HTML: if the markdown would produce overlapping/unbalanced tags, it
+    returns the escaped, marker-stripped plain form instead of malformed tags.
     """
     s = escape_html(flatten_tables(text))
+    s = _FENCE.sub(lambda m: f"<pre>{m.group(1)}</pre>", s)
+    s = _INLINE_CODE.sub(lambda m: f"<code>{m.group(1)}</code>", s)
     s = _LINK.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', s)
     s = _HEADER.sub(lambda m: f"<b>{m.group(1)}</b>", s)
+    s = _QUOTE.sub("", s)
+    s = _HR.sub("", s)
     s = _BULLET.sub(lambda m: f"{m.group(1)}• ", s)
-    s = _BOLD.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", s)
-    s = _CODE.sub(lambda m: f"<code>{m.group(1)}</code>", s)
+    s = _BOLDITALIC.sub(lambda m: f"<b><i>{_grp(m)}</i></b>", s)
+    s = _BOLD.sub(lambda m: f"<b>{_grp(m)}</b>", s)
+    s = _STRIKE.sub(lambda m: f"<s>{m.group(1)}</s>", s)
+    s = _ITALIC.sub(lambda m: f"<i>{_grp(m)}</i>", s)
     return s if _html_balanced(s) else escape_html(to_plain(text))
 
 
 def to_plain(text: str) -> str:
-    """Same conversions as :func:`render_telegram_html` but with markdown markers
+    """The same conversions as :func:`render_telegram_html` but with markers
     removed and NO HTML — for the no-parse-mode fallback and the console."""
     s = flatten_tables(text)
+    s = _FENCE.sub(lambda m: m.group(1), s)
+    s = _INLINE_CODE.sub(lambda m: m.group(1), s)
     s = _LINK.sub(lambda m: f"{m.group(1)} ({m.group(2)})", s)
     s = _HEADER.sub(lambda m: m.group(1), s)
+    s = _QUOTE.sub("", s)
+    s = _HR.sub("", s)
     s = _BULLET.sub(lambda m: f"{m.group(1)}• ", s)
-    s = _BOLD.sub(lambda m: m.group(1) or m.group(2), s)
-    s = _CODE.sub(lambda m: m.group(1), s)
+    s = _BOLDITALIC.sub(lambda m: _grp(m), s)
+    s = _BOLD.sub(lambda m: _grp(m), s)
+    s = _STRIKE.sub(lambda m: m.group(1), s)
+    s = _ITALIC.sub(lambda m: _grp(m), s)
     return s
