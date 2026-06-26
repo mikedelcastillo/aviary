@@ -82,11 +82,18 @@ QA_CASES: list[tuple[str, str, list[list[str]]]] = [
 ]
 
 
-def build_journal(memories_dir: Path) -> None:
+def build_journal(memories_dir: Path, *, with_photos: bool = False) -> None:
     from lib.journal import MemoryEntry, append_entry
 
-    for when, birds, note in SYNTHETIC_ENTRIES:
-        append_entry(memories_dir, MemoryEntry(datetime.combine(QA_DAY, when), birds, note))
+    image_dir = memories_dir / "images"
+    for idx, (when, birds, note) in enumerate(SYNTHETIC_ENTRIES):
+        photos: list[str] = []
+        if with_photos:
+            image_dir.mkdir(parents=True, exist_ok=True)
+            photo = image_dir / f"harness-{idx}.jpg"
+            photo.write_bytes(b"\xff\xd8synthetic-harness-photo\xff\xd9")
+            photos.append(str(photo))
+        append_entry(memories_dir, MemoryEntry(datetime.combine(QA_DAY, when), birds, note, photos))
 
 
 def score(answer: str, groups: list[list[str]]) -> list[str]:
@@ -108,7 +115,7 @@ def run_qa(client: OllamaClient, cfg, birds: list[str]) -> tuple[int, int]:
     passed = 0
     with tempfile.TemporaryDirectory() as tmp:
         memories_dir = Path(tmp)
-        build_journal(memories_dir)
+        build_journal(memories_dir, with_photos=True)
         for question, expect_action, groups in QA_CASES:
             captured: list[str] = []
             responder = ActivityResponder(
@@ -139,8 +146,40 @@ def run_qa(client: OllamaClient, cfg, birds: list[str]) -> tuple[int, int]:
             if missing:
                 print(f"      missing: {', '.join(missing)}")
             print(f"      → {answer[:160]}")
-    print(f"\n  \033[1mQ&A score: {passed}/{len(QA_CASES)}\033[0m")
-    return passed, len(QA_CASES)
+        # Photo-only requests should use memory photos directly. They should not
+        # produce an LLM reasoning dump or rely on a long caption.
+        photo_question = "show me picture of percy"
+        captured = []
+        albums: list[list[tuple[bytes, str | None]]] = []
+        responder = ActivityResponder(
+            memories_dir, client, cfg.llm_model, lambda: birds,
+            notify=lambda cid, text: captured.append(text),
+            send_album=lambda cid, items: albums.append(items),
+            pronoun_note=pronoun_note,
+            now=lambda: QA_NOW,
+        )
+        try:
+            intent = classify_intent(client, cfg.llm_model, photo_question, birds)
+            routed_ok = intent.action == "activity"
+            responder.respond(0, photo_question, intent.argument or "")
+        except Exception as exc:
+            print(f"  ✗ {photo_question!r}: ERROR {exc}")
+        else:
+            ok = routed_ok and bool(albums) and not captured and "Percy" in (albums[0][0][1] or "")
+            passed += ok
+            mark = "\033[32m✓\033[0m" if ok else "\033[31m✗\033[0m"
+            print(f"  {mark} {photo_question!r}")
+            if not routed_ok:
+                print(f"      routed to {intent.action!r}, expected 'activity'")
+            if captured:
+                print(f"      unexpected text: {captured[-1][:160]}")
+            if albums:
+                print(f"      → album caption: {albums[0][0][1]}")
+            else:
+                print("      no album sent")
+    total = len(QA_CASES) + 1
+    print(f"\n  \033[1mQ&A score: {passed}/{total}\033[0m")
+    return passed, total
 
 
 # -- VLM activity detail ----------------------------------------------------

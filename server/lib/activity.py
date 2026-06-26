@@ -145,16 +145,16 @@ def summarise_counts(sightings: list[Sighting]) -> str:
 
 _ACTIVITY_SUMMARY_PROMPT = (
     "You are the aviary caretaker giving an activity update from logged memories. "
-    "Write it as bullet points — start each line with '• ' — UP TO 10 bullets. "
-    "Cover EVERY bird that appears in the notes: at least one bullet per bird, "
-    "saying what it did and who it was with. Refer to each bird by NAME, never its "
+    "Write terse bullet points — start each line with '• ' — UP TO 5 bullets, "
+    "each under 18 words. Cover the requested bird first; include other birds only "
+    "when important. Say what happened and when. Refer to each bird by NAME, never its "
     "species. Write NATURALLY: use a pronoun (she/he, per the pronouns given) only "
     "where one naturally fits in a sentence — NEVER write a pronoun in parentheses "
     "or right after a name (no 'Percy (she)', no 'Percy, she,'); the pronouns are "
     "given for your reference, not to be quoted. When a note begins with how long "
     "ago it was (e.g. '2 hours ago', '12 minutes ago'), include that timing in the "
-    "bullet naturally (e.g. 'Percy preened on the perch 2 hours ago'). Be warm and "
-    "concrete; don't invent anything not in the notes. No preamble or closing line "
+    "bullet naturally (e.g. 'Percy preened on the perch 2 hours ago'). Be concrete; "
+    "don't invent anything not in the notes. No preamble or closing line "
     "— just the bullets."
 )
 
@@ -163,7 +163,7 @@ _ACTIVITY_QA_PROMPT = (
     "You are the warm caretaker of a home aviary, answering a question about the "
     "pet birds using ONLY the timestamped memory notes provided. Each note line is "
     "'(when) [birds seen]: what they were doing'. Answer the SPECIFIC question "
-    "directly in 1-4 sentences. Be concrete about WHEN (e.g. 'around 2pm', 'this "
+    "directly in 1-2 short sentences, max 45 words total. Be concrete about WHEN (e.g. 'around 2pm', 'this "
     "morning', 'about an hour ago') and WHICH birds. For a question about two or "
     "more birds being TOGETHER, only say yes if a note lists them together at the "
     "same time, and say when. For a yes/no question, start with a clear yes or no. "
@@ -208,7 +208,7 @@ def answer_activity_question(
 def summarise_activity(
     client, model: str, notes: list[str], subject: str = "", pronoun_note: str = "", *, timeout_seconds: float | None = None
 ) -> str:
-    """Fold journal memory notes into a <=3-sentence activity report.
+    """Fold journal memory notes into a terse bulleted activity report.
 
     ``pronoun_note`` states each bird's sex (the notes often don't carry it, so
     the model would otherwise default everyone to "he").

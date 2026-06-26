@@ -23,6 +23,7 @@ CHAT_FALLBACK = "Sorry — I garbled that one. Mind asking me again?"
 
 # Strips an inline <think>...</think> block some models/Ollama versions emit.
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_BOXED_FINAL = re.compile(r"\\boxed\{([^{}]+)\}")
 
 
 def strip_thinking(text: str) -> str:
@@ -77,6 +78,9 @@ def clean_reply(text: str) -> str:
     to a template or a friendly retry message instead of forwarding garbage).
     """
     cleaned = flatten_tables(strip_thinking(text))
+    boxed = _BOXED_FINAL.findall(cleaned)
+    if boxed:
+        cleaned = boxed[-1].strip()
     if looks_degenerate(cleaned):
         return ""
     return cleaned.strip()
@@ -93,8 +97,8 @@ CHAT_SYSTEM_PROMPT = (
     "block — use them to answer questions about what is happening right now and "
     "about caring for the birds (diet, sleep, temperature, health, safe vs toxic "
     "foods) accurately. Never contradict a safety-critical care line, and for a "
-    "health emergency urge an avian vet. Reply warmly and concisely: usually one "
-    "or two sentences, up to four when a care or health question needs the detail. "
+    "health emergency urge an avian vet. Keep replies short: usually ONE sentence "
+    "under 35 words; for care or health, use at most 3 compact bullets. "
     "If asked to LOCATE a specific bird right now and you can't see it in the "
     "state, offer to look and suggest they say \"find <bird>\". Never invent a "
     "sighting or a specific thing a bird did that isn't in the provided state; if "

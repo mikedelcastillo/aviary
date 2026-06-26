@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lib.ai.vlm import (
+    SCENE_PROMPT,
     build_detection_context,
     clean_camera_name,
     describe_scene,
@@ -95,6 +96,12 @@ def test_describe_scene_prepends_context() -> None:
     assert out == "Percy is on the perch with Matcha."
     assert "Detected: Percy top-left." in client.calls[0]["prompt"]
     assert client.calls[0]["model"] == "qwen2.5vl:7b"
+
+
+def test_scene_prompt_is_terse() -> None:
+    prompt = SCENE_PROMPT.lower()
+    assert "one short sentence" in prompt
+    assert "under 25 words" in prompt
 
 
 def test_name_camera_view_cleans_model_output() -> None:

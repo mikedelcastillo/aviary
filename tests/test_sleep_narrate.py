@@ -112,3 +112,19 @@ def test_llm_summary_falls_back_on_error() -> None:
 
     # No client -> deterministic too.
     assert llm_summary(None, "m", _night(score=89)) == format_morning(_night(score=89))
+
+
+def test_llm_summary_prompt_is_terse() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def chat(self, model, messages, **kwargs):
+            self.messages = messages
+            return "They slept well."
+
+    client = Client()
+    assert llm_summary(client, "m", _night(score=89)) == "They slept well."
+    prompt = client.messages[0]["content"].lower()
+    assert "one short sentence" in prompt
+    assert "under 30 words" in prompt

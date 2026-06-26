@@ -21,7 +21,7 @@ from lib.clock import now_ph
 from lib.find import pretty_phrase
 from lib.journal import humanize_ago, load_recent
 from lib.labels import pretty
-from lib.roster import expand_targets
+from lib.roster import ALL_BIRD_WORDS, DEFAULT_SPECIES_MEMBERS, expand_targets
 
 
 LOGGER = logging.getLogger("lib.activity_qa")
@@ -45,6 +45,8 @@ _QUESTION_WORDS = (
     "did", "do", "does", "is", "are", "was", "were", "when", "what", "where",
     "who", "how", "has", "have", "had", "can", "could", "will", "should", "any",
 )
+_PHOTO_WORDS = frozenset({"photo", "photos", "picture", "pictures", "pic", "pics", "image", "images"})
+_PHOTO_INTENT_WORDS = frozenset({"show", "send", "see", "get", "give"})
 
 
 def _is_question(text: str) -> bool:
@@ -53,6 +55,65 @@ def _is_question(text: str) -> bool:
         return True
     first = stripped.split()[0] if stripped.split() else ""
     return first in _QUESTION_WORDS
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z]+", text.lower()))
+
+
+def _is_photo_request(text: str) -> bool:
+    words = _tokens(text)
+    return bool(words & _PHOTO_WORDS) and bool(words & _PHOTO_INTENT_WORDS)
+
+
+def _looks_like_pure_photo_request(text: str) -> bool:
+    """True for requests that want images, not an activity explanation."""
+    if not _is_photo_request(text):
+        return False
+    words = _tokens(text)
+    analysis_words = {
+        "what", "did", "doing", "up", "summary", "summarize", "tell",
+        "happened", "today", "morning", "afternoon", "evening", "week",
+        "yesterday", "together", "with",
+    }
+    return not bool(words & analysis_words)
+
+
+def _resolved_bird_text(text: str, argument: str, known_labels: list[str]) -> tuple[str, list[str] | None]:
+    """Resolve activity targets, falling back from router argument to user text.
+
+    The LLM router can correctly pick ``activity`` but omit ``argument``. In that
+    case, recover named birds/groups from the original message so "what did Percy
+    do today?" never widens to all birds.
+    """
+    bird_text, _ = parse_activity_arg(argument)
+    targets = expand_targets(bird_text, known_labels) if bird_text.strip() else []
+    if not targets:
+        text_targets = expand_targets(text, known_labels)
+        if text_targets:
+            words = _tokens(text)
+            # "birds/everyone/any" intentionally means all birds, so keep the
+            # display generic. Otherwise use the explicit bird/group tokens from
+            # the message; don't pass the whole question through to captions.
+            if not (words & ALL_BIRD_WORDS):
+                known = {label.lower() for label in known_labels}
+                groups = set(DEFAULT_SPECIES_MEMBERS)
+                named = [
+                    word for word in re.findall(r"[a-z]+", text.lower())
+                    if word in known and word != "unknown_bird"
+                ]
+                if not named:
+                    named = [word for word in words if word in groups]
+                bird_text = bird_text or " ".join(named)
+            targets = text_targets
+    return bird_text, (targets if targets else None)
+
+
+def _photo_caption(bird_text: str, window_phrase: str, count: int) -> str:
+    who = pretty_phrase(bird_text) if bird_text.strip() else "the birds"
+    noun = "photo" if count == 1 else "photos"
+    phrase = window_phrase.removeprefix("in ")
+    return f"{count} {noun} of {who} from {phrase}."
 
 
 def parse_activity_arg(argument: str) -> tuple[str, bool]:
@@ -143,11 +204,12 @@ class ActivityResponder:
         return now - timedelta(hours=1), now, "in the last hour"
 
     def respond(self, chat_id: int, text: str, argument: str) -> None:
-        bird_text, _ = parse_activity_arg(argument)
+        known_labels = self._known_labels()
+        bird_text, targets = _resolved_bird_text(text, argument, known_labels)
         now = self._now()
         question = _is_question(text)
+        pure_photo_request = _looks_like_pure_photo_request(text)
         since, until, window_phrase = self._window(text, argument, now, question)
-        targets = expand_targets(bird_text, self._known_labels()) if bird_text.strip() else None
 
         entries = load_recent(
             self._memories_dir, since, until, set(targets) if targets else None
@@ -183,7 +245,9 @@ class ActivityResponder:
             for entry in entries
         ]
         try:
-            if question:
+            if pure_photo_request:
+                summary = ""
+            elif question:
                 summary = answer_activity_question(
                     self._client, self._llm_model, text, notes,
                     self._pronoun_note, window_phrase, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
@@ -197,7 +261,7 @@ class ActivityResponder:
         except Exception:
             LOGGER.exception("Activity response failed")
             summary = ""
-        summary = summary or notes[-1]
+        summary = summary or ("" if pure_photo_request else notes[-1])
 
         # Pick the photos that go with the answer. For a "together"/"with other
         # birds" request, prefer moments where two or more birds were seen at once
@@ -223,18 +287,23 @@ class ActivityResponder:
             if len(chosen) >= MAX_QA_PHOTOS:
                 break
 
-        # Send ONE album — photos grouped with the summary as the first caption —
-        # rather than a text plus a burst of separate photos.
+        # Send photos as an album, but keep the activity answer as text. Telegram
+        # captions are capped at 1024 chars; sending the full answer separately
+        # prevents "what did Percy do today?" from being cut off.
         if self._send_album is not None and chosen:
             items: list[tuple[bytes, str | None]] = []
-            caption = summary if len(summary) <= CAPTION_LIMIT else summary[: CAPTION_LIMIT - 1] + "…"
+            caption = _photo_caption(bird_text, window_phrase, len(chosen))
+            if len(caption) > CAPTION_LIMIT:
+                caption = caption[: CAPTION_LIMIT - 1] + "…"
             for index, photo in enumerate(reversed(chosen)):
                 try:
                     items.append((Path(photo).read_bytes(), caption if index == 0 else None))
                 except Exception:
                     LOGGER.exception("Reading activity photo failed")
             if items:
+                if summary:
+                    self._notify(chat_id, summary)
                 self._send_album(chat_id, items)
                 return
         # No photos (or no album sender) — just the text.
-        self._notify(chat_id, summary)
+        self._notify(chat_id, summary or f"I found activity for {pretty_phrase(bird_text) if bird_text.strip() else 'the birds'} {window_phrase}, but no saved photos to show.")

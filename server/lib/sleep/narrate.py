@@ -205,7 +205,7 @@ def llm_summary(client, model: str, night: SleepNight, *, care_context: str = ""
             f"score {night.score}/100, {_disturbance_line(night)}"
         )
         system = (
-            "You are the warm caretaker of a home aviary. In ONE or two friendly sentences, "
+            "You are the warm caretaker of a home aviary. In ONE short sentence under 30 words, "
             "tell the owner how the flock slept from these facts. Don't invent anything. "
             + care_context
         )

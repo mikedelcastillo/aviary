@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from lib.ai.chat import (
     CHAT_FALLBACK,
+    CHAT_SYSTEM_PROMPT,
     build_chat_messages,
     chat_reply,
     clean_reply,
@@ -34,6 +35,13 @@ def test_build_chat_messages_orders_system_history_then_user() -> None:
 def test_build_chat_messages_appends_context_to_system() -> None:
     messages = build_chat_messages("hi", context="Recently seen: Percy on the perch.")
     assert "Recently seen: Percy on the perch." in messages[0]["content"]
+
+
+def test_chat_prompt_keeps_replies_short() -> None:
+    prompt = CHAT_SYSTEM_PROMPT.lower()
+    assert "one sentence" in prompt
+    assert "under 35 words" in prompt
+    assert "at most 3 compact bullets" in prompt
 
 
 # -- markdown tables: Telegram sends plain text, so a GFM pipe table renders as
@@ -121,6 +129,11 @@ def test_clean_reply_strips_thinking_and_flattens_tables() -> None:
     out = clean_reply("<think>x</think>| A | B |\n|---|---|\n| 1 | 2 |")
     assert "think" not in out and "|" not in out
     assert "A: 1, B: 2" in out
+
+
+def test_clean_reply_uses_boxed_final_answer_only() -> None:
+    out = clean_reply("The user likely asks where Percy was. Therefore: \\boxed{near the curtains}")
+    assert out == "near the curtains"
 
 
 class _ScriptedClient:

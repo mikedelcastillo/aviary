@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 
 from lib.activity import (
+    _ACTIVITY_QA_PROMPT,
+    _ACTIVITY_SUMMARY_PROMPT,
     load_sightings,
     select_highlights,
     summarise_counts,
@@ -63,3 +65,12 @@ def test_summarise_counts(tmp_path) -> None:
     counts = summarise_counts(load_sightings(tmp_path, 0))
     assert counts.startswith("Percy ×2")
     assert "Matcha ×1" in counts
+
+
+def test_activity_prompts_keep_answers_short() -> None:
+    summary = _ACTIVITY_SUMMARY_PROMPT.lower()
+    qa = _ACTIVITY_QA_PROMPT.lower()
+    assert "up to 5 bullets" in summary
+    assert "under 18 words" in summary
+    assert "1-2 short sentences" in qa
+    assert "max 45 words" in qa

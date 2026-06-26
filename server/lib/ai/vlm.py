@@ -21,11 +21,11 @@ from lib.labels import pretty
 MAX_VLM_DIM = 1024
 
 
-# One/two-sentence "what's happening" used by /find and the stream narrator.
+# One-sentence "what's happening" used by /find and the stream narrator.
 SCENE_PROMPT = (
-    "This is a frame from a pet-bird camera. In ONE or two short sentences, say "
+    "This is a frame from a pet-bird camera. In ONE short sentence under 25 words, say "
     "what the bird or birds are doing, and whether multiple birds are together. "
-    "Be concrete and brief. If no bird is clearly visible, just say so."
+    "Be concrete. If no bird is clearly visible, just say so."
 )
 
 # A short, unique label for a camera's view (replaces the IP-based name).

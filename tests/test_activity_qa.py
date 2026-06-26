@@ -19,6 +19,11 @@ class FakeClient:
         return "Percy preened on the perch while Matcha napped nearby."
 
 
+class BoomClient:
+    def chat(self, model, messages, **kwargs):
+        raise AssertionError("pure photo requests should not call the LLM")
+
+
 def _responder(memories_dir, notify, find=None, send_album=None, now=None, client=None, care_answer=None):
     # Fix "now" so the window is deterministic.
     when = now or datetime(2026, 6, 25, 15, 0)
@@ -47,15 +52,46 @@ def test_respond_summarises_recent_memory(tmp_path) -> None:
     photo = tmp_path / "p.jpg"
     photo.write_bytes(b"\xff\xd8jpeg")
     append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy", "matcha"], "Percy preens.", [str(photo)]))
+    sent: list = []
     albums: list = []
-    _responder(tmp_path, lambda c, t: None, send_album=lambda c, items: albums.append(items)).respond(
+    _responder(tmp_path, lambda c, t: sent.append(t), send_album=lambda c, items: albums.append(items)).respond(
         7, "/activity percy", "percy"
     )
-    # One album sent, summary is the first item's caption, photo included.
+    # Full summary is sent as text, and the album caption stays short so it
+    # cannot truncate the activity answer at Telegram's caption limit.
+    assert sent and "preened" in sent[0]
     assert len(albums) == 1
     items = albums[0]
     assert len(items) == 1
-    assert "preened" in items[0][1]
+    assert items[0][1] == "1 photo of Percy from the last hour."
+
+
+def test_respond_recovers_bird_from_text_when_router_argument_empty(tmp_path) -> None:
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 8, 0), ["bambi"], "Bambi ate early."))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 0), ["percy"], "Percy napped on the perch."))
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "what did percy do today?", ""
+    )
+    assert "Percy napped" in client.user
+    assert "Bambi ate" not in client.user
+
+
+def test_pure_photo_request_sends_photos_without_llm_reasoning(tmp_path) -> None:
+    photo = tmp_path / "percy.jpg"
+    photo.write_bytes(b"percy-bytes")
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 0), ["percy"], "Percy napped on the perch.", [str(photo)]))
+    sent: list = []
+    albums: list = []
+    _responder(
+        tmp_path,
+        lambda c, t: sent.append(t),
+        send_album=lambda c, items: albums.append(items),
+        client=BoomClient(),
+    ).respond(7, "show me picture of percy", "")
+    assert sent == []
+    assert len(albums) == 1
+    assert albums[0][0] == (b"percy-bytes", "1 photo of Percy from today.")
 
 
 def test_respond_today_window(tmp_path) -> None:
