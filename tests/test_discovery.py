@@ -18,12 +18,14 @@ import hashlib
 import re
 import socket
 import threading
+import time
 
 from lib.config import CameraCredentials, DiscoveryConfig
 from lib.discovery import (
     HOST_FAILED,
     HOST_FOUND,
     DiscoveryProgress,
+    _ProbeOutcome,
     build_rtsp_url,
     discover_cameras,
     redact_rtsp_url,
@@ -353,6 +355,35 @@ def test_discover_retries_transient_rtsp_drop() -> None:
     assert len(result.cameras) == 1
     assert result.ports_open == 1
     assert server.connections == 2
+
+
+def test_discover_limits_concurrent_rtsp_probes(monkeypatch) -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_probe(host, discovery, credentials):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return _ProbeOutcome.PORT_CLOSED
+
+    monkeypatch.setattr("lib.discovery._probe_rtsp", fake_probe)
+    config = DiscoveryConfig(
+        hosts=tuple(f"10.0.0.{index}" for index in range(1, 13)),
+        max_workers=3,
+        connect_timeout_seconds=0.01,
+        rtsp_timeout_seconds=0.01,
+    )
+
+    result = discover_cameras(config, _credentials())
+
+    assert result.hosts_scanned == 12
+    assert max_active <= 3
 
 
 def test_discover_counts_auth_failure() -> None:

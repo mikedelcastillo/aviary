@@ -451,12 +451,13 @@ def discover_cameras(
     hosts = _target_hosts(discovery)
     if hosts:
         LOGGER.info(
-            "Discovery: probing :%d%s across %d host(s) (%s ... %s)",
+            "Discovery: probing :%d%s across %d host(s) (%s ... %s), max %d at a time",
             discovery.rtsp_port,
             discovery.stream_path,
             len(hosts),
             hosts[0],
             hosts[-1],
+            discovery.max_workers,
         )
     else:
         LOGGER.info("Discovery: no hosts in scope to scan")
