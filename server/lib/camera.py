@@ -13,6 +13,7 @@ from lib.alerts import AlertDispatcher, AlertState
 from lib.config import CameraConfig
 from lib.control import RuntimeControl
 from lib.detector import ObjectDetector
+from lib.detection_log import DetectionLogger
 from lib.discovery import redact_rtsp_url
 from lib.imaging import is_ir_array
 from lib.ir import IRState
@@ -100,6 +101,7 @@ def monitor_camera(
     control: RuntimeControl | None = None,
     ir_state: IRState | None = None,
     quality: StreamQualityController | None = None,
+    detection_logger: DetectionLogger | None = None,
 ) -> None:
     # Log the exact URL (password masked) so a camera stuck on "connecting" can
     # be diagnosed: if this line appears but "Stream opened" never follows, the
@@ -227,6 +229,16 @@ def monitor_camera(
                     detections,
                     frame_size,
                 )
+                if detection_logger is not None and detections:
+                    try:
+                        detection_logger.record(
+                            camera_name=camera.name,
+                            detections=detections,
+                            frame_size=frame_size,
+                            sample_interval_seconds=min_frame_interval,
+                        )
+                    except Exception:
+                        LOGGER.exception("Detection log write failed for %s", camera.name)
                 if detections:
                     # Eligibility check is cheap (a lock + dict lookup); the
                     # slow snapshot + Telegram work is handed to the dispatcher

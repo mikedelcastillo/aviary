@@ -77,6 +77,15 @@ Authenticated users can send `/restart` to gracefully stop camera workers,
 release streams, and replace the current Python process with the same executable
 and arguments. This is a real process restart, not only a rediscovery sweep.
 
+### `/detections` Telegram command
+
+Every positive inference updates a daily JSON file under
+`data/server/detection/YYYY-MM-DD.json`. The log stores merged visibility
+intervals per camera and bird label, plus observation counts and max confidence,
+so it stays compact while still answering "how long was this bird detected
+today?" Send `/detections` for today's totals, `/detections percy` for one bird,
+or `/detections percy 2026-06-27` for a specific UTC day.
+
 ### `/quality` Telegram command
 
 `/quality stream1`, `/quality stream2`, and `/quality auto` control which Tapo

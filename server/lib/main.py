@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 
 import cv2
@@ -42,6 +42,7 @@ from lib.control import RuntimeControl, parse_duration
 from lib.memory_maker import MemoryMaker
 from lib.dashboard import Dashboard, STALE_FRAME_SECONDS
 from lib.detector import ObjectDetector
+from lib.detection_log import DetectionLogger
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder, currently_visible, format_visible
@@ -110,6 +111,7 @@ def start_command_thread(
     status_provider: Callable[[], str] | None = None,
     discover_provider: Callable[[], str] | None = None,
     restart_provider: Callable[[], str] | None = None,
+    detection_provider: Callable[[str], str] | None = None,
     home_provider: Callable[[], str] | None = None,
     quality_provider: Callable[[str], str] | None = None,
     autofind_provider: Callable[[str], str] | None = None,
@@ -130,6 +132,7 @@ def start_command_thread(
         kwargs={
             "discover_provider": discover_provider,
             "restart_provider": restart_provider,
+            "detection_provider": detection_provider,
             "home_provider": home_provider,
             "quality_provider": quality_provider,
             "autofind_provider": autofind_provider,
@@ -296,6 +299,17 @@ def home_report(ptz_manager, hosts) -> str:
     return message
 
 
+def _duration_text(seconds: float) -> str:
+    total = int(round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 def ready_camera_hosts(
     stats: dict[str, CameraStats],
     stats_lock: threading.Lock,
@@ -389,6 +403,7 @@ def make_console_dispatcher(
     status_provider,
     discover_provider,
     restart_provider,
+    detection_provider,
     home_provider,
     quality_provider,
     snapshot_text,
@@ -450,6 +465,7 @@ def make_console_dispatcher(
         find_provider=console_find,
         discover_provider=discover_provider,
         restart_provider=restart_provider,
+        detection_provider=detection_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_text,
         home_provider=home_provider,
@@ -471,6 +487,8 @@ def make_console_dispatcher(
         emit=emit,
         status_text=status_provider,
         discover_text=discover_provider,
+        restart_text=restart_provider,
+        detection_text=detection_provider,
         snapshot_text=snapshot_text,
         pause=control.pause,
         resume=control.resume,
@@ -583,6 +601,7 @@ def main() -> None:
         port=app_config.discovery.rtsp_port,
         mode="stream1",
     )
+    detection_logger = DetectionLogger(app_config.collect.directory.parent / "detection")
 
     # Delivery runs off the capture threads. The prepare stage is light (collect
     # + snapshot write), and the single Telegram worker is unaffected by this
@@ -604,6 +623,7 @@ def main() -> None:
         control=control,
         ir_state=ir_state,
         quality=quality_controller,
+        detection_logger=detection_logger,
     )
 
     # /userinfo stays available, /status exposes the runtime data, and /discover
@@ -831,6 +851,33 @@ def main() -> None:
         if not arg:
             return quality_controller.status()
         return quality_controller.set_mode(arg)
+
+    def detection_provider(argument: str) -> str:
+        tokens = [token.strip() for token in argument.split() if token.strip()]
+        day = datetime.now(timezone.utc)
+        label_parts: list[str] = []
+        for token in tokens:
+            try:
+                day = datetime.fromisoformat(token).replace(tzinfo=timezone.utc)
+            except ValueError:
+                label_parts.append(token)
+        label = " ".join(label_parts).strip().lower() or None
+        rows = detection_logger.activity_for_day(day, label=label)
+        day_text = day.date().isoformat()
+        if not rows:
+            target = f" for {label}" if label else ""
+            return f"No detection activity logged{target} on {day_text} UTC."
+        total = sum(row.total_seconds for row in rows)
+        lines = [f"Detection activity on {day_text} UTC — total {_duration_text(total)}:"]
+        for row in rows[:30]:
+            lines.append(
+                f"  • {row.label} · {namer.display(row.camera)} — "
+                f"{_duration_text(row.total_seconds)} ({row.observations} observations)"
+            )
+        if len(rows) > 30:
+            lines.append(f"  • +{len(rows) - 30} more")
+        lines.append(f"Saved in {app_config.collect.directory.parent / 'detection' / (day_text + '.json')}")
+        return "\n".join(lines)
 
     def restart_provider() -> str:
         def request_restart() -> None:
@@ -1063,6 +1110,7 @@ def main() -> None:
         status_provider=status_provider,
         discover_provider=discover_provider,
         restart_provider=restart_provider,
+        detection_provider=detection_provider,
         home_provider=home_provider,
         quality_provider=quality_provider,
         autofind_provider=autofind_provider if auto_finder is not None else None,
@@ -1258,6 +1306,7 @@ def main() -> None:
                 status_provider=status_provider,
                 discover_provider=discover_provider,
                 restart_provider=restart_provider,
+                detection_provider=detection_provider,
                 home_provider=home_provider,
                 quality_provider=quality_provider,
                 snapshot_text=snapshot_text,

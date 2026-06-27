@@ -100,6 +100,7 @@ Run from the repo root so the scripts' default relative paths resolve.
 
    Bot commands include `/status` (runtime health), `/discover` (re-scan the
    LAN), `/restart` (re-exec the server process),
+   `/detections [bird] [YYYY-MM-DD]` (daily detection activity totals),
    `/quality stream1|stream2|auto` (RTSP quality selection), and
    `/snapshot` — grabs every camera's latest live frame, replies with them as a
    photo album, and saves them to `data/server/collect/snapshots/`. Those saved

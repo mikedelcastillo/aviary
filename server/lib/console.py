@@ -36,6 +36,7 @@ HELP_TEXT = (
     "  /activity [bird] [today]   activity summary (e.g. /activity percy today)\n"
     "  /status            camera + detection status boxes\n"
     "  /find <bird>       e.g. /find percy, /find the cockatiels, /find stop\n"
+    "  /detections [bird] [date] daily detection totals\n"
     "  /stop [time]       privacy mode (/stop 10m); /start to resume\n"
     "  /restart          restart the server process\n"
     "  /discover          rescan the network for cameras\n"
@@ -90,6 +91,7 @@ class ConsoleDispatcher:
         status_text: Callable[[], str],
         discover_text: Callable[[], str],
         restart_text: Callable[[], str] | None,
+        detection_text: Callable[[str], str] | None,
         snapshot_text: Callable[[int], str],
         pause: Callable[[float | None], str],
         resume: Callable[[], str],
@@ -106,6 +108,7 @@ class ConsoleDispatcher:
         self._status_text = status_text
         self._discover_text = discover_text
         self._restart_text = restart_text
+        self._detection_text = detection_text
         self._snapshot_text = snapshot_text
         self._pause = pause
         self._resume = resume
@@ -151,6 +154,12 @@ class ConsoleDispatcher:
             self._emit(self._resume())
         elif command == "/find":
             self._emit(self._find(CONSOLE_CHAT_ID, argument))
+        elif command == "/detections":
+            self._emit(
+                self._detection_text(argument)
+                if self._detection_text is not None
+                else "Detection stats are unavailable."
+            )
         elif command == "/discover":
             self._emit("Scanning the local network for cameras…")
             self._emit(self._discover_text())

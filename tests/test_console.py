@@ -9,6 +9,7 @@ def _dispatcher(emitted, calls, on_quit=lambda: None):
         status_text=lambda: "STATUS BOXES",
         discover_text=lambda: "discovered 2",
         restart_text=lambda: "restarting",
+        detection_text=lambda arg: f"detections:{arg}",
         snapshot_text=lambda cid: f"snapshot[{cid}]",
         pause=lambda secs: f"paused {secs}",
         resume=lambda: "resumed",
@@ -44,6 +45,10 @@ def test_slash_commands_route_to_providers() -> None:
     emitted.clear()
     _dispatcher(emitted, []).handle("/restart")
     assert emitted == ["restarting"]
+
+    emitted.clear()
+    _dispatcher(emitted, []).handle("/detections percy")
+    assert emitted == ["detections:percy"]
 
 
 def test_plain_language_goes_to_nl_router() -> None:

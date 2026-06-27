@@ -33,6 +33,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/sleep": "How the birds slept — sleep score + summary (e.g. /sleep, /sleep week)",
     "/care": "Bird-care guide (e.g. /care, /care diet, /care toxic, /care cockatiel)",
+    "/detections": "Daily detection stats (/detections [bird] [YYYY-MM-DD])",
     "/restart": "Restart the Aviary server process",
     "/discover": "Scan the local network for cameras",
     "/home": "Aim the pan-tilt cameras at their saved viewpoint",
@@ -244,6 +245,7 @@ def run_command_bot(
     poll_timeout_seconds: int = 30,
     discover_provider: Callable[[], str] | None = None,
     restart_provider: Callable[[], str] | None = None,
+    detection_provider: Callable[[str], str] | None = None,
     home_provider: Callable[[], str] | None = None,
     quality_provider: Callable[[str], str] | None = None,
     autofind_provider: Callable[[str], str] | None = None,
@@ -271,6 +273,7 @@ def run_command_bot(
             ("/activity", activity_provider is not None),
             ("/sleep", sleep_provider is not None),
             ("/care", care_provider is not None),
+            ("/detections", detection_provider is not None),
             ("/restart", restart_provider is not None),
             ("/discover", discover_provider is not None),
             ("/home", home_provider is not None),
@@ -425,6 +428,18 @@ def run_command_bot(
                             LOGGER.exception("Restart request failed")
                             send(chat_id, f"Restart failed: {exc}")
                     LOGGER.info("Handled /restart for user %s", user_id)
+                    continue
+
+                if command == "/detections":
+                    if str(user_id) not in allowed or detection_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, detection_provider(command_argument(text_in)))
+                        except Exception as exc:
+                            LOGGER.exception("Detection stats failed")
+                            send(chat_id, f"Detection stats failed: {exc}")
+                    LOGGER.info("Handled /detections for user %s", user_id)
                     continue
 
                 if command == "/home":

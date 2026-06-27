@@ -297,6 +297,53 @@ def test_restart_command_calls_provider_for_allowed_user(monkeypatch) -> None:
     assert sent_messages == ["Restarting Aviary server..."]
 
 
+def test_detections_command_passes_argument_to_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_args: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/detections percy 2026-06-27",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def detection_provider(argument: str) -> str:
+        seen_args.append(argument)
+        return "Percy — 1h"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        detection_provider=detection_provider,
+    )
+
+    assert seen_args == ["percy 2026-06-27"]
+    assert sent_messages == ["Percy — 1h"]
+
+
 def test_home_command_calls_provider_for_allowed_user(monkeypatch) -> None:
     stop_event = threading.Event()
     sent_messages: list[str] = []
