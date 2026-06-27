@@ -250,6 +250,53 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
     ]
 
 
+def test_restart_command_calls_provider_for_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    calls: list[bool] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/restart",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def restart_provider() -> str:
+        calls.append(True)
+        return "Restarting Aviary server..."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        restart_provider=restart_provider,
+    )
+
+    assert calls == [True]
+    assert sent_messages == ["Restarting Aviary server..."]
+
+
 def test_home_command_calls_provider_for_allowed_user(monkeypatch) -> None:
     stop_event = threading.Event()
     sent_messages: list[str] = []
@@ -295,6 +342,53 @@ def test_home_command_calls_provider_for_allowed_user(monkeypatch) -> None:
 
     assert calls == [True]
     assert sent_messages == ["🏠 Sent 2/2 pan-tilt camera(s) to their saved viewpoint."]
+
+
+def test_quality_command_passes_argument_to_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_args: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/quality stream2",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def quality_provider(argument: str) -> str:
+        seen_args.append(argument)
+        return "Quality mode: stream2."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        quality_provider=quality_provider,
+    )
+
+    assert seen_args == ["stream2"]
+    assert sent_messages == ["Quality mode: stream2."]
 
 
 def test_snapshot_command_requires_allowed_user(monkeypatch) -> None:

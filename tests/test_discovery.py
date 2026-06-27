@@ -89,6 +89,8 @@ class _FakeRtspServer:
         self._sock.listen(8)
         self.port = self._sock.getsockname()[1]
         self._stop = False
+        self._lock = threading.Lock()
+        self._connections = 0
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self._thread.start()
 
@@ -98,12 +100,19 @@ class _FakeRtspServer:
                 conn, _ = self._sock.accept()
             except OSError:
                 return
+            with self._lock:
+                self._connections += 1
             try:
                 self._responder(conn)
             except OSError:
                 pass
             finally:
                 conn.close()
+
+    @property
+    def connections(self) -> int:
+        with self._lock:
+            return self._connections
 
     def close(self) -> None:
         self._stop = True
@@ -264,6 +273,22 @@ def _unknown_status_responder(conn: socket.socket) -> None:
     _send(conn, "RTSP/1.0 503 Service Unavailable", [f"CSeq: {_cseq(request)}"])
 
 
+def _drop_once_then_digest_responder():
+    attempts = 0
+    lock = threading.Lock()
+
+    def responder(conn: socket.socket) -> None:
+        nonlocal attempts
+        with lock:
+            attempts += 1
+            should_drop = attempts == 1
+        if should_drop:
+            return
+        _digest_good_responder(conn)
+
+    return responder
+
+
 def _config_for(port: int) -> DiscoveryConfig:
     return DiscoveryConfig(
         hosts=("127.0.0.1",),
@@ -296,6 +321,38 @@ def test_discover_confirms_camera_with_valid_digest() -> None:
     assert result.hosts_scanned == 1
     assert result.ports_open == 1
     assert result.auth_failures == 0
+
+
+def test_discover_uses_one_rtsp_connection_per_successful_host() -> None:
+    server = _FakeRtspServer(_digest_good_responder)
+    try:
+        result = discover_cameras(_config_for(server.port), _credentials())
+    finally:
+        server.close()
+
+    assert len(result.cameras) == 1
+    assert server.connections == 1
+
+
+def test_discover_retries_transient_rtsp_drop() -> None:
+    server = _FakeRtspServer(_drop_once_then_digest_responder())
+    config = DiscoveryConfig(
+        hosts=("127.0.0.1",),
+        rtsp_port=server.port,
+        stream_path=STREAM_PATH,
+        connect_timeout_seconds=2.0,
+        rtsp_timeout_seconds=2.0,
+        probe_attempts=2,
+        probe_retry_delay_seconds=0.0,
+    )
+    try:
+        result = discover_cameras(config, _credentials())
+    finally:
+        server.close()
+
+    assert len(result.cameras) == 1
+    assert result.ports_open == 1
+    assert server.connections == 2
 
 
 def test_discover_counts_auth_failure() -> None:
@@ -368,10 +425,9 @@ def test_discover_logs_progress_per_host(caplog) -> None:
         server.close()
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    # The scope, the per-host RTSP test, the confirmation, and the summary all
-    # appear so the operator can see exactly what was probed and what worked.
+    # The scope, the confirmation, and the summary appear at INFO level without
+    # logging every dead address in a full /24 sweep.
     assert "probing :" in messages
-    assert "testing 127.0.0.1:" in messages
     assert "127.0.0.1 CONFIRMED" in messages
     assert "1 confirmed" in messages
 

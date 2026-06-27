@@ -132,9 +132,13 @@ class DiscoveryConfig:
     # Per-host TCP probe of :554. Kept short because most addresses are dead and
     # we don't want the sweep to stall on each unanswered SYN.
     connect_timeout_seconds: float = 0.5
-    # Per-host RTSP DESCRIBE handshake. Generous relative to the TCP probe since
-    # only the (few) hosts with :554 open reach this stage.
+    # Per-host RTSP DESCRIBE read/auth timeout after the TCP connection opens.
     rtsp_timeout_seconds: float = 3.0
+    # Discovery is best-effort against tiny WiFi devices that may briefly reject
+    # or stall an RTSP socket while existing streams are active. Retry transient
+    # connect/protocol failures a few times before declaring the host absent.
+    probe_attempts: int = 3
+    probe_retry_delay_seconds: float = 0.15
 
 
 @dataclass(frozen=True)

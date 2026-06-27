@@ -23,7 +23,7 @@ LOGGER = logging.getLogger("lib.ai.intent")
 # Every action the router can emit. "chat" is the catch-all for questions and
 # conversation, routed to the memory/VLM layer rather than a command.
 ACTIONS = (
-    "pause", "resume", "find", "stop_find", "discover", "home", "autofind",
+    "pause", "resume", "find", "stop_find", "discover", "restart", "home", "quality", "autofind",
     "status", "snapshot", "activity", "sleep", "care", "chat",
 )
 
@@ -61,9 +61,13 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '"never mind". argument = "". (But "look for X instead" is a NEW find, not stop_find.)\n'
         '- "discover": rescan / reload / refresh / find the cameras on the network — '
         '"discover cameras", "reload cams", "rescan", "look for new cameras". argument = "".\n'
+        '- "restart": restart the Aviary Python server process — "restart the server", '
+        '"reboot aviary", "restart aviary". argument = "".\n'
         '- "home": aim/point/reset the pan-tilt cameras to their saved home viewpoint — '
         '"home the cameras", "reset the cameras", "point the cams home", "face the cameras '
         'back". argument = "".\n'
+        '- "quality": set RTSP stream quality — "use stream1", "switch cameras to stream2", '
+        '"set quality auto", "use automatic quality". argument = "stream1", "stream2", or "auto".\n'
         '- "autofind": turn the automatic missing-bird search on or off — "enable autofind", '
         '"turn on auto find", "disable autofind", "stop auto searching". argument = "enable" '
         'or "disable" (or "" to report its state).\n'

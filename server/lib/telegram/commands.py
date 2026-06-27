@@ -33,8 +33,10 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/sleep": "How the birds slept — sleep score + summary (e.g. /sleep, /sleep week)",
     "/care": "Bird-care guide (e.g. /care, /care diet, /care toxic, /care cockatiel)",
+    "/restart": "Restart the Aviary server process",
     "/discover": "Scan the local network for cameras",
     "/home": "Aim the pan-tilt cameras at their saved viewpoint",
+    "/quality": "Choose RTSP stream quality (/quality stream1 | stream2 | auto)",
     "/autofind": "Auto-search for missing birds (/autofind enable | disable)",
     "/stop": "Privacy mode: stop the cameras (optional duration, e.g. /stop 10m)",
     "/start": "Resume the cameras after a pause",
@@ -241,7 +243,9 @@ def run_command_bot(
     stop_event: Event | None = None,
     poll_timeout_seconds: int = 30,
     discover_provider: Callable[[], str] | None = None,
+    restart_provider: Callable[[], str] | None = None,
     home_provider: Callable[[], str] | None = None,
+    quality_provider: Callable[[str], str] | None = None,
     autofind_provider: Callable[[str], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
@@ -267,8 +271,10 @@ def run_command_bot(
             ("/activity", activity_provider is not None),
             ("/sleep", sleep_provider is not None),
             ("/care", care_provider is not None),
+            ("/restart", restart_provider is not None),
             ("/discover", discover_provider is not None),
             ("/home", home_provider is not None),
+            ("/quality", quality_provider is not None),
             ("/autofind", autofind_provider is not None),
             ("/stop", pause_provider is not None),
             ("/start", resume_provider is not None),
@@ -409,6 +415,18 @@ def run_command_bot(
                     LOGGER.info("Handled /discover for user %s", user_id)
                     continue
 
+                if command == "/restart":
+                    if str(user_id) not in allowed or restart_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, restart_provider())
+                        except Exception as exc:
+                            LOGGER.exception("Restart request failed")
+                            send(chat_id, f"Restart failed: {exc}")
+                    LOGGER.info("Handled /restart for user %s", user_id)
+                    continue
+
                 if command == "/home":
                     if str(user_id) not in allowed or home_provider is None:
                         send(chat_id, "Unauthorized.")
@@ -431,6 +449,18 @@ def run_command_bot(
                             LOGGER.exception("Autofind toggle failed")
                             send(chat_id, f"Auto-find failed: {exc}")
                     LOGGER.info("Handled /autofind for user %s", user_id)
+                    continue
+
+                if command == "/quality":
+                    if str(user_id) not in allowed or quality_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, quality_provider(command_argument(text_in)))
+                        except Exception as exc:
+                            LOGGER.exception("Quality change failed")
+                            send(chat_id, f"Quality change failed: {exc}")
+                    LOGGER.info("Handled /quality for user %s", user_id)
                     continue
 
                 if command == "/snapshot":

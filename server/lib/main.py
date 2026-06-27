@@ -7,7 +7,9 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import threading
+import time
 from datetime import timedelta
 from collections.abc import Callable
 
@@ -47,6 +49,7 @@ from lib.imaging import downscale_array_to_jpeg
 from lib.ir import IRState
 from lib.labels import pretty_labels
 from lib.ptz import PtzManager
+from lib.quality import StreamQualityController
 from lib.objects import ObjectRegistry
 from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_sentence
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
@@ -70,6 +73,8 @@ VLM_DESCRIBE_TIMEOUT_SECONDS = 150.0
 # Silent background re-discovery cadence, so cameras that come online later get
 # picked up without a manual /discover.
 AUTO_DISCOVER_SECONDS = 30 * 60.0
+CAMERA_ACTION_WAIT_SECONDS = 75.0
+CAMERA_ACTION_POLL_SECONDS = 1.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,7 +109,9 @@ def start_command_thread(
     stop_event: threading.Event,
     status_provider: Callable[[], str] | None = None,
     discover_provider: Callable[[], str] | None = None,
+    restart_provider: Callable[[], str] | None = None,
     home_provider: Callable[[], str] | None = None,
+    quality_provider: Callable[[str], str] | None = None,
     autofind_provider: Callable[[str], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
@@ -122,7 +129,9 @@ def start_command_thread(
         args=(bot_token, user_ids, status_provider, stop_event),
         kwargs={
             "discover_provider": discover_provider,
+            "restart_provider": restart_provider,
             "home_provider": home_provider,
+            "quality_provider": quality_provider,
             "autofind_provider": autofind_provider,
             "snapshot_provider": snapshot_provider,
             "pause_provider": pause_provider,
@@ -153,7 +162,9 @@ def build_nl_router(
     discover_provider,
     status_provider,
     snapshot_provider,
+    restart_provider=None,
     home_provider=None,
+    quality_provider=None,
     autofind_provider=None,
     activity_responder=None,
     memory=None,
@@ -231,8 +242,12 @@ def build_nl_router(
         elif action == "discover":
             notifier.send_text(chat_id, "Scanning the local network for cameras...")
             notifier.send_text(chat_id, discover_provider())
+        elif action == "restart" and restart_provider is not None:
+            notifier.send_text(chat_id, restart_provider())
         elif action == "home" and home_provider is not None:
             notifier.send_text(chat_id, home_provider())
+        elif action == "quality" and quality_provider is not None:
+            notifier.send_text(chat_id, quality_provider(intent.argument))
         elif action == "autofind" and autofind_provider is not None:
             notifier.send_text(chat_id, autofind_provider(intent.argument))
         elif action == "status":
@@ -281,6 +296,80 @@ def home_report(ptz_manager, hosts) -> str:
     return message
 
 
+def ready_camera_hosts(
+    stats: dict[str, CameraStats],
+    stats_lock: threading.Lock,
+    *,
+    max_frame_age: float = STALE_FRAME_SECONDS,
+) -> set[str]:
+    """Hosts whose capture loop is connected and publishing fresh frames."""
+    with stats_lock:
+        snapshots = [camera.snapshot() for camera in stats.values()]
+    ready: set[str] = set()
+    for snap in snapshots:
+        since_frame = snap["since_frame"]
+        if (
+            snap["status"] == "connected"
+            and since_frame is not None
+            and since_frame <= max_frame_age
+        ):
+            ready.add(str(snap["name"]).removeprefix("camera-"))
+    return ready
+
+
+def wait_for_camera_action_window(
+    *,
+    discovery_progress: DiscoveryProgress,
+    stats: dict[str, CameraStats],
+    stats_lock: threading.Lock,
+    stop_event: threading.Event,
+    cancel_event: threading.Event | None = None,
+    timeout_seconds: float = CAMERA_ACTION_WAIT_SECONDS,
+    poll_seconds: float = CAMERA_ACTION_POLL_SECONDS,
+) -> tuple[bool, str, set[str]]:
+    """Wait until discovery is idle and at least one camera stream is fresh.
+
+    PTZ requests are much more reliable once the camera has completed its RTSP
+    reconnect and the app has seen a frame. The returned host set is the ready
+    subset, so commands do not move cameras still marked connecting/reconnecting.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    saw_discovery = discovery_progress.is_active()
+    saw_cameras_not_ready = False
+
+    while not stop_event.is_set() and not (cancel_event and cancel_event.is_set()):
+        discovering = discovery_progress.is_active()
+        if discovering:
+            saw_discovery = True
+        active = ready_camera_hosts(stats, stats_lock)
+        all_hosts = set()
+        with stats_lock:
+            all_hosts = {
+                str(camera.name).removeprefix("camera-") for camera in stats.values()
+            }
+        if not discovering and not all_hosts:
+            return True, "", set()
+        if not discovering and active:
+            message = ""
+            if saw_discovery:
+                message = "Discovery finished; camera streams are live. Continuing."
+            elif saw_cameras_not_ready:
+                message = "Camera streams recovered. Continuing."
+            return True, message, active
+        if all_hosts and not active:
+            saw_cameras_not_ready = True
+        if time.monotonic() >= deadline:
+            reason = (
+                "Timed out waiting for discovery to finish."
+                if discovering
+                else "Timed out waiting for a live camera stream."
+            )
+            return False, reason, active
+        time.sleep(poll_seconds)
+
+    return False, "Cancelled before cameras were ready.", set()
+
+
 def make_console_dispatcher(
     app_config: AppConfig,
     *,
@@ -299,6 +388,9 @@ def make_console_dispatcher(
     supervisor: CameraSupervisor,
     status_provider,
     discover_provider,
+    restart_provider,
+    home_provider,
+    quality_provider,
     snapshot_text,
     stop_event: threading.Event,
 ) -> ConsoleDispatcher:
@@ -357,9 +449,11 @@ def make_console_dispatcher(
         ollama_client,
         find_provider=console_find,
         discover_provider=discover_provider,
+        restart_provider=restart_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_text,
-        home_provider=lambda: home_report(ptz_manager, supervisor.active_hosts()),
+        home_provider=home_provider,
+        quality_provider=quality_provider,
         activity_responder=activity_responder,
         memory=ConversationMemory() if ollama_client is not None else None,
         # The console has no live-state plumbing here, but care knowledge still
@@ -388,7 +482,8 @@ def make_console_dispatcher(
             if activity_responder is not None
             else None
         ),
-        home_text=lambda: home_report(ptz_manager, supervisor.active_hosts()),
+        home_text=home_provider,
+        quality_text=quality_provider,
         toggle_logs=ConsoleLogToggle().toggle,
         on_quit=stop_event.set,
     )
@@ -483,12 +578,18 @@ def main() -> None:
     # publish per-host progress into it; the dashboard reads it to render the
     # colour-coded discovery grid in place of the camera band while a scan runs.
     discovery_progress = DiscoveryProgress()
+    quality_controller = StreamQualityController(
+        app_config.credentials,
+        port=app_config.discovery.rtsp_port,
+        mode="stream1",
+    )
 
     # Delivery runs off the capture threads. The prepare stage is light (collect
     # + snapshot write), and the single Telegram worker is unaffected by this
     # pool size, so a small fixed pool is plenty regardless of how many cameras
     # discovery eventually finds — no need to scale it per camera.
     dispatcher = AlertDispatcher(app_config, notifier, stop_event, workers=4)
+    restart_requested = threading.Event()
 
     supervisor = CameraSupervisor(
         app_config,
@@ -502,6 +603,7 @@ def main() -> None:
         progress=discovery_progress,
         control=control,
         ir_state=ir_state,
+        quality=quality_controller,
     )
 
     # /userinfo stays available, /status exposes the runtime data, and /discover
@@ -618,7 +720,10 @@ def main() -> None:
             grab_frame=grab_frame,
             send_photo=notifier.send_photo,
             describe_frame=describe_frame if ollama_client is not None else None,
-            make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
+            make_patrol=lambda: ptz_manager.build_patrol(
+                ready_camera_hosts(stats, stats_lock)
+            ),
+            wait_until_ready=lambda stop, cancel: _wait_for_find_cameras(stop, cancel),
             camera_display=namer.display,
             species_members=species_members,
         )
@@ -691,8 +796,53 @@ def main() -> None:
             daemon=True,
         ).start()
 
+    def _wait_for_ready_cameras(
+        stop: threading.Event,
+        cancel: threading.Event | None = None,
+    ) -> tuple[bool, str, set[str]]:
+        return wait_for_camera_action_window(
+            discovery_progress=discovery_progress,
+            stats=stats,
+            stats_lock=stats_lock,
+            stop_event=stop,
+            cancel_event=cancel,
+        )
+
+    def _wait_for_find_cameras(
+        stop: threading.Event,
+        cancel: threading.Event,
+    ) -> tuple[bool, str]:
+        ok, message, hosts = _wait_for_ready_cameras(stop, cancel)
+        if not ok:
+            return False, f"{message} Search skipped."
+        if not hosts:
+            return False, "No camera streams are live yet; send /discover once cameras are online."
+        return True, message
+
     def home_provider() -> str:
-        return home_report(ptz_manager, supervisor.active_hosts())
+        ok, message, hosts = _wait_for_ready_cameras(stop_event)
+        if not ok:
+            return f"{message}\nNo PTZ command was sent."
+        report = home_report(ptz_manager, hosts)
+        return f"{message}\n{report}" if message else report
+
+    def quality_provider(argument: str) -> str:
+        arg = argument.strip().lower()
+        if not arg:
+            return quality_controller.status()
+        return quality_controller.set_mode(arg)
+
+    def restart_provider() -> str:
+        def request_restart() -> None:
+            # Let the command handler send its acknowledgement before the main
+            # thread starts shutting down the notifier and camera workers.
+            time.sleep(0.5)
+            LOGGER.info("Restart requested; re-execing current process")
+            restart_requested.set()
+            stop_event.set()
+
+        threading.Thread(target=request_restart, name="restart-request", daemon=True).start()
+        return "Restarting Aviary server..."
 
     # Auto-find: search for birds missing >10 min while the cameras are in
     # daylight; auto-disables when all cameras go to night/IR.
@@ -725,7 +875,12 @@ def main() -> None:
         report = format_discovery_report(supervisor.discover_and_apply())
         # Face the saved viewpoint FIRST so the cameras are aimed right and the
         # naming below describes the home view, not wherever they were left.
-        ptz_manager.go_home(supervisor.active_hosts())
+        ok, wait_message, hosts = _wait_for_ready_cameras(stop_event)
+        if ok and hosts:
+            home = home_report(ptz_manager, hosts)
+            report = f"{report}\n{wait_message}\n{home}" if wait_message else f"{report}\n{home}"
+        elif not ok:
+            report = f"{report}\n{wait_message}\nSkipped homing until cameras are responsive."
         # Re-name every camera: new ones get named, and existing pan-tilt cameras
         # that have moved since last time get a fresh, accurate name.
         trigger_camera_naming(force=True)
@@ -888,9 +1043,11 @@ def main() -> None:
         ollama_client,
         find_provider=find_provider,
         discover_provider=discover_provider,
+        restart_provider=restart_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_provider,
         home_provider=home_provider,
+        quality_provider=quality_provider,
         autofind_provider=autofind_provider,
         activity_responder=activity_responder,
         memory=memory,
@@ -905,7 +1062,9 @@ def main() -> None:
         stop_event,
         status_provider=status_provider,
         discover_provider=discover_provider,
+        restart_provider=restart_provider,
         home_provider=home_provider,
+        quality_provider=quality_provider,
         autofind_provider=autofind_provider if auto_finder is not None else None,
         snapshot_provider=snapshot_provider,
         pause_provider=control.pause,
@@ -1098,6 +1257,9 @@ def main() -> None:
                 supervisor=supervisor,
                 status_provider=status_provider,
                 discover_provider=discover_provider,
+                restart_provider=restart_provider,
+                home_provider=home_provider,
+                quality_provider=quality_provider,
                 snapshot_text=snapshot_text,
                 stop_event=stop_event,
             )
@@ -1111,7 +1273,7 @@ def main() -> None:
         # Tell the user we're going down BEFORE the slow joins, while the
         # notifier still works. Only on a graceful stop (SIGINT/SIGTERM set
         # stop_event); a SIGKILL can't be announced. Best-effort.
-        if notifier is not None:
+        if notifier is not None and not restart_requested.is_set():
             try:
                 notifier.broadcast_text("🔴 Aviary server stopping — cameras going offline.")
             except Exception:
@@ -1122,6 +1284,8 @@ def main() -> None:
             stderr_redirect.stop()
         supervisor.join()
         dispatcher.shutdown()
+        if restart_requested.is_set():
+            os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 if __name__ == "__main__":

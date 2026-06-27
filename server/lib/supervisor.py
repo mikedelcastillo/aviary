@@ -45,6 +45,7 @@ from lib.discovery import (
     redact_rtsp_url,
 )
 from lib.objects import ObjectRegistry
+from lib.quality import StreamQualityController
 from lib.stats import CameraStats
 
 
@@ -115,6 +116,7 @@ class CameraSupervisor:
         progress: DiscoveryProgress | None = None,
         control: RuntimeControl | None = None,
         ir_state: IRState | None = None,
+        quality: StreamQualityController | None = None,
     ) -> None:
         self._app_config = app_config
         self._detector = detector
@@ -125,6 +127,7 @@ class CameraSupervisor:
         self._stats_lock = stats_lock
         self._stop_event = stop_event
         self._ir_state = ir_state
+        self._quality = quality
         # Shared privacy/pause state. Passed to every monitor thread so a pause
         # stops all cameras consuming their streams at once.
         self._control = control
@@ -155,6 +158,8 @@ class CameraSupervisor:
         with self._threads_lock:
             if host in self._threads:
                 return False
+            if self._quality is not None:
+                self._quality.register(host, camera.rtsp_url)
 
             camera_stats = CameraStats(
                 camera.name,
@@ -178,6 +183,7 @@ class CameraSupervisor:
                     self._stop_event,
                     self._control,
                     self._ir_state,
+                    self._quality,
                 ),
                 name=f"camera-{host}",
                 daemon=True,

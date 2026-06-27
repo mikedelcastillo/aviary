@@ -42,13 +42,16 @@ data/server/models/current/object_detector.pt
 Cameras are not configured by hand. On startup the server scans the local subnet
 for Tapo cameras and consumes whatever it finds:
 
-1. Sweep every host on the subnet for an open RTSP port (`:554`).
-2. For each reachable host, perform an RTSP `DESCRIBE` handshake using
-   `TAPO_CREDENTIALS` to confirm the credentials are accepted and the stream path
+1. Sweep every host on the subnet with a real RTSP `DESCRIBE` probe.
+2. Use `TAPO_CREDENTIALS` to confirm the credentials are accepted and the stream path
    (`/stream1`) exists.
 3. Build the full credentialed RTSP URL per confirmed camera and start consuming
    it. Each camera is named `camera-<host-ip>` for a stable identity across
    rediscovery.
+
+Discovery deliberately avoids a separate throwaway TCP port probe. Each host gets
+one RTSP handshake, with retries for transient drops, because small WiFi cameras
+can intermittently miss when they are poked twice while already streaming.
 
 The subnet is auto-detected from the host's primary IPv4 address (assumed `/24`),
 or taken from `TAPO_DISCOVERY_CIDR` when set. The startup scan is non-fatal: if no
@@ -67,6 +70,21 @@ starts consuming any newly found cameras and replies with a summary (hosts
 scanned, cameras added, auth failures). Cameras are de-duplicated by host, so
 rerunning `/discover` only starts streams for cameras that are not already
 active.
+
+### `/restart` Telegram command
+
+Authenticated users can send `/restart` to gracefully stop camera workers,
+release streams, and replace the current Python process with the same executable
+and arguments. This is a real process restart, not only a rediscovery sweep.
+
+### `/quality` Telegram command
+
+`/quality stream1`, `/quality stream2`, and `/quality auto` control which Tapo
+RTSP stream each camera consumes. The server starts on `stream1` by default.
+`stream1` forces the high quality stream, `stream2` forces the lower bandwidth
+stream, and `auto` starts conservatively on `stream2`, promotes stable cameras to
+`stream1`, and falls back to `stream2` when FPS drops, frames stall, or
+reconnects begin.
 
 ## Sleep tracking
 

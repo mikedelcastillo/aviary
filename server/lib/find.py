@@ -147,6 +147,7 @@ class BirdFinder:
         send_photo: "Callable[[int, bytes, str | None], object] | None" = None,
         describe_frame: "Callable[[bytes], str | None] | None" = None,
         make_patrol: "Callable[[], PtzPatrol | None] | None" = None,
+        wait_until_ready: "Callable[[threading.Event, threading.Event], tuple[bool, str]] | None" = None,
         camera_display: Callable[[str], str] = short_camera,
         species_members: dict[str, tuple[str, ...]] | None = None,
         fresh_seconds: float = DEFAULT_FRESH_SECONDS,
@@ -167,6 +168,7 @@ class BirdFinder:
         # description ("Percy is on the perch with Matcha"). Best-effort.
         self._describe_frame = describe_frame
         self._make_patrol = make_patrol
+        self._wait_until_ready = wait_until_ready
         self._camera_display = camera_display
         self._species_members = species_members or DEFAULT_SPECIES_MEMBERS
         self._fresh_seconds = fresh_seconds
@@ -277,6 +279,17 @@ class BirdFinder:
     # -- the search loop ---------------------------------------------------
 
     def _run(self, chat_id, requested, targets, stop_event, cancel) -> FindOutcome:
+        if self._wait_until_ready is not None:
+            try:
+                ready, message = self._wait_until_ready(stop_event, cancel)
+            except Exception:
+                LOGGER.exception("Camera readiness wait failed; starting search anyway")
+                ready, message = True, ""
+            if message:
+                self._notify(chat_id, message)
+            if not ready:
+                return FindOutcome(requested, False)
+
         patrol = None
         if self._make_patrol is not None:
             try:

@@ -4,6 +4,8 @@ import base64
 import hashlib
 
 from lib.ptz import (
+    OnvifPtzCamera,
+    PtzManager,
     OnvifPatrol,
     grid_cells,
     absolute_move_body,
@@ -16,6 +18,7 @@ from lib.ptz import (
     parse_pantilt_position,
     parse_profile_token,
 )
+from lib.config import CameraCredentials
 
 
 # -- SOAP / WS-Security construction ---------------------------------------
@@ -184,9 +187,6 @@ def test_patrol_falls_back_to_home_when_position_unknown() -> None:
 
 
 def test_ptz_manager_go_home_sends_each_ptz_camera_to_preset() -> None:
-    from lib.ptz import PtzManager
-    from lib.config import CameraCredentials
-
     mgr = PtzManager(CameraCredentials(username="u", password="p"))
     cam1 = FakeCamera("192.168.1.30", preset="1")
     cam2 = FakeCamera("192.168.1.31", preset="1")
@@ -201,9 +201,6 @@ def test_ptz_manager_go_home_sends_each_ptz_camera_to_preset() -> None:
 
 
 def test_ptz_manager_go_home_skips_cameras_without_preset() -> None:
-    from lib.ptz import PtzManager
-    from lib.config import CameraCredentials
-
     mgr = PtzManager(CameraCredentials(username="u", password="p"))
     cam = FakeCamera("192.168.1.30", preset=None)  # no saved viewpoint
     mgr._cache = {"192.168.1.30": cam}
@@ -212,6 +209,57 @@ def test_ptz_manager_go_home_skips_cameras_without_preset() -> None:
 
     assert (homed, total, without_preset) == (0, 1, 1)
     assert cam.preset_gotos == []
+
+
+def test_onvif_camera_retries_transient_transport_failure(monkeypatch) -> None:
+    calls = 0
+
+    def soap_call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None, ""
+        return 200, '<Profiles token="profile_1"/>'
+
+    monkeypatch.setattr("lib.ptz._soap_call", soap_call)
+
+    camera = OnvifPtzCamera(
+        "192.168.1.30",
+        CameraCredentials("u", "p"),
+        attempts=2,
+        retry_delay=0.0,
+    )
+
+    assert camera.profile_token() == "profile_1"
+    assert calls == 2
+
+
+def test_onvif_camera_does_not_cache_missing_profile_token(monkeypatch) -> None:
+    responses = iter([
+        (200, "<Profiles/>"),
+        (200, '<Profiles token="profile_1"/>'),
+    ])
+
+    monkeypatch.setattr("lib.ptz._soap_call", lambda *_args, **_kwargs: next(responses))
+
+    camera = OnvifPtzCamera("192.168.1.30", CameraCredentials("u", "p"))
+
+    assert camera.profile_token() is None
+    assert camera.profile_token() == "profile_1"
+
+
+def test_ptz_manager_does_not_cache_transient_negative_capability(monkeypatch) -> None:
+    responses = iter([
+        (None, ""),
+        (200, "<tt:PTZ><tt:XAddr>http://x/ptz</tt:XAddr></tt:PTZ>"),
+    ])
+
+    monkeypatch.setattr("lib.ptz._soap_call", lambda *_args, **_kwargs: next(responses))
+
+    mgr = PtzManager(CameraCredentials(username="u", password="p"), attempts=1)
+
+    assert mgr.camera_for("192.168.1.30") is None
+    assert mgr.camera_for("192.168.1.30") is not None
 
 
 def test_home_report_warns_about_cameras_without_preset() -> None:

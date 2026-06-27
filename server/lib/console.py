@@ -37,8 +37,10 @@ HELP_TEXT = (
     "  /status            camera + detection status boxes\n"
     "  /find <bird>       e.g. /find percy, /find the cockatiels, /find stop\n"
     "  /stop [time]       privacy mode (/stop 10m); /start to resume\n"
+    "  /restart          restart the server process\n"
     "  /discover          rescan the network for cameras\n"
     "  /home              aim pan-tilt cameras at their saved viewpoint\n"
+    "  /quality <mode>    stream1, stream2, or auto\n"
     "  /snapshot          capture all cameras (photos go to Telegram)\n"
     "  /logs              show/hide live server logs\n"
     "  /help   /quit\n"
@@ -87,6 +89,7 @@ class ConsoleDispatcher:
         emit: Callable[[str], None],
         status_text: Callable[[], str],
         discover_text: Callable[[], str],
+        restart_text: Callable[[], str] | None,
         snapshot_text: Callable[[int], str],
         pause: Callable[[float | None], str],
         resume: Callable[[], str],
@@ -95,12 +98,14 @@ class ConsoleDispatcher:
         parse_duration: Callable[[str | None], float | None],
         activity: Callable[[int, str], None] | None = None,
         home_text: Callable[[], str] | None = None,
+        quality_text: Callable[[str], str] | None = None,
         toggle_logs: Callable[[], str] | None = None,
         on_quit: Callable[[], None] | None = None,
     ) -> None:
         self._emit = emit
         self._status_text = status_text
         self._discover_text = discover_text
+        self._restart_text = restart_text
         self._snapshot_text = snapshot_text
         self._pause = pause
         self._resume = resume
@@ -109,6 +114,7 @@ class ConsoleDispatcher:
         self._parse_duration = parse_duration
         self._activity = activity
         self._home_text = home_text
+        self._quality_text = quality_text
         self._toggle_logs = toggle_logs
         self._on_quit = on_quit
 
@@ -148,8 +154,20 @@ class ConsoleDispatcher:
         elif command == "/discover":
             self._emit("Scanning the local network for cameras…")
             self._emit(self._discover_text())
+        elif command == "/restart":
+            self._emit(
+                self._restart_text()
+                if self._restart_text is not None
+                else "Restart is unavailable."
+            )
         elif command == "/home":
             self._emit(self._home_text() if self._home_text is not None else "PTZ control is off.")
+        elif command == "/quality":
+            self._emit(
+                self._quality_text(argument)
+                if self._quality_text is not None
+                else "Quality control is off."
+            )
         elif command == "/snapshot":
             self._emit("Capturing snapshots from all cameras…")
             self._emit(self._snapshot_text(CONSOLE_CHAT_ID))

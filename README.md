@@ -92,12 +92,15 @@ Run from the repo root so the scripts' default relative paths resolve.
    ```
 
    Cameras are auto-discovered: the server scans the local subnet for hosts with
-   RTSP `:554` open and a working `/stream1`, then consumes each one. Set
+   a working RTSP stream, then consumes each one. Set
    `TAPO_DISCOVERY_CIDR` if auto-detect picks the wrong subnet. Send the bot
-   `/discover` to re-run the scan and pick up cameras at runtime. The scan port
-   and stream path live in `DiscoveryConfig` in `server/lib/config.py`.
+   `/discover` to re-run the scan and pick up cameras at runtime. The scan port,
+   stream paths, and timeout knobs live in `DiscoveryConfig` and the quality
+   controller code under `server/lib/`.
 
-   Bot commands: `/status` (runtime health), `/discover` (re-scan the LAN), and
+   Bot commands include `/status` (runtime health), `/discover` (re-scan the
+   LAN), `/restart` (re-exec the server process),
+   `/quality stream1|stream2|auto` (RTSP quality selection), and
    `/snapshot` — grabs every camera's latest live frame, replies with them as a
    photo album, and saves them to `data/server/collect/snapshots/`. Those saved
    frames are swept into the annotation pool by `uv run import-collect-birds`

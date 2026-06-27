@@ -6,15 +6,12 @@ module is pure stdlib (no opencv, no external deps) so it can run in the lightwe
 ``/discover`` path and be unit-tested against a localhost fake server WITHOUT
 pulling in the heavy ML stack.
 
-The sweep is two staged passes, both parallel:
-
-  Stage 1  -- a fast TCP connect to ``:rtsp_port`` on every candidate host. The
-              vast majority of a /24 is dead, so this stage exists purely to
-              cheaply discard non-cameras before the (slower) RTSP handshake.
-  Stage 2  -- for each host that answered on :554, perform a real RTSP DESCRIBE
-              with Digest (Basic fallback) auth and classify the result. Only
-              hosts that both authenticate AND expose the configured stream path
-              become confirmed cameras.
+The sweep fans out one authenticated RTSP probe per candidate host. Earlier
+versions did a preliminary throwaway TCP connect to ``:rtsp_port`` and then a
+second connection for DESCRIBE; that was fast, but it was also easy to race tiny
+WiFi cameras that already had live RTSP consumers. A single DESCRIBE connection
+per host is slower by only the connect timeout on dead addresses and is much
+less likely to make real cameras disappear intermittently.
 
 We deliberately speak raw RTSP over a socket rather than shelling out to ffmpeg
 or opencv: it keeps the probe dependency-free, lets us distinguish "wrong
@@ -158,7 +155,8 @@ class _ProbeOutcome(Enum):
     CONFIRMED = "confirmed"            # 200 OK -> a real, authenticated stream
     AUTH_FAILED = "auth_failed"        # 401 even after presenting credentials
     STREAM_NOT_FOUND = "stream_404"    # reachable + authed but no such stream path
-    ERROR = "error"                    # socket/timeout/protocol error
+    ERROR = "error"                    # port open but RTSP/protocol failed
+    PORT_CLOSED = "port_closed"        # socket connect failed/timed out
 
 
 def _md5(text: str) -> str:
@@ -214,17 +212,6 @@ def _target_hosts(discovery: DiscoveryConfig) -> list[str]:
     cidr = discovery.cidr or _default_cidr()
     network = ipaddress.ip_network(cidr, strict=False)
     return [str(host) for host in network.hosts()]
-
-
-def _port_open(host: str, port: int, timeout: float) -> bool:
-    """True if a TCP connection to (host, port) succeeds within ``timeout``."""
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        # ConnectionRefused, timeout, no route, etc. -- all mean "not a camera
-        # here" for our purposes.
-        return False
 
 
 def _read_headers(sock: socket.socket) -> bytes:
@@ -343,7 +330,7 @@ def _describe_request(uri: str, cseq: int, *, authorization: str | None = None) 
     return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
 
 
-def _probe_rtsp(
+def _probe_rtsp_once(
     host: str,
     discovery: DiscoveryConfig,
     credentials: CameraCredentials,
@@ -357,10 +344,14 @@ def _probe_rtsp(
     """
     uri = f"rtsp://{host}:{discovery.rtsp_port}{discovery.stream_path}"
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(discovery.connect_timeout_seconds)
+        sock.connect((host, discovery.rtsp_port))
+    except OSError:
+        return _ProbeOutcome.PORT_CLOSED
+
     sock.settimeout(discovery.rtsp_timeout_seconds)
     try:
-        sock.connect((host, discovery.rtsp_port))
-
         # First, unauthenticated, DESCRIBE.
         sock.sendall(_describe_request(uri, cseq=1))
         response = _read_headers(sock)
@@ -416,6 +407,24 @@ def _probe_rtsp(
         sock.close()
 
 
+def _probe_rtsp(
+    host: str,
+    discovery: DiscoveryConfig,
+    credentials: CameraCredentials,
+) -> _ProbeOutcome:
+    """Probe RTSP with bounded retries for transient camera/network stalls."""
+    attempts = max(1, discovery.probe_attempts)
+    retryable = {_ProbeOutcome.PORT_CLOSED, _ProbeOutcome.ERROR}
+    outcome = _ProbeOutcome.ERROR
+    for attempt in range(1, attempts + 1):
+        outcome = _probe_rtsp_once(host, discovery, credentials)
+        if outcome not in retryable or attempt == attempts:
+            return outcome
+        if discovery.probe_retry_delay_seconds > 0:
+            time.sleep(discovery.probe_retry_delay_seconds)
+    return outcome
+
+
 def _network_prefix(hosts: list[str]) -> str:
     """The shared ``a.b.c.`` prefix for a /24-style host list (display only)."""
     if hosts and hosts[0].count(".") == 3:
@@ -433,11 +442,10 @@ def discover_cameras(
     """Sweep the configured scope and return the confirmed cameras plus stats.
 
     ``clock`` is injectable so tests can assert on elapsed time deterministically.
-    Both stages run on a ThreadPoolExecutor: stage 1 fans the cheap TCP probe
-    across the whole subnet, stage 2 only runs the heavier RTSP handshake on the
-    handful of hosts that answered. When a ``progress`` sink is supplied, each
-    worker publishes its host's live state to it so the dashboard can render the
-    colour-coded discovery grid in real time.
+    The sweep runs on a ThreadPoolExecutor and each worker performs the actual
+    RTSP DESCRIBE handshake for its host. When a ``progress`` sink is supplied,
+    each worker publishes its host's live state to it so the dashboard can render
+    the colour-coded discovery grid in real time.
     """
     start = clock()
     hosts = _target_hosts(discovery)
@@ -456,23 +464,17 @@ def discover_cameras(
     if progress is not None:
         progress.begin(hosts, _network_prefix(hosts))
 
-    def _probe_port(host: str) -> bool:
-        # Stage 1 worker: flip to TESTING (yellow) on entry, and to FAILED (red)
-        # if the port is closed. Open hosts stay TESTING into stage 2.
+    def _probe(host: str) -> _ProbeOutcome:
+        # Logs + marks state in the worker thread so progress streams in real
+        # time (in completion order).
         if progress is not None:
             progress.mark(host, HOST_TESTING)
-        is_open = _port_open(
-            host, discovery.rtsp_port, discovery.connect_timeout_seconds
+        LOGGER.debug(
+            "Discovery: testing %s:%d%s",
+            host,
+            discovery.rtsp_port,
+            discovery.stream_path,
         )
-        if progress is not None and not is_open:
-            progress.mark(host, HOST_FAILED)
-        return is_open
-
-    def _probe(host: str) -> _ProbeOutcome:
-        # Stage 2 worker. Logs + marks state in the worker thread so progress
-        # streams in real time (in completion order). Only hosts that already
-        # answered on :554 reach here, so this stays concise even on a full /24.
-        LOGGER.info("Discovery: testing %s:%d%s", host, discovery.rtsp_port, discovery.stream_path)
         outcome = _probe_rtsp(host, discovery, credentials)
         if outcome is _ProbeOutcome.CONFIRMED:
             if progress is not None:
@@ -488,6 +490,10 @@ def discover_cameras(
             LOGGER.info(
                 "Discovery: %s reachable but %s not available", host, discovery.stream_path
             )
+        elif outcome is _ProbeOutcome.PORT_CLOSED:
+            if progress is not None:
+                progress.mark(host, HOST_FAILED)
+            LOGGER.debug("Discovery: %s did not answer on :%d", host, discovery.rtsp_port)
         else:
             if progress is not None:
                 progress.mark(host, HOST_FAILED)
@@ -496,25 +502,25 @@ def discover_cameras(
 
     try:
         with ThreadPoolExecutor(max_workers=discovery.max_workers) as pool:
-            # Stage 1: which hosts have :554 open at all.
-            reachable_flags = pool.map(_probe_port, hosts)
-            reachable = [host for host, is_open in zip(hosts, reachable_flags) if is_open]
-            if reachable:
-                LOGGER.info(
-                    "Discovery: %d host(s) answered on :%d: %s",
-                    len(reachable),
-                    discovery.rtsp_port,
-                    ", ".join(reachable),
-                )
-            else:
-                LOGGER.info("Discovery: no host answered on :%d", discovery.rtsp_port)
+            outcomes = list(pool.map(_probe, hosts))
 
-            # Stage 2: classify each reachable host's RTSP handshake (logs per host).
-            outcomes = list(pool.map(_probe, reachable))
+        reachable = [
+            host for host, outcome in zip(hosts, outcomes)
+            if outcome is not _ProbeOutcome.PORT_CLOSED
+        ]
+        if reachable:
+            LOGGER.info(
+                "Discovery: %d host(s) answered on :%d: %s",
+                len(reachable),
+                discovery.rtsp_port,
+                ", ".join(reachable),
+            )
+        else:
+            LOGGER.info("Discovery: no host answered on :%d", discovery.rtsp_port)
 
         cameras: list[DiscoveredCamera] = []
         auth_failures = 0
-        for host, outcome in zip(reachable, outcomes):
+        for host, outcome in zip(hosts, outcomes):
             if outcome is _ProbeOutcome.CONFIRMED:
                 rtsp_url = build_rtsp_url(
                     credentials, host, discovery.rtsp_port, discovery.stream_path
