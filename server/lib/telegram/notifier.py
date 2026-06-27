@@ -230,7 +230,7 @@ class TelegramNotifier:
         except requests.RequestException as exc:
             LOGGER.debug("sendChatAction to %s failed: %s", chat_id, exc)
 
-    def send_text(self, chat_id: int | str, text: str) -> None:
+    def send_text(self, chat_id: int | str, text: str) -> int | None:
         """Send a plain text message to a SINGLE chat (used by ``/find`` updates).
 
         Goes through the shared rate-limit gate like every other send, so a burst
@@ -239,9 +239,10 @@ class TelegramNotifier:
         must never tear down the search thread.
         """
         try:
-            self._send_message(str(chat_id), text)
+            return self._send_message(str(chat_id), text)
         except requests.RequestException as exc:
             LOGGER.warning("Text send to %s failed: %s", chat_id, exc)
+            return None
 
     def broadcast_album(self, items: Sequence[tuple[bytes, str | None]]) -> None:
         """Send an album to EVERY recipient (used by the daycare digest)."""

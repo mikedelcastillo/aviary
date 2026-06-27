@@ -151,6 +151,15 @@ def test_text_is_sent_as_html_with_bold(monkeypatch) -> None:
     assert call["json"]["text"] == "🌙 <b>Last night</b> was calm"
 
 
+def test_send_text_returns_message_id(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True, "result": {"message_id": 99}})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+
+    assert notifier.send_text("chat", "hello") == 99
+
+
 def test_html_parse_error_falls_back_to_plain(monkeypatch) -> None:
     # A 400 "can't parse entities" resends as plain text with markers stripped,
     # so the message is never dropped over formatting.

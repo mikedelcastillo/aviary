@@ -250,6 +250,54 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
     ]
 
 
+def test_discover_command_edits_ack_when_message_id_available(monkeypatch) -> None:
+    stop_event = threading.Event()
+    calls: list[dict] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/discover",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" not in json:
+            return Response()
+        calls.append({"url": url, "json": json})
+        if url.endswith("/editMessageText"):
+            stop_event.set()
+            return Response()
+        return Response({"result": {"message_id": 77}})
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        discover_provider=lambda: "found 2 cameras",
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["url"].endswith("/sendMessage")
+    assert calls[0]["json"]["text"] == "Scanning the local network for cameras..."
+    assert calls[1]["url"].endswith("/editMessageText")
+    assert calls[1]["json"]["message_id"] == 77
+    assert calls[1]["json"]["text"] == "found 2 cameras"
+
+
 def test_restart_command_calls_provider_for_allowed_user(monkeypatch) -> None:
     stop_event = threading.Event()
     sent_messages: list[str] = []
@@ -1019,3 +1067,44 @@ def test_captioned_photo_command_keeps_its_argument(monkeypatch) -> None:
     )
 
     assert seen_targets == ["percy"]
+
+
+def test_find_command_registers_ack_message_for_progress_edits(monkeypatch) -> None:
+    stop_event = threading.Event()
+    attached: list[int | None] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/find percy",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" in json:
+            stop_event.set()
+            return Response({"result": {"message_id": 88}})
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        find_provider=lambda _chat_id, _target: "On it.",
+        find_progress_message=attached.append,
+    )
+
+    assert attached == [88]

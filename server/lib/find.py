@@ -142,7 +142,8 @@ class BirdFinder:
         registry: _Snapshotter,
         known_labels: Callable[[], list[str]],
         *,
-        notify: Callable[[int, str], None],
+        notify: Callable[[int, str], object],
+        edit_message: Callable[[int, int, str], bool] | None = None,
         grab_frame: "Callable[[str], bytes | None] | None" = None,
         send_photo: "Callable[[int, bytes, str | None], object] | None" = None,
         describe_frame: "Callable[[bytes], str | None] | None" = None,
@@ -160,6 +161,7 @@ class BirdFinder:
         self._registry = registry
         self._known_labels = known_labels
         self._notify = notify
+        self._edit_message = edit_message
         self._grab_frame = grab_frame
         # Sends ONE proof photo (individual, reliable) — not a media-group album,
         # which timed out on a slow uplink and dropped the find photo entirely.
@@ -183,6 +185,15 @@ class BirdFinder:
         # owns (a replacement may have taken over); ``cancel`` is its private stop
         # signal, set by stop_current() or by a replacing search.
         self._active: dict | None = None
+
+    def attach_progress_message(self, message_id: int | None) -> None:
+        """Attach the command ack message so progress can edit it in place."""
+        if message_id is None:
+            return
+        with self._active_lock:
+            active = self._active
+            if active is not None:
+                active["progress"]["message_id"] = message_id
 
     # -- validation --------------------------------------------------------
 
@@ -236,16 +247,22 @@ class BirdFinder:
 
         cancel = threading.Event()
         token = object()
+        progress = {"message_id": None}
         with self._active_lock:
             previous = self._active
-            self._active = {"token": token, "requested": requested.strip(), "cancel": cancel}
+            self._active = {
+                "token": token,
+                "requested": requested.strip(),
+                "cancel": cancel,
+                "progress": progress,
+            }
         replacing = previous is not None
         if replacing:
             previous["cancel"].set()  # silently retire the old search
 
         thread = threading.Thread(
             target=self._run_guarded,
-            args=(token, chat_id, requested.strip(), targets, stop_event, cancel),
+            args=(token, chat_id, requested.strip(), targets, stop_event, cancel, progress),
             name="find",
             daemon=True,
         )
@@ -260,9 +277,9 @@ class BirdFinder:
             "I'll ping you the moment I spot one. (Say \"stop looking\" to cancel.)"
         )
 
-    def _run_guarded(self, token, chat_id, requested, targets, stop_event, cancel) -> None:
+    def _run_guarded(self, token, chat_id, requested, targets, stop_event, cancel, progress) -> None:
         try:
-            self._run(chat_id, requested, targets, stop_event, cancel)
+            self._run(chat_id, requested, targets, stop_event, cancel, progress)
         except Exception:
             LOGGER.exception("Find loop failed for %r", requested)
             try:
@@ -278,7 +295,7 @@ class BirdFinder:
 
     # -- the search loop ---------------------------------------------------
 
-    def _run(self, chat_id, requested, targets, stop_event, cancel) -> FindOutcome:
+    def _run(self, chat_id, requested, targets, stop_event, cancel, progress=None) -> FindOutcome:
         if self._wait_until_ready is not None:
             try:
                 ready, message = self._wait_until_ready(stop_event, cancel)
@@ -297,7 +314,7 @@ class BirdFinder:
             except Exception:
                 LOGGER.exception("Building PTZ patrol failed; searching without it")
         try:
-            return self._search(chat_id, requested, targets, stop_event, cancel, patrol)
+            return self._search(chat_id, requested, targets, stop_event, cancel, patrol, progress)
         finally:
             if patrol is not None:
                 try:
@@ -305,12 +322,15 @@ class BirdFinder:
                 except Exception:
                     LOGGER.exception("PTZ patrol stop failed")
 
-    def _search(self, chat_id, requested, targets, stop_event, cancel, patrol) -> FindOutcome:
+    def _search(self, chat_id, requested, targets, stop_event, cancel, patrol, progress=None) -> FindOutcome:
         start = self._clock()
         deadline = start + self._timeout_seconds
         next_tick = start + self._tick_seconds
         last_visible_keys: frozenset[str] | None = None
         last_message_at = start
+        progress_message_id: int | None = (
+            progress.get("message_id") if isinstance(progress, dict) else None
+        )
         # Accumulate as sets (sorted once at the end), and skip the unknown-bird
         # class so the not-found recap lists real birds, not "Unknown Bird".
         ever_seen: dict[str, set[str]] = {}
@@ -351,9 +371,13 @@ class BirdFinder:
                 next_tick = now + self._tick_seconds
                 keys = frozenset(visible)
                 if keys != last_visible_keys or (now - last_message_at) >= self._heartbeat_seconds:
-                    self._notify(
-                        chat_id, format_progress_message(requested, visible, self._camera_display)
+                    progress_message_id = self._notify_progress(
+                        chat_id,
+                        progress_message_id,
+                        format_progress_message(requested, visible, self._camera_display),
                     )
+                    if isinstance(progress, dict):
+                        progress["message_id"] = progress_message_id
                     last_visible_keys = keys
                     last_message_at = now
 
@@ -375,12 +399,30 @@ class BirdFinder:
             return FindOutcome(requested, False, [], [], self._clock() - start)
         elapsed = self._clock() - start
         seen_recap = {label: sorted(cams) for label, cams in ever_seen.items()}
-        self._notify(
-            chat_id, format_not_found_message(requested, elapsed, seen_recap, self._camera_display)
+        self._notify_progress(
+            chat_id,
+            progress_message_id,
+            format_not_found_message(requested, elapsed, seen_recap, self._camera_display),
         )
         return FindOutcome(requested, False, [], [], elapsed)
 
     # -- vision + photo helpers -------------------------------------------
+
+    def _notify_progress(
+        self,
+        chat_id: int,
+        message_id: int | None,
+        text: str,
+    ) -> int | None:
+        """Send first progress line, then edit it in place when possible."""
+        if message_id is not None and self._edit_message is not None:
+            try:
+                if self._edit_message(chat_id, message_id, text):
+                    return message_id
+            except Exception:
+                LOGGER.exception("Find progress edit failed")
+        sent = self._notify(chat_id, text)
+        return sent if isinstance(sent, int) else message_id
 
     def _describe_camera(self, camera: str) -> str | None:
         """Best-effort VLM description of what a camera currently shows."""

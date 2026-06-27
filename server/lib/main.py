@@ -119,6 +119,7 @@ def start_command_thread(
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
     find_provider: Callable[[int, str], str] | None = None,
+    find_progress_message: Callable[[int | None], None] | None = None,
     nl_provider: Callable[[int, str], None] | None = None,
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
@@ -140,6 +141,7 @@ def start_command_thread(
             "pause_provider": pause_provider,
             "resume_provider": resume_provider,
             "find_provider": find_provider,
+            "find_progress_message": find_progress_message,
             "nl_provider": nl_provider,
             "photo_provider": photo_provider,
             "activity_provider": activity_provider,
@@ -227,6 +229,15 @@ def build_nl_router(
 
     def dispatch(chat_id: int, intent: Intent, text: str) -> None:
         action = intent.action
+        def update_or_send(message_id, reply: str) -> None:
+            if (
+                message_id is not None
+                and hasattr(notifier, "edit_message_text")
+                and notifier.edit_message_text(chat_id, message_id, reply)
+            ):
+                return
+            notifier.send_text(chat_id, reply)
+
         # Safety first: a question naming a toxic food ("can percy eat avocado?")
         # must get the grounded care answer instead of "I haven't logged that" —
         # but ONLY when it was read as conversation/activity, never when it's a
@@ -239,12 +250,14 @@ def build_nl_router(
         elif action == "resume":
             notifier.send_text(chat_id, control.resume())
         elif action == "find":
-            notifier.send_text(chat_id, find_provider(chat_id, intent.argument))
+            message_id = notifier.send_text(chat_id, find_provider(chat_id, intent.argument))
+            if hasattr(finder, "attach_progress_message"):
+                finder.attach_progress_message(message_id)
         elif action == "stop_find":
             notifier.send_text(chat_id, finder.stop_current())
         elif action == "discover":
-            notifier.send_text(chat_id, "Scanning the local network for cameras...")
-            notifier.send_text(chat_id, discover_provider())
+            message_id = notifier.send_text(chat_id, "Scanning the local network for cameras...")
+            update_or_send(message_id, discover_provider())
         elif action == "restart" and restart_provider is not None:
             notifier.send_text(chat_id, restart_provider())
         elif action == "home" and home_provider is not None:
@@ -256,8 +269,8 @@ def build_nl_router(
         elif action == "status":
             notifier.send_text(chat_id, status_provider())
         elif action == "snapshot":
-            notifier.send_text(chat_id, "Capturing snapshots from all cameras...")
-            notifier.send_text(chat_id, snapshot_provider(chat_id))
+            message_id = notifier.send_text(chat_id, "Capturing snapshots from all cameras...")
+            update_or_send(message_id, snapshot_provider(chat_id))
         elif action == "activity" and activity_responder is not None:
             activity_responder.respond(chat_id, text, intent.argument)
         elif action == "sleep" and sleep_provider is not None:
@@ -737,6 +750,7 @@ def main() -> None:
             registry,
             detector.known_labels,
             notify=notifier.send_text,
+            edit_message=notifier.edit_message_text,
             grab_frame=grab_frame,
             send_photo=notifier.send_photo,
             describe_frame=describe_frame if ollama_client is not None else None,
@@ -1118,6 +1132,7 @@ def main() -> None:
         pause_provider=control.pause,
         resume_provider=control.resume,
         find_provider=find_provider if finder is not None else None,
+        find_progress_message=finder.attach_progress_message if finder is not None else None,
         nl_provider=nl_router.handle_async if nl_router is not None else None,
         photo_provider=photo_provider if ollama_client is not None else None,
         activity_provider=activity_provider if activity_responder is not None else None,

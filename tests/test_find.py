@@ -161,6 +161,25 @@ def test_run_cancelled_exits_quietly() -> None:
     assert not any("Couldn't find" in text for _, text in sent)
 
 
+def test_find_progress_edits_existing_message() -> None:
+    sent: list[tuple[int, str]] = []
+    edits: list[tuple[int, int, str]] = []
+    finder = BirdFinder(
+        FakeRegistry([]),
+        lambda: FINDABLE,
+        notify=lambda chat_id, text: sent.append((chat_id, text)) or 42,
+        edit_message=lambda chat_id, message_id, text: edits.append((chat_id, message_id, text)) or True,
+    )
+
+    message_id = finder._notify_progress(7, None, "Still looking for Percy.")
+    updated = finder._notify_progress(7, message_id, "Still looking for Percy. Right now I can see: no birds.")
+
+    assert message_id == 42
+    assert updated == 42
+    assert sent == [(7, "Still looking for Percy.")]
+    assert edits == [(7, 42, "Still looking for Percy. Right now I can see: no birds.")]
+
+
 def test_stop_current_without_search() -> None:
     finder = _finder(FakeRegistry([]), [])
     assert "No search is running" in finder.stop_current()
@@ -198,7 +217,7 @@ def test_run_guarded_does_not_clear_a_slot_it_no_longer_owns() -> None:
     stop, cancel = threading.Event(), threading.Event()
     stop.set()  # so the (older) search A exits its loop immediately
     cancel.set()
-    finder._run_guarded(object(), 7, "a", ["percy"], stop, cancel)
+    finder._run_guarded(object(), 7, "a", ["percy"], stop, cancel, {"message_id": None})
 
     assert finder._active is active_b  # B's slot is untouched
     assert finder.is_searching()
@@ -212,7 +231,7 @@ def test_run_guarded_clears_its_own_slot_on_exit() -> None:
     stop, cancel = threading.Event(), threading.Event()
     stop.set()
     cancel.set()
-    finder._run_guarded(token_a, 7, "a", ["percy"], stop, cancel)
+    finder._run_guarded(token_a, 7, "a", ["percy"], stop, cancel, {"message_id": None})
 
     assert finder._active is None  # the owner clears its own slot
     assert not finder.is_searching()

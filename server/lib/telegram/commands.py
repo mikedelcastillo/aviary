@@ -15,6 +15,7 @@ from lib.find import bird_last_seen
 from lib.labels import pretty
 from lib.objects import ObjectRegistry
 from lib.stats import CameraStats
+from lib.telegram.notifier import _is_not_modified, _is_parse_error
 from lib.telegram.userinfo import parse_command
 from lib.textfmt import render_telegram_html, to_plain
 
@@ -237,6 +238,14 @@ def _register_bot_commands(base_url: str, commands: list[str]) -> None:
         LOGGER.warning("Failed to register bot commands: %s", exc)
 
 
+def _extract_message_id(response) -> int | None:
+    try:
+        result = response.json().get("result")
+    except ValueError:
+        return None
+    return result.get("message_id") if isinstance(result, dict) else None
+
+
 def run_command_bot(
     bot_token: str,
     allowed_user_ids: list[str],
@@ -253,6 +262,7 @@ def run_command_bot(
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
     find_provider: Callable[[int, str], str] | None = None,
+    find_progress_message: Callable[[int | None], None] | None = None,
     nl_provider: Callable[[int, str], None] | None = None,
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
@@ -295,28 +305,61 @@ def run_command_bot(
 
     LOGGER.info("Started Telegram command bot")
 
-    def send(chat_id: int, text: str) -> None:
+    def send(chat_id: int, text: str) -> int | None:
         """Best-effort sendMessage; a transient API failure must not kill polling.
 
         Renders as HTML (so **bold** markers show as real bold, never raw
         markdown) and, if Telegram rejects the HTML, retries once as plain text
         so a reply is never dropped over formatting."""
         try:
-            requests.post(
+            response = requests.post(
                 f"{base_url}/sendMessage",
                 json={"chat_id": chat_id, "text": render_telegram_html(text), "parse_mode": "HTML"},
                 timeout=15,
-            ).raise_for_status()
+            )
+            response.raise_for_status()
+            return _extract_message_id(response)
         except requests.RequestException as exc:
             LOGGER.warning("HTML send failed (%s); retrying plain", exc)
             try:
-                requests.post(
+                response = requests.post(
                     f"{base_url}/sendMessage",
                     json={"chat_id": chat_id, "text": to_plain(text)},
                     timeout=15,
-                ).raise_for_status()
+                )
+                response.raise_for_status()
+                return _extract_message_id(response)
             except requests.RequestException as exc2:
                 LOGGER.warning("Failed to send message: %s", exc2)
+                return None
+
+    def edit(chat_id: int, message_id: int | None, text: str) -> int | None:
+        if message_id is None:
+            return send(chat_id, text)
+        try:
+            response = requests.post(
+                f"{base_url}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": render_telegram_html(text),
+                    "parse_mode": "HTML",
+                },
+                timeout=15,
+            )
+            if response.status_code == 400 and _is_parse_error(response):
+                response = requests.post(
+                    f"{base_url}/editMessageText",
+                    json={"chat_id": chat_id, "message_id": message_id, "text": to_plain(text)},
+                    timeout=15,
+                )
+            if response.status_code == 400 and _is_not_modified(response):
+                return message_id
+            response.raise_for_status()
+            return message_id
+        except requests.RequestException as exc:
+            LOGGER.warning("Failed to edit message: %s", exc)
+            return send(chat_id, text)
 
     while stop_event is None or not stop_event.is_set():
         try:
@@ -370,17 +413,17 @@ def run_command_bot(
                     file_id = photos[-1]["file_id"]  # largest size
 
                     def handle_photo(fid: str = file_id, cid: int = chat_id) -> None:
-                        send(cid, "📷 Taking a look at your photo…")
+                        status_id = send(cid, "📷 Taking a look at your photo…")
                         image = download_telegram_file(base_url, fid)
                         if image is None:
-                            send(cid, "Hmm, I couldn't download that photo.")
+                            edit(cid, status_id, "Hmm, I couldn't download that photo.")
                             return
                         try:
                             reply = photo_provider(image)
                         except Exception:
                             LOGGER.exception("Photo analysis failed")
                             reply = "I couldn't make sense of that photo, sorry!"
-                        send(cid, reply)
+                        edit(cid, status_id, reply)
 
                     Thread(target=handle_photo, name="photo-analyze", daemon=True).start()
                     LOGGER.info("Handling photo from user %s", user_id)
@@ -408,13 +451,13 @@ def run_command_bot(
                     if str(user_id) not in allowed or discover_provider is None:
                         send(chat_id, "Unauthorized.")
                     else:
-                        send(chat_id, "Scanning the local network for cameras...")
+                        status_id = send(chat_id, "Scanning the local network for cameras...")
                         try:
                             report = discover_provider()
                         except Exception as exc:  # never let a scan error kill polling
                             LOGGER.exception("Discovery failed")
                             report = f"Discovery failed: {exc}"
-                        send(chat_id, report)
+                        edit(chat_id, status_id, report)
                     LOGGER.info("Handled /discover for user %s", user_id)
                     continue
 
@@ -487,13 +530,13 @@ def run_command_bot(
                     if str(user_id) not in allowed or snapshot_provider is None:
                         send(chat_id, "Unauthorized.")
                     else:
-                        send(chat_id, "Capturing snapshots from all cameras...")
+                        status_id = send(chat_id, "Capturing snapshots from all cameras...")
                         try:
                             report = snapshot_provider(chat_id)
                         except Exception as exc:  # never let a snapshot error kill polling
                             LOGGER.exception("Snapshot failed")
                             report = f"Snapshot failed: {exc}"
-                        send(chat_id, report)
+                        edit(chat_id, status_id, report)
                     LOGGER.info("Handled /snapshot for user %s", user_id)
                     continue
 
@@ -504,7 +547,6 @@ def run_command_bot(
                     if str(user_id) not in allowed or activity_provider is None:
                         send(chat_id, "Unauthorized.")
                     else:
-                        send(chat_id, "📋 Looking back…")
                         try:
                             activity_provider(chat_id, command_argument(text_in))
                         except Exception as exc:  # never let it kill polling
@@ -519,7 +561,6 @@ def run_command_bot(
                     if str(user_id) not in allowed or sleep_provider is None:
                         send(chat_id, "Unauthorized.")
                     else:
-                        send(chat_id, "🌙 Checking how the birds slept…")
                         try:
                             sleep_provider(chat_id, command_argument(text_in))
                         except Exception as exc:  # never let it kill polling
@@ -554,7 +595,9 @@ def run_command_bot(
                         except Exception as exc:  # never let it kill polling
                             LOGGER.exception("Find failed")
                             ack = f"Find failed: {exc}"
-                        send(chat_id, ack)
+                        message_id = send(chat_id, ack)
+                        if find_progress_message is not None:
+                            find_progress_message(message_id)
                     LOGGER.info("Handled /find for user %s", user_id)
                     continue
 
