@@ -45,6 +45,7 @@ from lib.detector import ObjectDetector
 from lib.detection_log import DetectionLogger
 from lib.durations import format_duration as _duration_text
 from lib.weather import WeatherMonitor, fetch_forecast, has_location, summarize as summarize_weather
+from lib.machine import MachineFrames, MachineSampler
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder, currently_visible, format_visible
@@ -134,6 +135,7 @@ def start_command_thread(
     sleep_provider: Callable[[int, str], None] | None = None,
     care_provider: Callable[[str], str] | None = None,
     weather_provider: Callable[[], str] | None = None,
+    machine_frame: Callable[[float, float], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -157,6 +159,7 @@ def start_command_thread(
             "sleep_provider": sleep_provider,
             "care_provider": care_provider,
             "weather_provider": weather_provider,
+            "machine_frame": machine_frame,
         },
         name="telegram-commands",
         daemon=True,
@@ -187,6 +190,7 @@ def build_nl_router(
     sleep_provider=None,
     care_provider=None,
     weather_provider=None,
+    machine_provider=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -308,6 +312,8 @@ def build_nl_router(
             notifier.send_text(chat_id, care_provider(intent.argument))
         elif action == "weather" and weather_provider is not None:
             notifier.send_text(chat_id, weather_provider())
+        elif action == "machine" and machine_provider is not None:
+            notifier.send_text(chat_id, machine_provider())
         else:  # chat (or activity with no responder)
             send_chat_reply(chat_id, text)
 
@@ -1155,6 +1161,19 @@ def main() -> None:
 
         weather_provider = _weather_summary
 
+    # /machine: a live CPU/GPU/network + Olla dashboard. The sampler runs at 1 Hz
+    # so the rolling 1-minute averages stay warm and the live view (a message
+    # edited every second for a minute) actually moves; MachineFrames renders each
+    # frame and caches the Olla round-trip. The natural-language path uses the
+    # one-shot snapshot instead of the live edit loop.
+    machine_sampler = MachineSampler(stop_event, sample_interval=1.0)
+    machine_sampler.start()
+    machine_frames = MachineFrames(
+        machine_sampler,
+        ollama_base_url=app_config.ollama.base_url,
+        ollama_enabled=app_config.ollama.enabled,
+    )
+
     nl_router = build_nl_router(
         app_config,
         notifier,
@@ -1176,6 +1195,7 @@ def main() -> None:
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
         care_provider=care_provider,
         weather_provider=weather_provider,
+        machine_provider=machine_frames.snapshot,
     )
 
     start_command_thread(
@@ -1200,6 +1220,7 @@ def main() -> None:
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
         care_provider=care_provider,
         weather_provider=weather_provider,
+        machine_frame=machine_frames.frame,
     )
     if auto_finder is not None:
         auto_finder.start()

@@ -12,6 +12,7 @@ import requests
 
 from lib.control import parse_duration
 from lib.dashboard import STALE_FRAME_SECONDS
+from lib.machine import MACHINE_LIVE_SECONDS, MACHINE_TICK_SECONDS
 from lib.durations import format_duration as _format_duration
 from lib.find import bird_last_seen
 from lib.labels import pretty
@@ -47,6 +48,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/stop": "Privacy mode: stop the cameras (optional duration, e.g. /stop 10m)",
     "/start": "Resume the cameras after a pause",
     "/status": "Show camera and detection status",
+    "/machine": "Machine telemetry — CPU/GPU/network + Olla cluster health",
     "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
     "/snapshot": "Capture a snapshot from every camera",
     "/pause": "Privacy mode: stop the cameras (alias of /stop)",
@@ -283,6 +285,7 @@ def run_command_bot(
     sleep_provider: Callable[[int, str], None] | None = None,
     care_provider: Callable[[str], str] | None = None,
     weather_provider: Callable[[], str] | None = None,
+    machine_frame: Callable[[float, float], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -308,6 +311,7 @@ def run_command_bot(
             ("/stop", pause_provider is not None),
             ("/start", resume_provider is not None),
             ("/status", status_provider is not None),
+            ("/machine", machine_frame is not None),
             ("/find", find_provider is not None),
             ("/snapshot", snapshot_provider is not None),
             ("/pause", pause_provider is not None),
@@ -605,6 +609,44 @@ def run_command_bot(
 
                         Thread(target=run_weather, name="telegram-weather", daemon=True).start()
                     LOGGER.info("Handled /weather for user %s", user_id)
+                    continue
+
+                if command == "/machine":
+                    if str(user_id) not in allowed or machine_frame is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        # A LIVE dashboard: send one message, then edit it every
+                        # tick for ~1 minute so the numbers visibly move, settling
+                        # into the 1-minute average. The edits span a minute, so it
+                        # runs off the poll loop and stops at once on shutdown.
+                        def run_machine(cid: int = chat_id) -> None:
+                            try:
+                                status_id = send(cid, machine_frame(0.0, MACHINE_LIVE_SECONDS))
+                            except Exception:
+                                LOGGER.exception("Machine telemetry failed")
+                                return
+                            if status_id is None:
+                                return
+                            start = time.monotonic()
+                            while True:
+                                if stop_event is not None:
+                                    if stop_event.wait(MACHINE_TICK_SECONDS):
+                                        break
+                                else:
+                                    time.sleep(MACHINE_TICK_SECONDS)
+                                elapsed = min(time.monotonic() - start, MACHINE_LIVE_SECONDS)
+                                try:
+                                    edit_existing(
+                                        cid, status_id, machine_frame(elapsed, MACHINE_LIVE_SECONDS)
+                                    )
+                                except Exception:
+                                    LOGGER.exception("Machine telemetry edit failed")
+                                    break
+                                if elapsed >= MACHINE_LIVE_SECONDS:
+                                    break
+
+                        Thread(target=run_machine, name="telegram-machine", daemon=True).start()
+                    LOGGER.info("Handled /machine for user %s", user_id)
                     continue
 
                 if command == "/autofind":

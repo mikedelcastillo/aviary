@@ -24,7 +24,7 @@ LOGGER = logging.getLogger("lib.ai.intent")
 # conversation, routed to the memory/VLM layer rather than a command.
 ACTIONS = (
     "pause", "resume", "find", "stop_find", "discover", "restart", "home", "quality", "autofind",
-    "status", "snapshot", "activity", "sleep", "care", "weather", "chat",
+    "status", "snapshot", "activity", "sleep", "care", "weather", "machine", "chat",
 )
 
 # Ollama ``format`` schema: constrains the model to a valid action + argument.
@@ -104,12 +104,23 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'weather looking", "is it hot out", "weather for the birds". argument = "". '
         '(A general care question with no ask about the forecast — "is it too cold FOR THEM", '
         '"what temperature is safe" — is "chat", not "weather".)\n'
+        '- "machine": the SERVER HARDWARE / system telemetry — CPU or GPU usage or '
+        'temperature, how hot the machine or GPU is, memory/VRAM, network '
+        'speed/bandwidth/throughput, server load, OR the health of the LLM/Olla '
+        'cluster nodes. Examples: "how\'s the machine", "machine stats", "cpu usage", '
+        '"cpu temp", "how hot is the gpu", "gpu usage", "is the gpu busy", "network '
+        'speed", "how much bandwidth", "server load", "is the cluster healthy", "olla '
+        'status", "are the ollama nodes up", "how are the nodes". argument = "".\n'
         '- "chat": greetings, thanks, small talk, AND any general bird-CARE or knowledge '
         'question — what is safe or toxic to eat, diet/feeding, sleep and light needs, '
         'temperature, enrichment, illness and "why is X fluffed/plucking/quiet", or how '
         'to care for them. These are answered from care knowledge, NOT the activity log, '
         'even when they name a bird. argument = "".\n\n'
         "Rules:\n"
+        '- The SERVER\'s own hardware — CPU/GPU usage or temperature, memory, network '
+        'speed, machine load, or the Olla/Ollama cluster node health — is "machine". '
+        'The CAMERAS and birds being online/healthy ("are the cameras ok", "what\'s '
+        'online", "system status", "how are things") is "status".\n'
         '- A question about what is SAFE or recommended ("can they eat avocado", "is it '
         'too cold for them", "how long should they sleep", "why is percy plucking") is '
         '"chat" (care knowledge). A question about what a bird DID or is DOING ("did pizza '
