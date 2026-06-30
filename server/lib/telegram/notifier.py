@@ -13,6 +13,8 @@ from pathlib import Path
 import requests
 
 from lib.detector import Detection
+from lib.imaging import downscale_jpeg
+from lib.labels import pretty_labels
 
 
 LOGGER = logging.getLogger("lib.telegram")
@@ -48,7 +50,7 @@ class TelegramNotifier:
         bot_token: str,
         user_ids: list[str],
         timeout_seconds: int = 15,
-        photo_timeout_seconds: int = 60,
+        photo_timeout_seconds: int = 120,
         min_send_interval_seconds: float = DEFAULT_MIN_SEND_INTERVAL_SECONDS,
         max_send_retries: int = DEFAULT_MAX_SEND_RETRIES,
     ) -> None:
@@ -82,7 +84,7 @@ class TelegramNotifier:
         if not self.bot_token or not self.user_ids:
             raise ValueError("Telegram bot token and user IDs are required")
 
-        text = ", ".join(sorted({detection.label for detection in detections}))
+        text = pretty_labels(detection.label for detection in detections)
         has_photo = bool(snapshot_path and snapshot_path.exists())
 
         if not has_photo:
@@ -116,6 +118,100 @@ class TelegramNotifier:
                 )
         # If no file_id was ever obtained, the loop above already attempted a
         # direct upload to every recipient, so there is nothing left to send.
+
+    def broadcast_text(self, text: str) -> None:
+        """Send a plain text message to EVERY configured recipient.
+
+        Used for lifecycle announcements (server started / stopping). Best-effort
+        and parallel across recipients; a per-recipient failure is logged and
+        swallowed so a shutdown broadcast can't hang the shutdown path.
+        """
+        if not self.bot_token or not self.user_ids:
+            return
+        self._broadcast(self.user_ids, lambda user_id: self._send_message(user_id, text))
+
+    def broadcast_text_tracked(self, text: str) -> dict[str, int]:
+        """Broadcast text and return ``{user_id: message_id}`` for later editing.
+
+        Sent serially (small N) so the returned ids are reliable; used by the
+        caretaker so it can EDIT the latest activity message instead of sending a
+        new one when nothing has changed.
+        """
+        sent: dict[str, int] = {}
+        for user_id in self.user_ids:
+            try:
+                message_id = self._send_message(user_id, text)
+            except requests.RequestException as exc:
+                LOGGER.warning("Tracked send to %s failed: %s", user_id, exc)
+                continue
+            if message_id is not None:
+                sent[user_id] = message_id
+        return sent
+
+    def edit_message_text(self, chat_id: int | str, message_id: int, text: str) -> bool:
+        """Edit an already-sent text message (the "last updated …" refresh)."""
+        try:
+            response = self._post(
+                f"{self.base_url}/editMessageText",
+                json={"chat_id": chat_id, "message_id": message_id, "text": text},
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as exc:
+            LOGGER.debug("editMessageText for %s/%s failed: %s", chat_id, message_id, exc)
+            return False
+
+    def send_photo(self, chat_id: int | str, image_bytes: bytes, caption: str | None = None) -> bool:
+        """Send ONE photo to a chat, downscaled and best-effort.
+
+        Used where reliability matters more than grouping (find proof, Q&A):
+        individual uploads are small and each is retried by the rate gate, so a
+        single slow upload can't sink a whole media-group album the way it did
+        before. Returns True on success.
+        """
+        try:
+            self._send_photo_to_chat(chat_id, image_bytes, caption)
+            return True
+        except requests.RequestException as exc:
+            LOGGER.warning("Photo to %s failed: %s", chat_id, exc)
+            return False
+
+    def send_chat_action(self, chat_id: int | str, action: str = "typing") -> None:
+        """Show a chat action (e.g. 'typing…') so the user knows we're thinking.
+
+        Best-effort and fire-and-forget — a failed action indicator must never
+        affect the actual reply. Telegram clears it after ~5s, so callers re-send
+        it to keep it alive during a long think.
+        """
+        try:
+            self._post(
+                f"{self.base_url}/sendChatAction",
+                json={"chat_id": chat_id, "action": action},
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            LOGGER.debug("sendChatAction to %s failed: %s", chat_id, exc)
+
+    def send_text(self, chat_id: int | str, text: str) -> None:
+        """Send a plain text message to a SINGLE chat (used by ``/find`` updates).
+
+        Goes through the shared rate-limit gate like every other send, so a burst
+        of search updates paces alongside alerts under the one bot-token limit. A
+        transient API error is logged and swallowed — a dropped progress line
+        must never tear down the search thread.
+        """
+        try:
+            self._send_message(str(chat_id), text)
+        except requests.RequestException as exc:
+            LOGGER.warning("Text send to %s failed: %s", chat_id, exc)
+
+    def broadcast_album(self, items: Sequence[tuple[bytes, str | None]]) -> None:
+        """Send an album to EVERY recipient (used by the daycare digest)."""
+        if not self.bot_token or not self.user_ids or not items:
+            return
+        for user_id in self.user_ids:
+            self.send_album(user_id, items)
 
     def send_album(
         self, chat_id: int | str, items: Sequence[tuple[bytes, str | None]]
@@ -155,19 +251,20 @@ class TelegramNotifier:
 
         list(self._pool.map(safe, user_ids))
 
-    def _send_message(self, user_id: str, text: str) -> None:
+    def _send_message(self, user_id: str, text: str) -> int | None:
         response = self._post(
             f"{self.base_url}/sendMessage",
             json={"chat_id": user_id, "text": text},
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
+        return self._extract_message_id(response)
 
     def _send_photo_upload(self, user_id: str, caption: str, image_bytes: bytes) -> str | None:
         response = self._post(
             f"{self.base_url}/sendPhoto",
             data={"chat_id": user_id, "caption": caption},
-            files={"photo": ("snapshot.jpg", image_bytes, "image/jpeg")},
+            files={"photo": ("snapshot.jpg", downscale_jpeg(image_bytes), "image/jpeg")},
             timeout=self.photo_timeout_seconds,
         )
         response.raise_for_status()
@@ -175,7 +272,7 @@ class TelegramNotifier:
 
     def _send_media_group(
         self, chat_id: int | str, chunk: list[tuple[bytes, str | None]]
-    ) -> None:
+    ) -> int | None:
         # Telegram media groups attach each image as a multipart file and
         # reference it from the JSON ``media`` array via ``attach://<key>``.
         media: list[dict[str, str]] = []
@@ -186,7 +283,7 @@ class TelegramNotifier:
             if caption:
                 entry["caption"] = caption
             media.append(entry)
-            files[key] = (f"{key}.jpg", image_bytes, "image/jpeg")
+            files[key] = (f"{key}.jpg", downscale_jpeg(image_bytes), "image/jpeg")
         response = self._post(
             f"{self.base_url}/sendMediaGroup",
             data={"chat_id": chat_id, "media": json.dumps(media)},
@@ -194,10 +291,53 @@ class TelegramNotifier:
             timeout=self.photo_timeout_seconds,
         )
         response.raise_for_status()
+        return self._extract_first_message_id(response)
+
+    def broadcast_album_tracked(
+        self, items: Sequence[tuple[bytes, str | None]]
+    ) -> dict[str, int]:
+        """Send ONE album per recipient, returning ``{user_id: first_message_id}``.
+
+        The caretaker uses this so a report is a single grouped album (photos +
+        the summary as the first item's caption) instead of N photos plus a
+        separate text — and it can later EDIT that first item's caption in place.
+        """
+        if not self.bot_token or not self.user_ids or not items:
+            return {}
+        chunk = list(items)[:MEDIA_GROUP_LIMIT]
+        sent: dict[str, int] = {}
+        for user_id in self.user_ids:
+            try:
+                if len(chunk) == 1:
+                    message_id = self._send_photo_to_chat(
+                        user_id, chunk[0][0], chunk[0][1], track=True
+                    )
+                else:
+                    message_id = self._send_media_group(user_id, chunk)
+            except requests.RequestException as exc:
+                LOGGER.warning("Tracked album to %s failed: %s", user_id, exc)
+                continue
+            if message_id is not None:
+                sent[user_id] = message_id
+        return sent
+
+    def edit_message_caption(self, chat_id: int | str, message_id: int, caption: str) -> bool:
+        """Edit the caption of an already-sent photo/album (the activity refresh)."""
+        try:
+            response = self._post(
+                f"{self.base_url}/editMessageCaption",
+                json={"chat_id": chat_id, "message_id": message_id, "caption": caption},
+                timeout=self.timeout_seconds,
+            )
+            response.raise_for_status()
+            return True
+        except requests.RequestException as exc:
+            LOGGER.debug("editMessageCaption for %s/%s failed: %s", chat_id, message_id, exc)
+            return False
 
     def _send_photo_to_chat(
-        self, chat_id: int | str, image_bytes: bytes, caption: str | None
-    ) -> None:
+        self, chat_id: int | str, image_bytes: bytes, caption: str | None, *, track: bool = False
+    ) -> int | None:
         # A single image can't be a media group, so it ships as a plain upload.
         data: dict[str, int | str] = {"chat_id": chat_id}
         if caption:
@@ -205,10 +345,11 @@ class TelegramNotifier:
         response = self._post(
             f"{self.base_url}/sendPhoto",
             data=data,
-            files={"photo": ("snapshot.jpg", image_bytes, "image/jpeg")},
+            files={"photo": ("snapshot.jpg", downscale_jpeg(image_bytes), "image/jpeg")},
             timeout=self.photo_timeout_seconds,
         )
         response.raise_for_status()
+        return self._extract_message_id(response) if track else None
 
     def _send_photo_by_file_id(self, user_id: str, caption: str, file_id: str) -> None:
         # No upload: Telegram already holds the bytes, so this is a small form
@@ -284,6 +425,25 @@ class TelegramNotifier:
         if retry_after is None:
             retry_after = RETRY_AFTER_FALLBACK_SECONDS
         return float(retry_after) + RETRY_AFTER_BUFFER_SECONDS
+
+    @staticmethod
+    def _extract_message_id(response) -> int | None:
+        try:
+            result = response.json().get("result")
+        except ValueError:
+            return None
+        return result.get("message_id") if isinstance(result, dict) else None
+
+    @staticmethod
+    def _extract_first_message_id(response) -> int | None:
+        # sendMediaGroup returns a LIST of messages; edit the first one's caption.
+        try:
+            result = response.json().get("result")
+        except ValueError:
+            return None
+        if isinstance(result, list) and result and isinstance(result[0], dict):
+            return result[0].get("message_id")
+        return None
 
     @staticmethod
     def _extract_file_id(response) -> str | None:

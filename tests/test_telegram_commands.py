@@ -28,34 +28,34 @@ def detection(label: str = "bird", bbox=(0, 0, 20, 20)) -> Detection:
     return Detection(label=label, confidence=0.9, bbox_xyxy=bbox)
 
 
-def test_status_message_includes_dashboard_data_without_logs() -> None:
+def test_status_message_shows_birds_last_seen_and_cameras() -> None:
     registry = ObjectRegistry()
     stats = {"camera-1": CameraStats("camera-1", 0.25, registry)}
     stats["camera-1"].set_status("connected")
-    stats["camera-1"].record_inference(["bird"], [detection()], (100, 100))
-    stats["camera-1"].record_alert()
+    stats["camera-1"].record_inference(["percy"], [detection("percy")], (100, 100))
 
-    message = build_status_message(stats, registry, movement_alert_ratio=0.10)
+    message = build_status_message(stats, registry)
 
-    assert "Aviary status" in message
-    assert "camera-1: CONNECTED" in message
-    assert "1 frames, 1 detections, 1 alerts" in message
-    assert "camera-1 bird:" in message
-    assert "Logs" not in message
-    assert "Events" not in message
+    assert "Aviary" in message
+    assert "Birds — last seen" in message
+    assert "Percy" in message  # the seen bird appears with its last-seen
+    assert "camera-1" in message
+    assert "Logs" not in message and "Events" not in message
 
 
-def test_status_message_formats_recent_frame_age_in_milliseconds(monkeypatch) -> None:
-    now = 100.0
-    monkeypatch.setattr("lib.stats.time.monotonic", lambda: now)
-    stats = {"camera-1": CameraStats("camera-1", 0.25)}
+def test_status_message_lists_missing_roster_birds_and_ir() -> None:
+    registry = ObjectRegistry()
+    stats = {"camera-1": CameraStats("camera-1", 0.25, registry)}
     stats["camera-1"].set_status("connected")
-    stats["camera-1"].record_inference([])
-    now = 100.125
+    stats["camera-1"].record_inference(["percy"], [detection("percy")], (100, 100))
 
-    message = build_status_message(stats, None, movement_alert_ratio=0.10)
-
-    assert "Last frame: 125ms ago" in message
+    message = build_status_message(
+        stats, registry, known_birds=["percy", "draft"], ir_cameras={"camera-1"}
+    )
+    # Percy seen, Draft listed as not-seen; the IR camera is marked.
+    assert "Percy" in message
+    assert "not seen yet" in message and "Draft" in message
+    assert "🌙 IR" in message
 
 
 def test_dashboard_frame_age_uses_seconds_after_one_second() -> None:
@@ -250,6 +250,53 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
     ]
 
 
+def test_home_command_calls_provider_for_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    calls: list[bool] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/home",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    def home_provider() -> str:
+        calls.append(True)
+        return "🏠 Sent 2/2 pan-tilt camera(s) to their saved viewpoint."
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        home_provider=home_provider,
+    )
+
+    assert calls == [True]
+    assert sent_messages == ["🏠 Sent 2/2 pan-tilt camera(s) to their saved viewpoint."]
+
+
 def test_snapshot_command_requires_allowed_user(monkeypatch) -> None:
     stop_event = threading.Event()
     sent_messages: list[str] = []
@@ -363,9 +410,9 @@ def test_registers_available_bot_commands_on_startup(monkeypatch) -> None:
     # Every wired-up command is offered to Telegram's slash-menu, in a stable
     # display order, as bare names (no leading slash) with non-empty descriptions.
     assert [entry["command"] for entry in registered] == [
+        "discover",
         "status",
         "snapshot",
-        "discover",
         "userinfo",
     ]
     assert all(entry["description"] for entry in registered)
@@ -452,3 +499,219 @@ def test_snapshot_command_acks_then_reports_with_chat_id(monkeypatch) -> None:
     ]
     # The requesting chat is handed to the provider so the album goes to them.
     assert seen_chat_ids == [123]
+
+
+def _single_update(text: str, user_id: int = 111, chat_id: int = 123):
+    """A getUpdates stub yielding one message with ``text``."""
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": text,
+                            "from": {"id": user_id},
+                            "chat": {"id": chat_id},
+                        },
+                    }
+                ]
+            }
+        )
+
+    return get
+
+
+def test_pause_command_parses_duration_and_calls_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_durations: list[float | None] = []
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def pause_provider(duration: float | None) -> str:
+        seen_durations.append(duration)
+        return "Privacy mode on."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/pause 10m"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        pause_provider=pause_provider,
+    )
+
+    # "10m" -> 600 seconds handed to the provider; its reply is forwarded.
+    assert seen_durations == [600.0]
+    assert sent_messages == ["Privacy mode on."]
+
+
+def test_pause_command_without_argument_is_indefinite(monkeypatch) -> None:
+    stop_event = threading.Event()
+    seen_durations: list[float | None] = []
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        stop_event.set()
+        return Response()
+
+    def pause_provider(duration: float | None) -> str:
+        seen_durations.append(duration)
+        return "Paused indefinitely."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/stop"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        pause_provider=pause_provider,
+    )
+
+    # No argument -> None -> indefinite pause. /stop is an alias of /pause.
+    assert seen_durations == [None]
+
+
+def test_pause_command_requires_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    provider_called = False
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def pause_provider(_duration: float | None) -> str:
+        nonlocal provider_called
+        provider_called = True
+        return "Privacy mode on."
+
+    monkeypatch.setattr(
+        "lib.telegram.commands.requests.get", _single_update("/pause", user_id=999)
+    )
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        pause_provider=pause_provider,
+    )
+
+    assert sent_messages == ["Unauthorized."]
+    assert provider_called is False
+
+
+def test_resume_command_calls_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    provider_called = False
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def resume_provider() -> str:
+        nonlocal provider_called
+        provider_called = True
+        return "Resumed — cameras are live again."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/play"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        resume_provider=resume_provider,
+    )
+
+    assert provider_called is True
+    assert sent_messages == ["Resumed — cameras are live again."]
+
+
+def test_photo_message_runs_photo_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_image: list[bytes] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "photo": [
+                                {"file_id": "small"},
+                                {"file_id": "BIG"},  # largest last
+                            ],
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        # Stop once both the ack and the analysis reply have been sent.
+        if len(sent_messages) >= 2:
+            stop_event.set()
+        return Response()
+
+    def photo_provider(image: bytes) -> str:
+        seen_image.append(image)
+        return "📸 I spotted: Percy!"
+
+    # download_telegram_file is exercised separately; stub it here.
+    monkeypatch.setattr(
+        "lib.telegram.commands.download_telegram_file", lambda base, fid, timeout=30: b"jpeg-" + fid.encode()
+    )
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        photo_provider=photo_provider,
+    )
+
+    # The LARGEST photo is downloaded and handed to the provider; its reply ships.
+    assert seen_image == [b"jpeg-BIG"]
+    assert sent_messages == ["📷 Taking a look at your photo…", "📸 I spotted: Percy!"]
+
+
+def test_status_shows_ir_species_label_during_night() -> None:
+    registry = ObjectRegistry()
+    stats = {"camera-1": CameraStats("camera-1", 0.25, registry)}
+    stats["camera-1"].set_status("connected")
+    # At night only the species/IR outline is detected, not the individual.
+    stats["camera-1"].record_inference(["cockatiel"], [detection("cockatiel")], (100, 100))
+    message = build_status_message(stats, registry, known_birds=["percy", "draft"])
+    assert "Cockatiel" in message  # the seen species shows, not just "nothing seen"

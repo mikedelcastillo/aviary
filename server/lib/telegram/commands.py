@@ -5,11 +5,14 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from threading import Event
+from threading import Event, Thread
 
 import requests
 
+from lib.control import parse_duration
 from lib.dashboard import STALE_FRAME_SECONDS
+from lib.find import bird_last_seen
+from lib.labels import pretty, pretty_labels
 from lib.objects import ObjectRegistry
 from lib.stats import CameraStats
 from lib.telegram.userinfo import parse_command
@@ -24,12 +27,58 @@ StatusProvider = Callable[[], str]
 # ``setMyCommands`` so the app autocompletes the commands this bot answers. The
 # order here is the menu's display order; only commands whose handler is wired
 # up for a given run are actually registered (see ``run_command_bot``).
+# Order here is the slash-menu display order (the user-requested order leads).
 COMMAND_DESCRIPTIONS: dict[str, str] = {
-    "/status": "Show camera and detection status",
-    "/snapshot": "Capture a snapshot from every camera",
+    "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/discover": "Scan the local network for cameras",
+    "/home": "Aim the pan-tilt cameras at their saved viewpoint",
+    "/autofind": "Auto-search for missing birds (/autofind enable | disable)",
+    "/stop": "Privacy mode: stop the cameras (optional duration, e.g. /stop 10m)",
+    "/start": "Resume the cameras after a pause",
+    "/status": "Show camera and detection status",
+    "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
+    "/snapshot": "Capture a snapshot from every camera",
+    "/pause": "Privacy mode: stop the cameras (alias of /stop)",
+    "/play": "Resume the cameras (alias of /start)",
+    "/resume": "Resume the cameras (alias of /start)",
     "/userinfo": "Show your Telegram user ID",
 }
+
+# Commands that turn privacy mode ON; the trailing text is parsed as a duration.
+PAUSE_COMMANDS = ("/pause", "/stop")
+# Commands that turn privacy mode OFF.
+RESUME_COMMANDS = ("/play", "/resume", "/start")
+
+
+def download_telegram_file(base_url: str, file_id: str, timeout: int = 30) -> bytes | None:
+    """Fetch a Telegram file's bytes by file_id (getFile -> file download URL).
+
+    ``base_url`` is ``https://api.telegram.org/bot<token>``; the binary lives
+    under the parallel ``/file/bot<token>/<path>`` route. Returns None on any
+    failure so the caller can degrade gracefully.
+    """
+    try:
+        meta = requests.get(f"{base_url}/getFile", params={"file_id": file_id}, timeout=timeout)
+        meta.raise_for_status()
+        file_path = meta.json()["result"]["file_path"]
+        file_base = base_url.replace("/bot", "/file/bot", 1)
+        blob = requests.get(f"{file_base}/{file_path}", timeout=timeout)
+        blob.raise_for_status()
+        return blob.content
+    except (requests.RequestException, KeyError, ValueError) as exc:
+        LOGGER.warning("Failed to download Telegram file %s: %s", file_id, exc)
+        return None
+
+
+def command_argument(text: str) -> str:
+    """Return everything after the leading ``/command`` token, stripped.
+
+    ``parse_command`` only yields the bare command; pause needs its duration
+    argument ("/pause 10m" -> "10m"). An empty string means no argument was
+    given (an indefinite pause).
+    """
+    parts = text.strip().split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -79,24 +128,38 @@ def _camera_status_text(snap: dict) -> str:
     return status
 
 
+def _ago(seconds: float | None) -> str:
+    if seconds is None:
+        return "never"
+    if seconds < 60:
+        return "just now"
+    return f"{_format_duration(seconds)} ago"
+
+
 def build_status_message(
     stats: dict[str, CameraStats],
     registry: ObjectRegistry | None,
-    movement_alert_ratio: float,
+    movement_alert_ratio: float = 0.0,
+    camera_display: Callable[[str], str] = lambda name: name,
+    *,
+    known_birds: list[str] | None = None,
+    ir_cameras: set[str] | None = None,
 ) -> str:
-    """Build a plain-text status message from dashboard data, excluding logs."""
+    """A compact, scannable status: which birds were last seen when, and each
+    camera's health (with an IR/night marker).
+
+    ``known_birds`` is the roster of individuals to always list (so a bird that
+    has gone missing shows up as "not seen"); ``ir_cameras`` are camera ids
+    currently in night/IR mode.
+    """
     # Copy the mapping up front: the live ``stats`` dict is shared with the
-    # camera supervisor, which adds entries from another thread. Iterating a
-    # local copy makes this safe no matter how the caller obtained the dict
-    # (the CameraStats values are themselves internally locked).
+    # camera supervisor, which adds entries from another thread.
     stats = dict(stats)
     snapshots = [stats[name].snapshot() for name in stats]
     object_rows = registry.snapshot() if registry is not None else []
+    last_seen = bird_last_seen(object_rows)
+    ir_cameras = ir_cameras or set()
 
-    total_frames = sum(snap["frames_total"] for snap in snapshots)
-    total_detections = sum(snap["detections_total"] for snap in snapshots)
-    total_alerts = sum(snap["alerts_sent"] for snap in snapshots)
-    total_reconnects = sum(snap["reconnects"] for snap in snapshots)
     healthy = sum(
         1
         for snap in snapshots
@@ -104,66 +167,36 @@ def build_status_message(
         and (snap["since_frame"] is None or snap["since_frame"] <= STALE_FRAME_SECONDS)
     )
 
-    lines = [
-        "Aviary status",
-        f"Cameras: {healthy}/{len(snapshots)} healthy",
-        (
-            "Totals: "
-            f"{_format_count(total_frames)} frames, "
-            f"{_format_count(total_detections)} detections, "
-            f"{_format_count(total_alerts)} alerts, "
-            f"{_format_count(total_reconnects)} reconnects"
-        ),
-        "",
-        "Cameras",
-    ]
+    lines = [f"🐦 Aviary — {healthy}/{len(snapshots)} cameras healthy", ""]
 
+    # Birds, most-recently-seen first. Show EVERY label that has a sighting —
+    # roster individuals AND any species/IR outline (e.g. "cockatiel" at night),
+    # so /status isn't blank-looking during IR even though cameras are detecting.
+    lines.append("Birds — last seen:")
+    roster = known_birds if known_birds is not None else []
+    shown = sorted(last_seen.items(), key=lambda kv: kv[1][0])
+    for label, (since, camera) in shown:
+        lines.append(f"  • {pretty(label)} — {_ago(since)} · {camera_display(camera)}")
+    missing = [bird for bird in roster if bird not in last_seen]
+    if missing:
+        lines.append(f"  • not seen yet: {', '.join(pretty(b) for b in missing)}")
+    if not shown and not missing:
+        lines.append("  • nothing seen yet")
+
+    # Cameras.
+    lines.extend(["", "Cameras:"])
     if not snapshots:
-        lines.append("- none")
+        lines.append("  • none — send /discover")
     for snap in snapshots:
-        detection = snap["last_label"] or "none"
-        if snap["last_label"]:
-            detection += f" ({_format_duration(snap['since_detection'])} ago)"
-        frame_age = _format_frame_age(snap["since_frame"])
-        frame_text = "never" if frame_age == "never" else f"{frame_age} ago"
-        lines.extend(
-            [
-                f"- {snap['name']}: {_camera_status_text(snap)}",
-                f"  FPS: {snap['fps']:.2f} / {snap['sample_fps']:g}",
-                f"  Last frame: {frame_text}; last detection: {detection}",
-                (
-                    "  Failures: "
-                    f"{snap['consecutive_failures']}; "
-                    f"uptime: {_format_duration(snap['uptime'])}"
-                ),
-            ]
-        )
-
-    lines.extend(["", "Objects"])
-    if not object_rows:
-        lines.append("- nothing seen yet")
-    else:
-        threshold_percent = movement_alert_ratio * 100
-        for row in object_rows[:10]:
-            movement_percent = row["movement_percent"]
-            movement = "n/a" if movement_percent is None else f"{movement_percent:.1f}%"
-            alert = (
-                "never"
-                if row["since_alert"] is None
-                else f"{_format_duration(row['since_alert'])} ago"
-            )
-            moved_enough = (
-                movement_percent is not None and movement_percent >= threshold_percent
-            )
-            flag = " alert-move" if moved_enough else ""
-            lines.append(
-                f"- {row['camera']} {row['label']}: "
-                f"seen {_format_duration(row['since'])} ago, "
-                f"alert {alert}, move {movement}{flag}, "
-                f"count {_format_count(row['count'])}"
-            )
-        if len(object_rows) > 10:
-            lines.append(f"- ...and {len(object_rows) - 10} more")
+        fresh = snap["since_frame"] is not None and snap["since_frame"] <= STALE_FRAME_SECONDS
+        if snap["status"] == "connected" and fresh:
+            dot, word = "🟢", "live"
+        elif snap["status"] == "connected":
+            dot, word = "🟡", "stalled"
+        else:
+            dot, word = "🔴", str(snap["status"])
+        ir = " · 🌙 IR" if snap["name"] in ir_cameras else ""
+        lines.append(f"  {dot} {camera_display(snap['name'])} — {word}{ir} · {snap['fps']:.1f} fps")
 
     return "\n".join(lines)
 
@@ -205,7 +238,15 @@ def run_command_bot(
     stop_event: Event | None = None,
     poll_timeout_seconds: int = 30,
     discover_provider: Callable[[], str] | None = None,
+    home_provider: Callable[[], str] | None = None,
+    autofind_provider: Callable[[str], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
+    pause_provider: Callable[[float | None], str] | None = None,
+    resume_provider: Callable[[], str] | None = None,
+    find_provider: Callable[[int, str], str] | None = None,
+    nl_provider: Callable[[int, str], None] | None = None,
+    photo_provider: Callable[[bytes], str] | None = None,
+    activity_provider: Callable[[int, str], None] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -218,9 +259,18 @@ def run_command_bot(
     available = [
         command
         for command, present in (
-            ("/status", status_provider is not None),
-            ("/snapshot", snapshot_provider is not None),
+            ("/activity", activity_provider is not None),
             ("/discover", discover_provider is not None),
+            ("/home", home_provider is not None),
+            ("/autofind", autofind_provider is not None),
+            ("/stop", pause_provider is not None),
+            ("/start", resume_provider is not None),
+            ("/status", status_provider is not None),
+            ("/find", find_provider is not None),
+            ("/snapshot", snapshot_provider is not None),
+            ("/pause", pause_provider is not None),
+            ("/play", resume_provider is not None),
+            ("/resume", resume_provider is not None),
             ("/userinfo", True),
         )
         if present
@@ -266,13 +316,55 @@ def run_command_bot(
             if not message:
                 continue
 
-            command = parse_command(message.get("text", ""))
-            if command is None:
-                continue
+            # A photo carries its text in "caption", not "text"; treat either as
+            # the message text so a captioned photo's command/question still runs.
+            text_in = message.get("text") or message.get("caption") or ""
+            command = parse_command(text_in)
 
             user_id = (message.get("from") or {}).get("id")
             chat_id = (message.get("chat") or {}).get("id")
             if chat_id is None or user_id is None:
+                continue
+
+            # A photo (with or without a caption): identify the birds + describe
+            # it, for fun. Runs on its own thread (detector + VLM are slow) so
+            # the poll loop keeps moving.
+            photos = message.get("photo")
+            if photos and photo_provider is not None:
+                if str(user_id) not in allowed:
+                    send(chat_id, "Unauthorized.")
+                    continue
+                file_id = photos[-1]["file_id"]  # largest size
+
+                def handle_photo(fid: str = file_id, cid: int = chat_id) -> None:
+                    send(cid, "📷 Taking a look at your photo…")
+                    image = download_telegram_file(base_url, fid)
+                    if image is None:
+                        send(cid, "Hmm, I couldn't download that photo.")
+                        return
+                    try:
+                        reply = photo_provider(image)
+                    except Exception:
+                        LOGGER.exception("Photo analysis failed")
+                        reply = "I couldn't make sense of that photo, sorry!"
+                    send(cid, reply)
+
+                Thread(target=handle_photo, name="photo-analyze", daemon=True).start()
+                LOGGER.info("Handling photo from user %s", user_id)
+                # No caption -> done. With a caption, fall through so the caption
+                # is also handled as a command / natural-language request.
+                if not text_in.strip():
+                    continue
+
+            if command is None:
+                # Not a slash command: hand free text to the natural-language
+                # router (if enabled and the sender is allowed). It replies on
+                # its own background thread, so polling is never blocked.
+                if nl_provider is not None and text_in.strip() and str(user_id) in allowed:
+                    try:
+                        nl_provider(chat_id, text_in)
+                    except Exception:
+                        LOGGER.exception("Natural-language routing failed")
                 continue
 
             if command == "/discover":
@@ -291,6 +383,30 @@ def run_command_bot(
                         report = f"Discovery failed: {exc}"
                     send(chat_id, report)
                 LOGGER.info("Handled /discover for user %s", user_id)
+                continue
+
+            if command == "/home":
+                if str(user_id) not in allowed or home_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    try:
+                        send(chat_id, home_provider())
+                    except Exception as exc:  # never let a PTZ error kill polling
+                        LOGGER.exception("Home failed")
+                        send(chat_id, f"Homing failed: {exc}")
+                LOGGER.info("Handled /home for user %s", user_id)
+                continue
+
+            if command == "/autofind":
+                if str(user_id) not in allowed or autofind_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    try:
+                        send(chat_id, autofind_provider(command_argument(message.get("text", ""))))
+                    except Exception as exc:
+                        LOGGER.exception("Autofind toggle failed")
+                        send(chat_id, f"Auto-find failed: {exc}")
+                LOGGER.info("Handled /autofind for user %s", user_id)
                 continue
 
             if command == "/snapshot":
@@ -312,6 +428,39 @@ def run_command_bot(
                 LOGGER.info("Handled /snapshot for user %s", user_id)
                 continue
 
+            if command == "/activity":
+                # Reads the day memory + summarises; can take a bird and/or
+                # "today" (/activity percy today). Backgrounded by the provider,
+                # so ack immediately.
+                if str(user_id) not in allowed or activity_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    send(chat_id, "📋 Looking back…")
+                    try:
+                        activity_provider(chat_id, command_argument(message.get("text", "")))
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Activity failed")
+                        send(chat_id, f"Activity failed: {exc}")
+                LOGGER.info("Handled /activity for user %s", user_id)
+                continue
+
+            if command == "/find":
+                # Validate + launch on a background thread, then ack immediately.
+                # The search (up to 5 min) must never block this poll loop, so it
+                # pushes its own progress + result messages to the chat itself.
+                if str(user_id) not in allowed or find_provider is None:
+                    send(chat_id, "Unauthorized.")
+                else:
+                    target = command_argument(message.get("text", ""))
+                    try:
+                        ack = find_provider(chat_id, target)
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Find failed")
+                        ack = f"Find failed: {exc}"
+                    send(chat_id, ack)
+                LOGGER.info("Handled /find for user %s", user_id)
+                continue
+
             if command == "/userinfo":
                 text = (
                     f"Your Telegram user ID is: {user_id}\n"
@@ -322,6 +471,28 @@ def run_command_bot(
                     text = "Unauthorized."
                 else:
                     text = status_provider()
+            elif command in PAUSE_COMMANDS:
+                # /pause [duration] / /stop [duration]: enter privacy mode. The
+                # argument is a casual duration ("10m", "1 hour"); absent/garbage
+                # parses to None, i.e. an indefinite pause.
+                if str(user_id) not in allowed or pause_provider is None:
+                    text = "Unauthorized."
+                else:
+                    duration = parse_duration(command_argument(message.get("text", "")))
+                    try:
+                        text = pause_provider(duration)
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Pause failed")
+                        text = f"Pause failed: {exc}"
+            elif command in RESUME_COMMANDS:
+                if str(user_id) not in allowed or resume_provider is None:
+                    text = "Unauthorized."
+                else:
+                    try:
+                        text = resume_provider()
+                    except Exception as exc:  # never let it kill polling
+                        LOGGER.exception("Resume failed")
+                        text = f"Resume failed: {exc}"
             else:
                 continue
 

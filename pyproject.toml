@@ -22,6 +22,8 @@ dependencies = [
 # hyphen-case; the Python modules/functions they map to stay underscore.
 [project.scripts]
 server = "lib.main:main"
+llm-harness = "lib.ai.harness:main"
+activity-harness = "lib.ai.activity_harness:main"
 train = "train:main"
 train-live = "train_live:main"
 train-archive = "train_archive:main"

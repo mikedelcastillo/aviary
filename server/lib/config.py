@@ -69,6 +69,26 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
+class OllamaConfig:
+    # Points at the Ollama already running on the machine — this project never
+    # installs or manages Ollama, it only talks to it over HTTP. Two models: a
+    # language model for intent parsing + chat, and a vision model for captioning
+    # bird photos. Both default to models the user already has pulled.
+    enabled: bool
+    base_url: str = "http://localhost:11434"
+    llm_model: str = "qwen3:4b"
+    # 3B (not 7B): on an 8GB GPU the 7B VLM (4.75GB) + LLM (3.2GB) + YOLO spilled
+    # to CPU. The 3B is 2.16GB at the same ~20s latency and near-identical caption
+    # quality, so all three coexist on-GPU (~5.8GB) with headroom. See bench.
+    vlm_model: str = "qwen2.5vl:3b"
+    # Generous: vision passes over a photo can take tens of seconds on a busy GPU.
+    timeout_seconds: float = 120.0
+    # Max concurrent vision (image) calls; the rest queue. 1 keeps the GPU from
+    # being swamped when many frames are captioned/named at once.
+    vision_concurrency: int = 1
+
+
+@dataclass(frozen=True)
 class CollectConfig:
     objects: frozenset[str]
     directory: Path = Path("./data/server/collect")
@@ -126,6 +146,19 @@ class AppConfig:
     filter: FilterConfig
     credentials: CameraCredentials
     discovery: DiscoveryConfig
+    # Defaulted (and last) so existing constructions that predate the AI features
+    # — and tests — don't have to pass them. ``build_config`` always sets them.
+    ollama: OllamaConfig = OllamaConfig(enabled=False)
+    # The caretaker's report beat in minutes (0 disables). It checks far more
+    # often than this, reporting new birds immediately and only editing the last
+    # message in place on this beat when nothing changed. When reports are on, raw
+    # per-detection photo alerts default OFF so they don't double up.
+    memory_interval_minutes: float = 0.0
+    raw_photo_alerts: bool = True
+    # /find PTZ patrol scans this grid of each camera's range (columns x rows),
+    # so it sweeps the tilt axis too. 4 x 3 = 12 cells by default.
+    ptz_scan_cols: int = 4
+    ptz_scan_rows: int = 3
 
 
 def _require_env(name: str) -> str:
@@ -141,6 +174,23 @@ def _as_user_ids(value: str) -> list[str]:
 
 def _as_object_names(value: str) -> frozenset[str]:
     return frozenset(item.strip().lower() for item in value.split(",") if item.strip())
+
+
+def _as_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _as_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _credentials() -> CameraCredentials:
@@ -194,6 +244,29 @@ def _model_image_size() -> int:
         raise ValueError(f"MODEL_IMAGE_SIZE must be an integer, got {raw!r}") from exc
 
 
+def _ollama_config() -> OllamaConfig:
+    """Build the Ollama client config from the environment.
+
+    Enabled by default (the whole point is to talk to the machine's existing
+    Ollama); set ``OLLAMA_ENABLED=0`` to turn the natural-language features off.
+    Blank model/url envs fall back to the dataclass defaults — the single source
+    of truth — so an empty value in .env behaves like "unset".
+    """
+    enabled = os.environ.get("OLLAMA_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+    # One endpoint for both: a direct Ollama (http://host:11434) OR an Olla load
+    # balancer that spreads calls across several Ollama machines (use Olla's
+    # Ollama path, e.g. http://host:40114/olla/ollama). Both speak the same
+    # /api/chat + /api/generate API, so a single base URL covers either.
+    base_url = os.environ.get("OLLAMA_BASE_URL", "").strip() or OllamaConfig.base_url
+    llm_model = os.environ.get("OLLAMA_LLM_MODEL", "").strip() or OllamaConfig.llm_model
+    vlm_model = os.environ.get("OLLAMA_VLM_MODEL", "").strip() or OllamaConfig.vlm_model
+    vision_concurrency = max(1, int(_as_float("OLLAMA_VISION_CONCURRENCY", OllamaConfig.vision_concurrency)))
+    return OllamaConfig(
+        enabled=enabled, base_url=base_url, llm_model=llm_model, vlm_model=vlm_model,
+        vision_concurrency=vision_concurrency,
+    )
+
+
 def build_config() -> AppConfig:
     model = ModelConfig(
         paths=_model_paths(),
@@ -215,6 +288,16 @@ def build_config() -> AppConfig:
     # subnet when auto-detect would pick the wrong interface (Docker, etc.).
     discovery = DiscoveryConfig(cidr=os.environ.get("TAPO_DISCOVERY_CIDR") or None)
 
+    # Caretaker report beat, and whether raw photo alerts still fire. The
+    # caretaker only runs when the interval is set AND Ollama is on; raw alerts
+    # default OFF only when the caretaker will actually replace them, so a config
+    # with Ollama disabled (or no interval) keeps the raw alerts and never goes
+    # silent. RAW_PHOTO_ALERTS overrides either way.
+    ollama = _ollama_config()
+    memory_minutes = _as_float("MEMORY_INTERVAL_MINUTES", 5.0)
+    caretaker_on = memory_minutes > 0 and ollama.enabled
+    raw_photo_alerts = _as_bool("RAW_PHOTO_ALERTS", not caretaker_on)
+
     return AppConfig(
         snapshot_dir=Path("./data/server/snapshots"),
         model=model,
@@ -223,4 +306,9 @@ def build_config() -> AppConfig:
         filter=object_filter,
         credentials=credentials,
         discovery=discovery,
+        ollama=ollama,
+        memory_interval_minutes=memory_minutes,
+        raw_photo_alerts=raw_photo_alerts,
+        ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),
+        ptz_scan_rows=max(1, int(_as_float("PTZ_SCAN_ROWS", 3))),
     )

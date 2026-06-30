@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import monitor_camera
 from lib.config import AppConfig, CameraConfig
+from lib.control import RuntimeControl
+from lib.ir import IRState
 from lib.detector import ObjectDetector
 from lib.discovery import (
     DiscoveryProgress,
@@ -110,6 +112,8 @@ class CameraSupervisor:
         stats_lock: threading.Lock,
         stop_event: threading.Event,
         progress: DiscoveryProgress | None = None,
+        control: RuntimeControl | None = None,
+        ir_state: IRState | None = None,
     ) -> None:
         self._app_config = app_config
         self._detector = detector
@@ -119,6 +123,10 @@ class CameraSupervisor:
         self._stats = stats
         self._stats_lock = stats_lock
         self._stop_event = stop_event
+        self._ir_state = ir_state
+        # Shared privacy/pause state. Passed to every monitor thread so a pause
+        # stops all cameras consuming their streams at once.
+        self._control = control
         # Live per-host sweep state for the dashboard's discovery grid. Shared
         # with the Dashboard so the camera band can switch to "discover mode"
         # while a scan runs. Optional: discovery works fine without it.
@@ -167,6 +175,8 @@ class CameraSupervisor:
                     self._dispatcher,
                     camera_stats,
                     self._stop_event,
+                    self._control,
+                    self._ir_state,
                 ),
                 name=f"camera-{host}",
                 daemon=True,
