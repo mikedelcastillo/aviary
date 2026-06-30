@@ -70,6 +70,11 @@ HOST_TESTING = "testing"   # probe in flight               (yellow)
 HOST_FOUND = "found"       # confirmed camera              (green)
 HOST_FAILED = "failed"     # port closed / auth / no stream (red)
 
+# Cadence for the live /discover frame: redraw the progress bar on this steady
+# tick (like /machine) instead of editing on every per-host event, which would
+# saturate Telegram's edit rate limit on a /24 sweep.
+DISCOVER_TICK_SECONDS = 2.0
+
 
 class DiscoveryProgress:
     """Thread-safe, live view of an in-flight discovery sweep.

@@ -17,6 +17,7 @@ from lib.durations import format_duration as _format_duration
 from lib.find import bird_last_seen
 from lib.labels import pretty
 from lib.objects import ObjectRegistry
+from lib.discovery import DISCOVER_TICK_SECONDS
 from lib.stats import CameraStats
 from lib.telegram.notifier import _is_not_modified, _is_parse_error
 from lib.telegram.userinfo import parse_command
@@ -501,10 +502,9 @@ def run_command_bot(
                     if str(user_id) not in allowed or discover_provider is None:
                         send(chat_id, "Unauthorized.")
                     else:
-                        status_id = send(chat_id, "Scanning the local network for cameras...")
+                        status_id = send(chat_id, "🔍 Scanning the local network for cameras…")
                         edit_lock = Lock()
                         progress_lock = Lock()
-                        progress_dirty = Event()
                         progress_stop = Event()
                         latest_progress: str | None = None
 
@@ -512,13 +512,13 @@ def run_command_bot(
                             nonlocal latest_progress
                             with progress_lock:
                                 latest_progress = text
-                            progress_dirty.set()
 
                         def edit_progress() -> None:
-                            while not progress_stop.is_set():
-                                if not progress_dirty.wait(0.25):
-                                    continue
-                                progress_dirty.clear()
+                            # Steady tick like /machine: redraw the live frame every
+                            # couple of seconds so the bar visibly advances, rather
+                            # than editing on every per-host event (which would flood
+                            # Telegram's edit rate limit on a /24 sweep).
+                            while not progress_stop.wait(DISCOVER_TICK_SECONDS):
                                 with progress_lock:
                                     text = latest_progress
                                 if text is None:
@@ -540,7 +540,6 @@ def run_command_bot(
                             report = f"Discovery failed: {exc}"
                         finally:
                             progress_stop.set()
-                            progress_dirty.set()
                             progress_thread.join(timeout=2.0)
                             with edit_lock:
                                 # If the initial ack never sent (status_id is None),

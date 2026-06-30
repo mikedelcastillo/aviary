@@ -261,7 +261,7 @@ def test_discover_command_acks_then_edits_report_for_allowed_user(monkeypatch) -
     )
 
     assert [call["json"]["text"] for call in calls] == [
-        "Scanning the local network for cameras...",
+        "🔍 Scanning the local network for cameras…",
         "found 2 cameras",
     ]
     assert calls[0]["url"].endswith("/sendMessage")
@@ -311,7 +311,7 @@ def test_discover_command_edits_ack_when_message_id_available(monkeypatch) -> No
 
     assert len(calls) == 2
     assert calls[0]["url"].endswith("/sendMessage")
-    assert calls[0]["json"]["text"] == "Scanning the local network for cameras..."
+    assert calls[0]["json"]["text"] == "🔍 Scanning the local network for cameras…"
     assert calls[1]["url"].endswith("/editMessageText")
     assert calls[1]["json"]["message_id"] == 77
     assert calls[1]["json"]["text"] == "found 2 cameras"
@@ -319,6 +319,7 @@ def test_discover_command_edits_ack_when_message_id_available(monkeypatch) -> No
 
 def test_discover_command_edits_live_progress_before_final_report(monkeypatch) -> None:
     stop_event = threading.Event()
+    progress_seen = threading.Event()
     calls: list[dict] = []
 
     def get(_url, params, timeout):
@@ -341,14 +342,22 @@ def test_discover_command_edits_live_progress_before_final_report(monkeypatch) -
         if "text" not in json:
             return Response()
         calls.append({"url": url, "json": json})
+        if json["text"] == "found 1 so far":
+            progress_seen.set()
         if json["text"] == "final report":
             stop_event.set()
         return Response({"result": {"message_id": 77}})
 
     def discover_provider(progress_update) -> str:
+        # Publish a live frame, then hold the scan open until the steady-tick
+        # thread has drawn it, so the intermediate edit is observed before the
+        # final report (mirrors a real sweep that runs across several ticks).
         progress_update("found 1 so far")
+        progress_seen.wait(2.0)
         return "final report"
 
+    # Shrink the live-frame cadence so the tick fires immediately under test.
+    monkeypatch.setattr("lib.telegram.commands.DISCOVER_TICK_SECONDS", 0.01)
     monkeypatch.setattr("lib.telegram.commands.requests.get", get)
     monkeypatch.setattr("lib.telegram.commands.requests.post", post)
 
@@ -361,7 +370,7 @@ def test_discover_command_edits_live_progress_before_final_report(monkeypatch) -
     )
 
     assert [call["json"]["text"] for call in calls] == [
-        "Scanning the local network for cameras...",
+        "🔍 Scanning the local network for cameras…",
         "found 1 so far",
         "final report",
     ]

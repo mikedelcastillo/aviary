@@ -112,59 +112,75 @@ class _CameraStopEvent:
 
 
 def format_discovery_report(applied: DiscoveryApplied) -> str:
-    """Render a human-readable ``/discover`` reply from a DiscoveryApplied."""
+    """Render the final ``/discover`` summary: a one-line headline of what the
+    scan found, then a short list of what actually changed on the cameras.
+
+    Grouped to be skimmable — the scan stats on top, the camera changes (started
+    / already running / retired) as a bulleted list below, and any credential
+    problem called out last so it isn't lost in the noise.
+    """
     result = applied.result
+    cameras = len(result.cameras)
     lines = [
-        "Discovery complete.",
-        (
-            f"Scanned {result.hosts_scanned} hosts in "
-            f"{result.elapsed_seconds:.1f}s: "
-            f"{result.ports_open} with :554 open, "
-            f"{len(result.cameras)} confirmed camera(s)."
-        ),
+        f"✅ **Discovery complete** — scanned {result.hosts_scanned} hosts "
+        f"in {result.elapsed_seconds:.1f}s",
+        f"Found {cameras} camera(s) · {result.ports_open} host(s) with port :554 open",
+        "",
+        "📷 **Cameras**",
     ]
+    if applied.added:
+        lines.append("  🟢 Started: " + ", ".join(applied.added))
+    else:
+        lines.append("  • No new cameras started.")
+    if applied.already_active:
+        lines.append(f"  ✔️ {applied.already_active} already running")
+    if applied.removed:
+        lines.append("  🔴 Stopped stale: " + ", ".join(applied.removed))
     if result.auth_failures:
         # Surface bad creds explicitly: a camera that answers :554 but rejects
         # the password is almost always a TAPO_CREDENTIALS mismatch, which is
         # otherwise invisible (it just never shows up as a camera).
+        lines.append("")
         lines.append(
-            f"{result.auth_failures} host(s) rejected the credentials "
-            "(check TAPO_CREDENTIALS)."
+            f"⚠️ {result.auth_failures} host(s) rejected the credentials "
+            "— check TAPO_CREDENTIALS"
         )
-    if applied.added:
-        lines.append("Started: " + ", ".join(applied.added) + ".")
-    else:
-        lines.append("No new cameras started.")
-    if applied.already_active:
-        lines.append(f"{applied.already_active} already running.")
-    if applied.removed:
-        lines.append("Stopped stale: " + ", ".join(applied.removed) + ".")
     return "\n".join(lines)
 
 
+def _progress_bar(fraction: float, width: int = 16) -> str:
+    """A filled/empty block bar, matching the /machine telemetry frame."""
+    fraction = max(0.0, min(1.0, fraction))
+    filled = int(round(fraction * width))
+    return "█" * filled + "░" * (width - filled)
+
+
 def format_discovery_progress(progress: dict) -> str:
-    """Render an in-flight discovery update for Telegram."""
+    """Render a live /discover frame for Telegram: a header, a progress bar, and
+    a per-state breakdown — the same visual language as the /machine dashboard."""
     counts = progress.get("counts", {})
     order = list(progress.get("order", []))
     states = dict(progress.get("states", {}))
+    network = progress.get("network") or ""
     total = len(order)
-    pending = counts.get(HOST_PENDING, 0)
     testing = counts.get(HOST_TESTING, 0)
     found = counts.get(HOST_FOUND, 0)
     failed = counts.get(HOST_FAILED, 0)
     checked = found + failed
 
+    where = f" — {network}0/24" if network else ""
+    bar = _progress_bar(checked / total if total else 0.0)
     lines = [
-        "Scanning the local network for cameras...",
-        f"Checked {checked}/{total} host(s); testing {testing}; found {found}.",
+        f"🔍 **Discovering cameras**{where}",
+        f"`[{bar}]` {checked}/{total} hosts",
+        "",
+        f"testing {testing} · found {found} · failed {failed}",
     ]
     found_hosts = [host for host in order if states.get(host) == HOST_FOUND]
     if found_hosts:
-        lines.append("Found so far: " + ", ".join(found_hosts) + ".")
-    elif pending:
-        lines.append("No cameras confirmed yet.")
-    else:
-        lines.append("No cameras confirmed.")
+        lines.append("")
+        lines.append("**Found so far**")
+        lines.extend(f"  🟢 {host}" for host in found_hosts)
     return "\n".join(lines)
 
 

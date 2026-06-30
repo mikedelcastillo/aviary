@@ -46,7 +46,7 @@ from lib.detection_log import DetectionLogger
 from lib.durations import format_duration as _duration_text
 from lib.weather import WeatherMonitor, fetch_forecast, has_location, summarize as summarize_weather
 from lib.machine import MachineFrames, MachineSampler
-from lib.discovery import DiscoveryProgress
+from lib.discovery import DISCOVER_TICK_SECONDS, DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder, currently_visible, format_visible
 from lib.imaging import downscale_array_to_jpeg
@@ -271,7 +271,7 @@ def build_nl_router(
         elif action == "stop_find":
             notifier.send_text(chat_id, finder.stop_current())
         elif action == "discover":
-            message_id = notifier.send_text(chat_id, "Scanning the local network for cameras...")
+            message_id = notifier.send_text(chat_id, "🔍 Scanning the local network for cameras…")
             def edit_discover(text: str) -> None:
                 if message_id is not None and hasattr(notifier, "edit_message_text"):
                     notifier.edit_message_text(chat_id, message_id, text)
@@ -279,13 +279,13 @@ def build_nl_router(
             # Debounce progress edits: discovery fires the callback ~twice per host
             # (~500x on a /24), and each edit is a blocking, rate-limited Telegram
             # call that would otherwise saturate the send gate and flood-control the
-            # bot. Skip intermediate edits closer than 0.5s; the final report is
-            # always sent below, unthrottled.
+            # bot. Redraw the live bar on the same steady tick as /machine and
+            # /discover; the final report is always sent below, unthrottled.
             last_edit = [0.0]
 
             def progress_update(text: str) -> None:
                 now = time.monotonic()
-                if now - last_edit[0] < 0.5:
+                if now - last_edit[0] < DISCOVER_TICK_SECONDS:
                     return
                 last_edit[0] = now
                 edit_discover(text)
