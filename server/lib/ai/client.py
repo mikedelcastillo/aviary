@@ -125,6 +125,14 @@ class OllamaClient:
                 return response.json()
             except requests.RequestException as exc:
                 last_exc = exc
+                # A 4xx is usually a client error (bad request, auth, not-found)
+                # that a retry can't fix — fail fast rather than burning the
+                # backoff. The exceptions are 408 (timeout) and 429 (rate limit),
+                # which ARE transient (a busy Olla backend) and worth retrying,
+                # like 5xx and connection/timeout errors.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status is not None and 400 <= status < 500 and status not in (408, 429):
+                    raise
                 if attempt < self._max_retries:
                     LOGGER.warning(
                         "Ollama %s failed (%s); retry %d/%d",

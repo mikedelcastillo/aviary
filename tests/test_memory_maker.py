@@ -86,6 +86,11 @@ def test_report_saves_images_writes_memory_and_broadcasts(tmp_path) -> None:
     entries = load_entries(memories, now_dt.date())
     assert entries and entries[0].birds == ["percy"]
     assert entries[0].photos and entries[0].photos[0].endswith(".jpg")
+    assert "Percy on Big Cage: perched" in entries[0].note
+    assert entries[0].observations
+    assert entries[0].observations[0].camera == "Big Cage"
+    assert entries[0].observations[0].birds == ["percy"]
+    assert entries[0].observations[0].note == "perched"
 
 
 def test_tick_reports_on_new_bird(tmp_path) -> None:

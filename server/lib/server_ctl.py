@@ -1,0 +1,331 @@
+"""Background lifecycle for the camera server: ``server``, ``server-up``, ``server-down``.
+
+``uv run server`` runs the dashboard in the foreground exactly as before — UNLESS a
+background instance is already running, in which case it attaches to that instead of
+starting a second server that would fight over the cameras.
+
+``uv run server-up`` runs the server in the background and registers it to start on
+boot. The dashboard is a full-screen Rich TUI that needs a real terminal, so the
+background server runs inside a dedicated tmux session (``tmux -L aviary``) supervised
+by a systemd *user* service; boot autostart works because the user already has linger
+enabled. Re-running ``server-up`` while it is up just attaches to the live dashboard.
+Inside the attached view, Esc or Ctrl-C detaches and leaves the server running (the
+dashboard is output-only, so those keys are repurposed to detach instead of being
+delivered to the process).
+
+``uv run server-down`` stops the background server and removes the autostart unit.
+
+Only this module is imported to decide *whether* to attach, so the heavy
+``lib.main`` import (cv2/torch/ultralytics) is deferred until we actually run the
+server in the foreground.
+"""
+
+from __future__ import annotations
+
+import getpass
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# Dedicated tmux server socket + session name, kept separate from any tmux the user
+# runs interactively so our key rebindings and teardown never touch their sessions.
+SOCKET = "aviary"
+SESSION = "aviary"
+SERVICE = "aviary.service"
+
+# Set inside the background tmux pane so the in-pane `uv run server` runs the real
+# server instead of seeing its own session and recursively attaching.
+INNER_ENV = "AVIARY_SERVER_INNER"
+
+
+def _config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def _gen_dir() -> Path:
+    return _config_home() / "aviary"
+
+
+def _launcher_path() -> Path:
+    return _gen_dir() / "run-server.sh"
+
+
+def _tmux_conf_path() -> Path:
+    return _gen_dir() / "tmux.conf"
+
+
+def _unit_path() -> Path:
+    return _config_home() / "systemd" / "user" / SERVICE
+
+
+# --------------------------------------------------------------------------- #
+# Tool discovery
+# --------------------------------------------------------------------------- #
+def _tmux() -> str:
+    path = shutil.which("tmux")
+    if not path:
+        sys.exit(
+            "tmux is required for the background server. Install it "
+            "(e.g. `sudo apt install tmux`) or use `uv run server` in the foreground."
+        )
+    return path
+
+
+def _uv() -> str:
+    path = shutil.which("uv")
+    if not path:
+        sys.exit("Could not locate the `uv` binary on PATH.")
+    return path
+
+
+def _repo_root() -> Path:
+    # server-up is launched via `uv run` from the repo, so cwd is the repo root.
+    root = Path.cwd().resolve()
+    if not (root / "pyproject.toml").is_file():
+        sys.exit(f"Run this from the aviary repo root (no pyproject.toml in {root}).")
+    return root
+
+
+def _require_systemd() -> None:
+    if sys.platform != "linux" or not shutil.which("systemctl"):
+        sys.exit(
+            "Background mode + boot autostart need systemd (Linux). "
+            "Use `uv run server` to run in the foreground."
+        )
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        sys.exit(
+            "No systemd user session (XDG_RUNTIME_DIR unset). "
+            "Log in on a normal desktop/SSH session and retry, or use `uv run server`."
+        )
+
+
+# --------------------------------------------------------------------------- #
+# tmux session helpers
+# --------------------------------------------------------------------------- #
+def _session_running() -> bool:
+    """True iff our dedicated tmux session exists (cheap, no heavy imports)."""
+    return (
+        subprocess.run(
+            [_tmux(), "-L", SOCKET, "has-session", "-t", SESSION],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode
+        == 0
+    )
+
+
+def _attach() -> None:
+    """Replace this process with a tmux client attached to the background dashboard."""
+    tmux = _tmux()
+    print(
+        "Attached to the background server — press Esc or Ctrl-C to detach "
+        "(the server keeps running).",
+        file=sys.stderr,
+    )
+    os.execv(tmux, [tmux, "-L", SOCKET, "attach", "-t", SESSION])
+
+
+def _wait_for_session(timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _session_running():
+            return True
+        time.sleep(0.25)
+    return _session_running()
+
+
+# --------------------------------------------------------------------------- #
+# Generated file contents (pure — unit tested)
+# --------------------------------------------------------------------------- #
+def render_tmux_conf() -> str:
+    return (
+        "# Generated by `uv run server-up` — dedicated tmux server for the aviary\n"
+        "# monitor. The dashboard is output-only, so Ctrl-C and Escape are repurposed\n"
+        "# to DETACH (leave the background server running) instead of being delivered\n"
+        "# to the process.\n"
+        "set -g escape-time 50\n"
+        "set -g mouse on\n"
+        "set -g history-limit 20000\n"
+        "set -g window-size latest\n"
+        "set -g status on\n"
+        "set -g status-style 'bg=colour236 fg=colour108'\n"
+        "set -g status-left ''\n"
+        "set -g status-right ' aviary · Esc / Ctrl-C: detach (server keeps running) '\n"
+        "set -g status-right-length 60\n"
+        "set -g window-status-format ''\n"
+        "set -g window-status-current-format ''\n"
+        "bind-key -n C-c detach-client\n"
+        "bind-key -n Escape detach-client\n"
+    )
+
+
+def render_launcher(repo: Path, uv: str) -> str:
+    return (
+        "#!/usr/bin/env bash\n"
+        "# Generated by `uv run server-up`. Runs the aviary dashboard in the foreground\n"
+        "# inside the tmux session and restarts it if it exits unexpectedly.\n"
+        "set -u\n"
+        f"cd {shlex.quote(str(repo))} || exit 1\n"
+        f"export {INNER_ENV}=1\n"
+        "while true; do\n"
+        f"  {shlex.quote(uv)} run server\n"
+        "  code=$?\n"
+        '  [ "$code" -eq 0 ] && exit 0\n'
+        "  printf '\\n[aviary] server exited (%s); restarting in 3s...\\n' \"$code\" >&2\n"
+        "  sleep 3\n"
+        "done\n"
+    )
+
+
+def render_unit(repo: Path, tmux: str, uv: str) -> str:
+    # systemd user services get a minimal PATH; bake in the dir holding uv plus the
+    # usual locations so the server (and anything it shells out to) resolves.
+    dirs = [
+        str(Path(uv).parent),
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        f"{Path.home()}/.local/bin",
+    ]
+    path = os.pathsep.join(dict.fromkeys(dirs))  # de-dup, order preserved
+    return (
+        "[Unit]\n"
+        "Description=Aviary camera monitor (background tmux session)\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        f"WorkingDirectory={repo}\n"
+        f"Environment=PATH={path}\n"
+        f"ExecStart={tmux} -L {SOCKET} -f {_tmux_conf_path()} new-session -d "
+        f"-s {SESSION} -x 250 -y 60 {_launcher_path()}\n"
+        f"ExecStop={tmux} -L {SOCKET} kill-session -t {SESSION}\n"
+        "TimeoutStartSec=60\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def _write_generated_files(repo: Path, uv: str, tmux: str) -> None:
+    _gen_dir().mkdir(parents=True, exist_ok=True)
+    _unit_path().parent.mkdir(parents=True, exist_ok=True)
+
+    launcher = _launcher_path()
+    launcher.write_text(render_launcher(repo, uv))
+    launcher.chmod(0o755)
+
+    _tmux_conf_path().write_text(render_tmux_conf())
+    _unit_path().write_text(render_unit(repo, tmux, uv))
+
+
+def _ensure_linger() -> None:
+    user = getpass.getuser()
+    cur = subprocess.run(
+        ["loginctl", "show-user", user, "-p", "Linger"],
+        capture_output=True,
+        text=True,
+    )
+    if "Linger=yes" in cur.stdout:
+        return
+    if subprocess.run(["loginctl", "enable-linger", user]).returncode != 0:
+        print(
+            "⚠ Could not enable linger; the server may not auto-start on boot. "
+            f"Run manually:  sudo loginctl enable-linger {user}",
+            file=sys.stderr,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Entry points
+# --------------------------------------------------------------------------- #
+def server() -> None:
+    """`uv run server`: attach to the background server if one is up, else run it here."""
+    if (
+        not os.environ.get(INNER_ENV)
+        and sys.platform == "linux"
+        and shutil.which("tmux")
+        and _session_running()
+    ):
+        _attach()  # replaces this process; never returns
+        return
+
+    from lib.main import main
+
+    main()
+
+
+def up() -> None:
+    """`uv run server-up`: start the server in the background + enable boot autostart."""
+    _require_systemd()
+    tmux = _tmux()
+    uv = _uv()
+
+    if _session_running():
+        _attach()  # already up — just show the dashboard; never returns
+        return
+
+    repo = _repo_root()
+    _write_generated_files(repo, uv, tmux)
+    _ensure_linger()
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "--user", "enable", "--now", SERVICE], check=True)
+
+    if not _wait_for_session():
+        sys.exit(
+            "Background server did not come up in time. Check the service with:\n"
+            "  systemctl --user status aviary.service\n"
+            "  journalctl --user -u aviary.service -e"
+        )
+
+    print(
+        "✓ Aviary server started in the background and enabled on boot.\n"
+        f"  Logs:    {repo / 'aviary.log'}\n"
+        "  View:    uv run server-up   (or `uv run server`) to attach; "
+        "Esc / Ctrl-C detaches\n"
+        "  Stop:    uv run server-down"
+    )
+
+
+def down() -> None:
+    """`uv run server-down`: stop the background server and remove boot autostart."""
+    _require_systemd()
+    had = _session_running() or _unit_path().exists()
+
+    subprocess.run(
+        ["systemctl", "--user", "disable", "--now", SERVICE],
+        stderr=subprocess.DEVNULL,
+    )
+    # Tear down the dedicated tmux server (session + panes) in case it was started
+    # outside systemd; this only touches our `-L aviary` socket, never the user's.
+    if shutil.which("tmux"):
+        subprocess.run(
+            [_tmux(), "-L", SOCKET, "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    _unit_path().unlink(missing_ok=True)
+    _launcher_path().unlink(missing_ok=True)
+    _tmux_conf_path().unlink(missing_ok=True)
+    try:
+        _gen_dir().rmdir()
+    except OSError:
+        pass
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"])
+    subprocess.run(
+        ["systemctl", "--user", "reset-failed", SERVICE],
+        stderr=subprocess.DEVNULL,
+    )
+
+    print(
+        "✓ Background server stopped and boot autostart removed."
+        if had
+        else "Nothing to stop — no background server was running."
+    )

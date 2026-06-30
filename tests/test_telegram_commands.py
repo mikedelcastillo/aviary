@@ -14,8 +14,9 @@ from lib.telegram.commands import (
 
 
 class Response:
-    def __init__(self, payload: dict | None = None) -> None:
+    def __init__(self, payload: dict | None = None, status_code: int = 200) -> None:
         self._payload = payload or {}
+        self.status_code = status_code
 
     def json(self) -> dict:
         return self._payload
@@ -56,6 +57,23 @@ def test_status_message_lists_missing_roster_birds_and_ir() -> None:
     assert "Percy" in message
     assert "not seen yet" in message and "Draft" in message
     assert "🌙 IR" in message
+
+
+def test_status_message_uses_logged_last_seen_for_roster_birds() -> None:
+    registry = ObjectRegistry()
+    stats = {"camera-1": CameraStats("camera-1", 0.25, registry)}
+    stats["camera-1"].set_status("connected")
+
+    message = build_status_message(
+        stats,
+        registry,
+        known_birds=["jynx", "draft"],
+        logged_last_seen={"jynx": (90.0, "camera-1")},
+    )
+
+    assert "Jynx — 1m 30s ago" in message
+    assert "not seen yet: Draft" in message
+    assert "not seen yet: Jynx" not in message
 
 
 def test_dashboard_frame_age_uses_seconds_after_one_second() -> None:
@@ -202,9 +220,9 @@ def test_discover_command_requires_allowed_user(monkeypatch) -> None:
     assert provider_called is False
 
 
-def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> None:
+def test_discover_command_acks_then_edits_report_for_allowed_user(monkeypatch) -> None:
     stop_event = threading.Event()
-    sent_messages: list[str] = []
+    calls: list[dict] = []
 
     def get(_url, params, timeout):
         return Response(
@@ -222,16 +240,14 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
             }
         )
 
-    def post(_url, json, timeout):
+    def post(url, json, timeout):
         # Skip the startup setMyCommands registration; record only replies.
         if "text" not in json:
             return Response()
-        sent_messages.append(json["text"])
-        # Stop only once both the ack and the report have been sent so the loop
-        # doesn't exit before the second message.
-        if len(sent_messages) >= 2:
+        calls.append({"url": url, "json": json})
+        if json["text"] == "found 2 cameras":
             stop_event.set()
-        return Response()
+        return Response({"result": {"message_id": 77}})
 
     monkeypatch.setattr("lib.telegram.commands.requests.get", get)
     monkeypatch.setattr("lib.telegram.commands.requests.post", post)
@@ -244,10 +260,209 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
         discover_provider=lambda: "found 2 cameras",
     )
 
-    assert sent_messages == [
+    assert [call["json"]["text"] for call in calls] == [
         "Scanning the local network for cameras...",
         "found 2 cameras",
     ]
+    assert calls[0]["url"].endswith("/sendMessage")
+    assert calls[1]["url"].endswith("/editMessageText")
+    assert calls[1]["json"]["message_id"] == 77
+
+
+def test_discover_command_edits_ack_when_message_id_available(monkeypatch) -> None:
+    stop_event = threading.Event()
+    calls: list[dict] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/discover",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" not in json:
+            return Response()
+        calls.append({"url": url, "json": json})
+        if url.endswith("/editMessageText"):
+            stop_event.set()
+            return Response()
+        return Response({"result": {"message_id": 77}})
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        discover_provider=lambda: "found 2 cameras",
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["url"].endswith("/sendMessage")
+    assert calls[0]["json"]["text"] == "Scanning the local network for cameras..."
+    assert calls[1]["url"].endswith("/editMessageText")
+    assert calls[1]["json"]["message_id"] == 77
+    assert calls[1]["json"]["text"] == "found 2 cameras"
+
+
+def test_discover_command_edits_live_progress_before_final_report(monkeypatch) -> None:
+    stop_event = threading.Event()
+    calls: list[dict] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/discover",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" not in json:
+            return Response()
+        calls.append({"url": url, "json": json})
+        if json["text"] == "final report":
+            stop_event.set()
+        return Response({"result": {"message_id": 77}})
+
+    def discover_provider(progress_update) -> str:
+        progress_update("found 1 so far")
+        return "final report"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        discover_provider=discover_provider,
+    )
+
+    assert [call["json"]["text"] for call in calls] == [
+        "Scanning the local network for cameras...",
+        "found 1 so far",
+        "final report",
+    ]
+    assert calls[1]["url"].endswith("/editMessageText")
+    assert calls[1]["json"]["message_id"] == 77
+    assert calls[2]["url"].endswith("/editMessageText")
+    assert calls[2]["json"]["message_id"] == 77
+
+
+def test_restart_command_calls_provider_for_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    calls: list[bool] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/restart",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def restart_provider() -> str:
+        calls.append(True)
+        return "Restarting Aviary server..."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        restart_provider=restart_provider,
+    )
+
+    assert calls == [True]
+    assert sent_messages == ["Restarting Aviary server..."]
+
+
+def test_detections_command_passes_argument_to_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_args: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/detections percy 2026-06-27",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def detection_provider(argument: str) -> str:
+        seen_args.append(argument)
+        return "Percy — 1h"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        detection_provider=detection_provider,
+    )
+
+    assert seen_args == ["percy 2026-06-27"]
+    assert sent_messages == ["Percy — 1h"]
 
 
 def test_home_command_calls_provider_for_allowed_user(monkeypatch) -> None:
@@ -295,6 +510,53 @@ def test_home_command_calls_provider_for_allowed_user(monkeypatch) -> None:
 
     assert calls == [True]
     assert sent_messages == ["🏠 Sent 2/2 pan-tilt camera(s) to their saved viewpoint."]
+
+
+def test_quality_command_passes_argument_to_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_args: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/quality stream2",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def quality_provider(argument: str) -> str:
+        seen_args.append(argument)
+        return "Quality mode: stream2."
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        quality_provider=quality_provider,
+    )
+
+    assert seen_args == ["stream2"]
+    assert sent_messages == ["Quality mode: stream2."]
 
 
 def test_snapshot_command_requires_allowed_user(monkeypatch) -> None:
@@ -715,3 +977,207 @@ def test_status_shows_ir_species_label_during_night() -> None:
     stats["camera-1"].record_inference(["cockatiel"], [detection("cockatiel")], (100, 100))
     message = build_status_message(stats, registry, known_birds=["percy", "draft"])
     assert "Cockatiel" in message  # the seen species shows, not just "nothing seen"
+
+
+def test_sleep_command_passes_argument_to_provider(monkeypatch) -> None:
+    from lib.telegram.commands import COMMAND_DESCRIPTIONS
+
+    assert "/sleep" in COMMAND_DESCRIPTIONS  # registered in the slash menu
+
+    stop_event = threading.Event()
+    seen: list[tuple[int, str]] = []
+
+    def post(_url, json, timeout):
+        return Response()
+
+    def sleep_provider(chat_id: int, argument: str) -> None:
+        seen.append((chat_id, argument))
+        stop_event.set()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/sleep week"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        sleep_provider=sleep_provider,
+    )
+
+    assert seen == [(123, "week")]
+
+
+def test_care_command_sends_provider_reply(monkeypatch) -> None:
+    from lib.telegram.commands import COMMAND_DESCRIPTIONS
+
+    assert "/care" in COMMAND_DESCRIPTIONS
+
+    stop_event = threading.Event()
+    sent: list[str] = []
+    seen_args: list[str] = []
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    def care_provider(argument: str) -> str:
+        seen_args.append(argument)
+        return f"🐦 care: {argument or 'overview'}"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/care diet"))
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        care_provider=care_provider,
+    )
+
+    assert seen_args == ["diet"]
+    assert sent == ["🐦 care: diet"]
+
+
+def test_command_bot_survives_a_handler_exception(monkeypatch) -> None:
+    """A handler raising must not kill the poll thread; the bot keeps serving.
+
+    Regression: status_provider() (and any other handler) raising escaped the
+    per-update loop and tore down run_command_bot entirely, taking the whole
+    command bot offline until a restart.
+    """
+    stop_event = threading.Event()
+    sent: list[str] = []
+    batches = [
+        [{"update_id": 1, "message": {"text": "/status", "from": {"id": 111}, "chat": {"id": 123}}}],
+        [{"update_id": 2, "message": {"text": "/userinfo", "from": {"id": 111}, "chat": {"id": 123}}}],
+    ]
+    calls = {"n": 0}
+
+    def get(_url, params, timeout):
+        index = calls["n"]
+        calls["n"] += 1
+        return Response({"result": batches[index] if index < len(batches) else []})
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent.append(json["text"])
+        if "user ID" in json["text"]:
+            stop_event.set()
+        return Response()
+
+    def status_provider() -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        status_provider=status_provider,
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+    )
+
+    # The /status handler raised, but the bot kept polling and answered /userinfo.
+    assert any("user ID" in message for message in sent)
+
+
+def test_captioned_photo_command_keeps_its_argument(monkeypatch) -> None:
+    """A photo captioned '/find percy' must pass 'percy' to the find provider.
+
+    Regression: argument extraction read message['text'], which is empty for a
+    photo (its text rides in 'caption'), so a captioned command lost its
+    argument and ran as a bare '/find'.
+    """
+    stop_event = threading.Event()
+    seen_targets: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "photo": [{"file_id": "small"}, {"file_id": "BIG"}],
+                            "caption": "/find percy",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        return Response()
+
+    def find_provider(chat_id: int, target: str) -> str:
+        seen_targets.append(target)
+        stop_event.set()
+        return "On it."
+
+    monkeypatch.setattr(
+        "lib.telegram.commands.download_telegram_file", lambda base, fid, timeout=30: b"jpeg"
+    )
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        find_provider=find_provider,
+        photo_provider=lambda image: "📸 ok",
+    )
+
+    assert seen_targets == ["percy"]
+
+
+def test_find_command_registers_ack_message_for_progress_edits(monkeypatch) -> None:
+    stop_event = threading.Event()
+    attached: list[int | None] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/find percy",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" in json:
+            stop_event.set()
+            return Response({"result": {"message_id": 88}})
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        find_provider=lambda _chat_id, _target: "On it.",
+        find_progress_message=attached.append,
+    )
+
+    assert attached == [88]

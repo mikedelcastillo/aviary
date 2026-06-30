@@ -132,6 +132,23 @@ def test_overdue_not_repeated_until_bird_returns() -> None:
     assert len(finder.starts) == 2
 
 
+def test_failed_search_launch_does_not_suppress_realert() -> None:
+    # If launching the search fails, the overdue birds must NOT be marked alerted
+    # (which would permanently suppress re-alerting them).
+    class FailingFinder(FakeFinder):
+        def start(self, chat, target, stop):
+            raise RuntimeError("launch failed")
+
+    af = _af(FakeReg([row("percy", since=700)]), FailingFinder(), FakeNotifier())
+    af._enabled = True
+    af._last_condition = "clear"
+    try:
+        af._tick()
+    except RuntimeError:
+        pass
+    assert "percy" not in af._alerted  # still overdue, will retry next tick
+
+
 def test_alerted_cleared_at_dawn() -> None:
     af = _af(FakeReg([]), FakeFinder(), FakeNotifier(), ir=set(), total=2)
     af._alerted = {"percy"}

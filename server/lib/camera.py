@@ -13,10 +13,12 @@ from lib.alerts import AlertDispatcher, AlertState
 from lib.config import CameraConfig
 from lib.control import RuntimeControl
 from lib.detector import ObjectDetector
+from lib.detection_log import DetectionLogger
 from lib.discovery import redact_rtsp_url
 from lib.imaging import is_ir_array
 from lib.ir import IRState
 from lib.objects import frame_size_from_shape
+from lib.quality import StreamQualityController
 from lib.stats import CameraStats
 
 
@@ -98,6 +100,8 @@ def monitor_camera(
     stop_event: threading.Event,
     control: RuntimeControl | None = None,
     ir_state: IRState | None = None,
+    quality: StreamQualityController | None = None,
+    detection_logger: DetectionLogger | None = None,
 ) -> None:
     # Log the exact URL (password masked) so a camera stuck on "connecting" can
     # be diagnosed: if this line appears but "Stream opened" never follows, the
@@ -113,24 +117,54 @@ def monitor_camera(
         # /status show why the camera has gone quiet.
         if control is not None and control.is_paused():
             stats.set_status("paused")
+            # Drop this camera's stale IR vote while paused: it produces no frames
+            # to refresh it, so a camera paused at night would otherwise keep
+            # "voting IR" forever — wedging all_ir()/known() (caretaker night mode,
+            # auto-find's day/night re-enable). A resume re-stamps it on the next
+            # decoded frame.
+            if ir_state is not None:
+                ir_state.forget(camera.name)
             stop_event.wait(PAUSE_POLL_SECONDS)
             continue
 
         stats.set_status("connecting")
-        capture = open_capture(camera)
+        stream_path = ""
+        stream_version = 0
+        open_camera = camera
+        if quality is not None and camera.host:
+            rtsp_url, stream_path, stream_version = quality.rtsp_url(camera.host)
+            open_camera = CameraConfig(
+                name=camera.name,
+                enabled=camera.enabled,
+                rtsp_url=rtsp_url,
+                host=camera.host,
+                sample_fps=camera.sample_fps,
+                reconnect_seconds=camera.reconnect_seconds,
+                max_reconnect_seconds=camera.max_reconnect_seconds,
+                open_timeout_seconds=camera.open_timeout_seconds,
+                read_timeout_seconds=camera.read_timeout_seconds,
+                rtsp_transport=camera.rtsp_transport,
+            )
+        capture = open_capture(open_camera)
         if capture is None:
             LOGGER.warning("Could not open stream for %s; retrying in %.1fs", camera.name, backoff)
             stats.set_status("reconnecting", backoff)
             stats.record_reconnect()
+            if quality is not None and camera.host:
+                quality.observe(camera.host, stats.snapshot(), target_fps=camera.sample_fps)
             stop_event.wait(backoff)
             backoff = min(backoff * 2, camera.max_reconnect_seconds)
             continue
 
-        LOGGER.info("Stream opened for %s", camera.name)
+        if stream_path:
+            LOGGER.info("Stream opened for %s (%s)", camera.name, stream_path)
+        else:
+            LOGGER.info("Stream opened for %s", camera.name)
         stats.set_status("connected")
         next_inference_at = 0.0
         consecutive_failures = 0
         paused_out = False
+        quality_changed = False
         try:
             while not stop_event.is_set():
                 # Privacy mode flipped on mid-session: drop the stream now. The
@@ -140,6 +174,12 @@ def monitor_camera(
                     LOGGER.info("Privacy mode on; releasing %s", camera.name)
                     paused_out = True
                     break
+                if quality is not None and camera.host:
+                    _, selected_version = quality.selected(camera.host)
+                    if selected_version != stream_version:
+                        LOGGER.info("Quality changed for %s; reopening stream", camera.name)
+                        quality_changed = True
+                        break
 
                 ok, frame = capture.read()
                 if not ok or frame is None:
@@ -151,6 +191,12 @@ def monitor_camera(
                             camera.name,
                             consecutive_failures,
                         )
+                        if quality is not None and camera.host:
+                            quality.observe(
+                                camera.host,
+                                stats.snapshot(),
+                                target_fps=camera.sample_fps,
+                            )
                         break
                     continue
 
@@ -183,6 +229,16 @@ def monitor_camera(
                     detections,
                     frame_size,
                 )
+                if detection_logger is not None and detections:
+                    try:
+                        detection_logger.record(
+                            camera_name=camera.name,
+                            detections=detections,
+                            frame_size=frame_size,
+                            sample_interval_seconds=min_frame_interval,
+                        )
+                    except Exception:
+                        LOGGER.exception("Detection log write failed for %s", camera.name)
                 if detections:
                     # Eligibility check is cheap (a lock + dict lookup); the
                     # slow snapshot + Telegram work is handed to the dispatcher
@@ -194,6 +250,12 @@ def monitor_camera(
                         stats.record_alert(len(eligible))
                         stats.record_object_alert(eligible)
                         dispatcher.submit(camera, frame, eligible)
+                if quality is not None and camera.host:
+                    quality.observe(
+                        camera.host,
+                        stats.snapshot(),
+                        target_fps=camera.sample_fps,
+                    )
         except Exception:
             LOGGER.exception("Camera loop error for %s", camera.name)
         finally:
@@ -202,6 +264,8 @@ def monitor_camera(
         # Released for privacy, not a fault: loop back to the paused idle at the
         # top of the outer loop without the unhealthy-reconnect backoff.
         if paused_out:
+            continue
+        if quality_changed:
             continue
 
         # The session ended unhealthily (stall, dropped stream, or decode

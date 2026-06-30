@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from lib.activity_qa import ActivityResponder, parse_activity_arg
-from lib.journal import MemoryEntry, append_entry
+from lib.journal import MemoryEntry, MemoryObservation, append_entry
 
 KNOWN = ["bambi", "draft", "matcha", "percy", "pizza"]
 
@@ -19,7 +19,12 @@ class FakeClient:
         return "Percy preened on the perch while Matcha napped nearby."
 
 
-def _responder(memories_dir, notify, find=None, send_album=None, now=None, client=None):
+class BoomClient:
+    def chat(self, model, messages, **kwargs):
+        raise AssertionError("pure photo requests should not call the LLM")
+
+
+def _responder(memories_dir, notify, find=None, send_album=None, now=None, client=None, care_answer=None):
     # Fix "now" so the window is deterministic.
     when = now or datetime(2026, 6, 25, 15, 0)
     return ActivityResponder(
@@ -32,6 +37,7 @@ def _responder(memories_dir, notify, find=None, send_album=None, now=None, clien
         find=find,
         pronoun_note="Percy and Bambi are female (use she/her for them).",
         now=lambda: when,
+        care_answer=care_answer,
     )
 
 
@@ -46,15 +52,116 @@ def test_respond_summarises_recent_memory(tmp_path) -> None:
     photo = tmp_path / "p.jpg"
     photo.write_bytes(b"\xff\xd8jpeg")
     append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy", "matcha"], "Percy preens.", [str(photo)]))
+    sent: list = []
     albums: list = []
-    _responder(tmp_path, lambda c, t: None, send_album=lambda c, items: albums.append(items)).respond(
+    _responder(tmp_path, lambda c, t: sent.append(t), send_album=lambda c, items: albums.append(items)).respond(
         7, "/activity percy", "percy"
     )
-    # One album sent, summary is the first item's caption, photo included.
+    # Full summary is sent as text, and the album caption stays short so it
+    # cannot truncate the activity answer at Telegram's caption limit.
+    assert sent and "preened" in sent[0]
     assert len(albums) == 1
     items = albums[0]
     assert len(items) == 1
-    assert "preened" in items[0][1]
+    assert items[0][1] == "1 photo of Percy from the last hour."
+
+
+def test_respond_recovers_bird_from_text_when_router_argument_empty(tmp_path) -> None:
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 8, 0), ["bambi"], "Bambi ate early."))
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 0), ["percy"], "Percy napped on the perch."))
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "what did percy do today?", ""
+    )
+    assert "Percy napped" in client.user
+    assert "Bambi ate" not in client.user
+
+
+def test_individual_question_uses_relevant_structured_observation(tmp_path) -> None:
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 14, 0),
+            ["percy", "matcha"],
+            "two-camera report",
+            observations=[
+                MemoryObservation("Big Cage", ["percy"], "Percy preened alone."),
+                MemoryObservation("Desk", ["matcha"], "Matcha chewed a toy."),
+            ],
+        ),
+    )
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "what did percy do today?", ""
+    )
+    assert "Percy preened alone" in client.user
+    assert "Matcha chewed" not in client.user
+
+
+def test_pair_apart_question_includes_structured_counts(tmp_path) -> None:
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 9, 0),
+            ["draft"],
+            "draft only",
+            observations=[MemoryObservation("Play Gym", ["draft"], "Draft perched alone.")],
+        ),
+    )
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 10, 0),
+            ["pizza"],
+            "pizza only",
+            observations=[MemoryObservation("Cage", ["pizza"], "Pizza ate seeds alone.")],
+        ),
+    )
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 11, 0),
+            ["draft", "pizza"],
+            "together",
+            observations=[MemoryObservation("Cage", ["draft", "pizza"], "Draft and Pizza stood side by side.")],
+        ),
+    )
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 12, 0),
+            ["draft", "pizza"],
+            "separate views",
+            observations=[
+                MemoryObservation("Play Gym", ["draft"], "Draft climbed on the play gym."),
+                MemoryObservation("Cage", ["pizza"], "Pizza rested in the cage."),
+            ],
+        ),
+    )
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "Did draft and pizza spend time apart today?", ""
+    )
+    assert "Draft + Pizza same-frame/view observations: 1" in client.user
+    assert "Draft + Pizza apart/only-one observations: 4" in client.user
+    assert "separate views in same report 1 at 12:00" in client.user
+
+
+def test_pure_photo_request_sends_photos_without_llm_reasoning(tmp_path) -> None:
+    photo = tmp_path / "percy.jpg"
+    photo.write_bytes(b"percy-bytes")
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 0), ["percy"], "Percy napped on the perch.", [str(photo)]))
+    sent: list = []
+    albums: list = []
+    _responder(
+        tmp_path,
+        lambda c, t: sent.append(t),
+        send_album=lambda c, items: albums.append(items),
+        client=BoomClient(),
+    ).respond(7, "show me picture of percy", "")
+    assert sent == []
+    assert len(albums) == 1
+    assert albums[0][0] == (b"percy-bytes", "1 photo of Percy from today.")
 
 
 def test_respond_today_window(tmp_path) -> None:
@@ -82,6 +189,43 @@ def test_respond_says_unlogged_when_not_live(tmp_path) -> None:
         7, "/activity matcha", "matcha"
     )
     assert sent and "haven't logged" in sent[0].lower()
+
+
+def test_care_fallback_answers_unlogged_care_question(tmp_path) -> None:
+    # A care question routed to the activity path with no logged memory should be
+    # answered from care knowledge, not dead-end on "I haven't logged that".
+    sent: list = []
+    asked: list = []
+
+    def care_answer(text: str) -> str:
+        asked.append(text)
+        return "Keep them at a steady 65–80°F and out of drafts."
+
+    _responder(tmp_path, lambda c, t: sent.append(t), care_answer=care_answer).respond(
+        7, "is it too cold for percy", "percy"
+    )
+    assert asked == ["is it too cold for percy"]
+    assert any("65–80" in s for s in sent)
+    assert not any("haven't logged" in s.lower() for s in sent)
+
+
+def test_care_question_with_now_answers_care_not_camera_search(tmp_path) -> None:
+    # A care question carrying a live word ("now") must be answered from care
+    # knowledge, NOT sent off to a camera search before the care fallback runs.
+    sent: list = []
+    found: list = []
+
+    def care_answer(text: str):
+        return "Keep them at 65–80°F." if "cold" in text else None
+
+    _responder(
+        tmp_path,
+        lambda c, t: sent.append(t),
+        find=lambda cid, arg: found.append(arg),
+        care_answer=care_answer,
+    ).respond(7, "is it too cold for percy now", "percy")
+    assert any("65–80" in s for s in sent)
+    assert found == []  # not handed to the cameras
 
 
 def test_question_uses_qa_path_with_birds_and_question(tmp_path) -> None:

@@ -107,6 +107,23 @@ class CameraNamer:
             self._names[camera_name] = display
         self._save()
 
+    def claim(self, camera_name: str, base: str) -> str:
+        """Atomically assign a UNIQUE display name for ``camera_name`` and store it.
+
+        Uniqueness is computed against the current names (excluding this camera's
+        own previous name, so re-naming to the same descriptive name doesn't earn
+        a spurious "2") and the store happens under the lock — so two naming
+        passes running at once (boot + a /discover re-name) can never hand the
+        same name to two different cameras. Returns the assigned display.
+        """
+        with self._lock:
+            used = set(self._names.values())
+            used.discard(self._names.get(camera_name))
+            display = unique_name(base, used)
+            self._names[camera_name] = display
+        self._save()
+        return display
+
     def has(self, camera_name: str) -> bool:
         with self._lock:
             return camera_name in self._names
@@ -196,11 +213,11 @@ def name_cameras(
                 LOGGER.warning("Could not name %s yet; shows its IP, will retry", camera_name)
             continue
 
-        # Names in use, excluding THIS camera's own current name (so a re-name to
-        # the same descriptive name doesn't get a spurious "2").
-        used = namer.used_names()
-        if already_named:
-            used = used - {namer.display(camera_name)}
+        # Snapshot current names — excluding THIS camera's own — only to DECIDE
+        # whether to ask the VLM for a more distinctive name. The actual unique
+        # assignment is atomic via claim(), so a concurrent naming pass can't
+        # collide even though this snapshot may be stale by the time we claim.
+        used = namer.used_names() - {namer.display(camera_name)}
         if base in used:
             try:
                 distinct = _distinct_name(client, model, image, used, timeout_seconds=timeout_seconds)
@@ -209,8 +226,7 @@ def name_cameras(
                 distinct = ""
             if distinct and distinct not in used:
                 base = distinct
-        display = unique_name(base, used)
-        namer.set(camera_name, display)
+        display = namer.claim(camera_name, base)
         LOGGER.info("Named camera %s -> %s", camera_name, display)
 
     if skipped_fixed:

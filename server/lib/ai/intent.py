@@ -23,8 +23,8 @@ LOGGER = logging.getLogger("lib.ai.intent")
 # Every action the router can emit. "chat" is the catch-all for questions and
 # conversation, routed to the memory/VLM layer rather than a command.
 ACTIONS = (
-    "pause", "resume", "find", "stop_find", "discover", "home", "autofind",
-    "status", "snapshot", "activity", "chat",
+    "pause", "resume", "find", "stop_find", "discover", "restart", "home", "quality", "autofind",
+    "status", "snapshot", "activity", "sleep", "care", "chat",
 )
 
 # Ollama ``format`` schema: constrains the model to a valid action + argument.
@@ -61,9 +61,13 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '"never mind". argument = "". (But "look for X instead" is a NEW find, not stop_find.)\n'
         '- "discover": rescan / reload / refresh / find the cameras on the network — '
         '"discover cameras", "reload cams", "rescan", "look for new cameras". argument = "".\n'
+        '- "restart": restart the Aviary Python server process — "restart the server", '
+        '"reboot aviary", "restart aviary". argument = "".\n'
         '- "home": aim/point/reset the pan-tilt cameras to their saved home viewpoint — '
         '"home the cameras", "reset the cameras", "point the cams home", "face the cameras '
         'back". argument = "".\n'
+        '- "quality": set RTSP stream quality — "use stream1", "switch cameras to stream2", '
+        '"set quality auto", "use automatic quality". argument = "stream1", "stream2", or "auto".\n'
         '- "autofind": turn the automatic missing-bird search on or off — "enable autofind", '
         '"turn on auto find", "disable autofind", "stop auto searching". argument = "enable" '
         'or "disable" (or "" to report its state).\n'
@@ -81,9 +85,30 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'is everyone". Time spans (today, this morning, this week, yesterday) and photo '
         'requests all belong here. argument = the bird(s)/group asked about (e.g. "pizza", '
         '"matcha and jynx", "budgie"), or "" for all birds.\n'
-        '- "chat": greetings, thanks, or anything that isn\'t about the birds\' whereabouts '
-        'or activity. argument = "".\n\n'
+        '- "sleep": how the birds SLEPT — last night, sleep score/quality, when they went to '
+        'bed or woke, night-frights, or the multi-night sleep trend. Examples: "how did the '
+        'birds sleep", "how did they sleep last night", "what was their sleep score", "did '
+        'anyone have a night fright", "how have they been sleeping this week", "are they '
+        'sleeping well". argument = "week" for a multi-night trend, else "".\n'
+        '- "care": an explicit request for the bird-care GUIDE/reference — "care guide", '
+        '"care tips", "care info", "how do I care for them", "tell me about cockatiel care", '
+        '"show me the care guide", or a list of toxic foods ("what foods are toxic", "what '
+        'can\'t they eat"). argument = a topic (diet, sleep, temperature, health, toxic, '
+        'enrichment, social) or a species/bird if named, else "". (A conversational care '
+        'question like "can they eat avocado" or "is it too cold" is "chat", not "care".)\n'
+        '- "chat": greetings, thanks, small talk, AND any general bird-CARE or knowledge '
+        'question — what is safe or toxic to eat, diet/feeding, sleep and light needs, '
+        'temperature, enrichment, illness and "why is X fluffed/plucking/quiet", or how '
+        'to care for them. These are answered from care knowledge, NOT the activity log, '
+        'even when they name a bird. argument = "".\n\n'
         "Rules:\n"
+        '- A question about what is SAFE or recommended ("can they eat avocado", "is it '
+        'too cold for them", "how long should they sleep", "why is percy plucking") is '
+        '"chat" (care knowledge). A question about what a bird DID or is DOING ("did pizza '
+        'eat today", "what is percy up to") is "activity".\n'
+        '- "how did they sleep" / "sleep score" / "did they sleep well" / "any night '
+        'frights" is "sleep" (last night\'s rest). "how LONG should they sleep" is "chat" '
+        '(care advice). "are they asleep right now" is "chat" (live state).\n'
         '- "where is percy" -> find (locate one specific bird). "where are the birds" / '
         '"where is everyone" -> activity (a summary of all, not a single-bird locate). '
         '"what did percy do today" / "what is percy up to" / "show me photos of percy" -> '
@@ -113,7 +138,7 @@ def parse_intent(content: str) -> Intent:
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        LOGGER.warning("Intent response was not JSON: %r", content[:200])
+        LOGGER.warning("Intent response was not JSON: %r", (content or "")[:200])
         return Intent("chat", "")
     if not isinstance(data, dict):
         return Intent("chat", "")

@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import monitor_camera
@@ -40,10 +42,16 @@ from lib.detector import ObjectDetector
 from lib.discovery import (
     DiscoveryProgress,
     DiscoveryResult,
+    HOST_FAILED,
+    HOST_FOUND,
+    HOST_PENDING,
+    HOST_TESTING,
     discover_cameras,
     redact_rtsp_url,
 )
+from lib.detection_log import DetectionLogger
 from lib.objects import ObjectRegistry
+from lib.quality import StreamQualityController
 from lib.stats import CameraStats
 
 
@@ -62,6 +70,39 @@ class DiscoveryApplied:
     result: DiscoveryResult
     added: list[str]        # names of cameras newly started this run
     already_active: int     # confirmed cameras skipped as already running
+    removed: list[str] = field(default_factory=list)  # retired because rediscovery missed them
+
+
+@dataclass
+class _CameraRuntime:
+    thread: threading.Thread
+    stop_event: threading.Event
+
+
+class _CameraStopEvent:
+    """Per-camera stop signal that also observes server shutdown."""
+
+    def __init__(self, global_stop: threading.Event, local_stop: threading.Event) -> None:
+        self._global_stop = global_stop
+        self._local_stop = local_stop
+
+    def is_set(self) -> bool:
+        return self._global_stop.is_set() or self._local_stop.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if self.is_set():
+            return True
+        if timeout is None:
+            while not self.is_set():
+                self._local_stop.wait(0.2)
+            return True
+        deadline = time.monotonic() + max(0.0, timeout)
+        while not self.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self.is_set()
+            self._local_stop.wait(min(0.2, remaining))
+        return True
 
 
 def format_discovery_report(applied: DiscoveryApplied) -> str:
@@ -90,6 +131,34 @@ def format_discovery_report(applied: DiscoveryApplied) -> str:
         lines.append("No new cameras started.")
     if applied.already_active:
         lines.append(f"{applied.already_active} already running.")
+    if applied.removed:
+        lines.append("Stopped stale: " + ", ".join(applied.removed) + ".")
+    return "\n".join(lines)
+
+
+def format_discovery_progress(progress: dict) -> str:
+    """Render an in-flight discovery update for Telegram."""
+    counts = progress.get("counts", {})
+    order = list(progress.get("order", []))
+    states = dict(progress.get("states", {}))
+    total = len(order)
+    pending = counts.get(HOST_PENDING, 0)
+    testing = counts.get(HOST_TESTING, 0)
+    found = counts.get(HOST_FOUND, 0)
+    failed = counts.get(HOST_FAILED, 0)
+    checked = found + failed
+
+    lines = [
+        "Scanning the local network for cameras...",
+        f"Checked {checked}/{total} host(s); testing {testing}; found {found}.",
+    ]
+    found_hosts = [host for host in order if states.get(host) == HOST_FOUND]
+    if found_hosts:
+        lines.append("Found so far: " + ", ".join(found_hosts) + ".")
+    elif pending:
+        lines.append("No cameras confirmed yet.")
+    else:
+        lines.append("No cameras confirmed.")
     return "\n".join(lines)
 
 
@@ -114,6 +183,8 @@ class CameraSupervisor:
         progress: DiscoveryProgress | None = None,
         control: RuntimeControl | None = None,
         ir_state: IRState | None = None,
+        quality: StreamQualityController | None = None,
+        detection_logger: DetectionLogger | None = None,
     ) -> None:
         self._app_config = app_config
         self._detector = detector
@@ -124,6 +195,8 @@ class CameraSupervisor:
         self._stats_lock = stats_lock
         self._stop_event = stop_event
         self._ir_state = ir_state
+        self._quality = quality
+        self._detection_logger = detection_logger
         # Shared privacy/pause state. Passed to every monitor thread so a pause
         # stops all cameras consuming their streams at once.
         self._control = control
@@ -132,14 +205,18 @@ class CameraSupervisor:
         # while a scan runs. Optional: discovery works fine without it.
         self._progress = progress
 
-        # host -> monitor thread. Used both for dedup (an active host is never
-        # restarted) and to join the threads on shutdown.
-        self._threads: dict[str, threading.Thread] = {}
+        # host -> monitor thread + per-camera stop signal. Used both for dedup
+        # and to retire stale IPs after rediscovery without stopping the server.
+        self._threads: dict[str, _CameraRuntime] = {}
         # Serialises every mutation of (and read of) ``_threads`` so the dedup
         # check-then-start in ``start_camera`` is atomic. An RLock (not a plain
         # Lock) because ``discover_and_apply`` may already hold it when it calls
         # ``start_camera`` re-entrantly.
         self._threads_lock = threading.RLock()
+        # Only one discovery sweep may own the shared DiscoveryProgress sink at
+        # a time. Initial discovery, auto-discovery, natural language, and
+        # /discover all come through here.
+        self._discovery_lock = threading.Lock()
 
     def start_camera(self, camera: CameraConfig) -> bool:
         """Start a monitor thread for ``camera`` unless its host is already live.
@@ -154,6 +231,8 @@ class CameraSupervisor:
         with self._threads_lock:
             if host in self._threads:
                 return False
+            if self._quality is not None:
+                self._quality.register(host, camera.rtsp_url)
 
             camera_stats = CameraStats(
                 camera.name,
@@ -166,6 +245,7 @@ class CameraSupervisor:
             with self._stats_lock:
                 self._stats[camera.name] = camera_stats
 
+            camera_stop = threading.Event()
             thread = threading.Thread(
                 target=monitor_camera,
                 args=(
@@ -174,63 +254,98 @@ class CameraSupervisor:
                     self._alert_state,
                     self._dispatcher,
                     camera_stats,
-                    self._stop_event,
+                    _CameraStopEvent(self._stop_event, camera_stop),
                     self._control,
                     self._ir_state,
+                    self._quality,
+                    self._detection_logger,
                 ),
                 name=f"camera-{host}",
                 daemon=True,
             )
-            self._threads[host] = thread
+            self._threads[host] = _CameraRuntime(thread=thread, stop_event=camera_stop)
             thread.start()
         LOGGER.info("Started camera %s -> %s", camera.name, redact_rtsp_url(camera.rtsp_url))
         return True
+
+    def _stop_camera(self, host: str) -> str | None:
+        with self._threads_lock:
+            runtime = self._threads.pop(host, None)
+            if runtime is None:
+                return None
+            runtime.stop_event.set()
+            if self._quality is not None:
+                self._quality.unregister(host)
+            name = f"camera-{host}"
+            with self._stats_lock:
+                self._stats.pop(name, None)
+        LOGGER.info("Retired stale camera %s", name)
+        return name
 
     def active_hosts(self) -> set[str]:
         """Hosts currently being monitored."""
         with self._threads_lock:
             return set(self._threads)
 
-    def discover_and_apply(self) -> DiscoveryApplied:
+    def discover_and_apply(
+        self,
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> DiscoveryApplied:
         """Sweep the LAN and start any confirmed-but-not-yet-active camera.
 
-        The slow network scan runs WITHOUT any lock held so a concurrent
-        ``/discover`` (or ``/status``) on the Telegram poll thread isn't blocked
-        behind it for the full sweep. Overlapping scans are harmless: the actual
-        thread-start in :meth:`start_camera` is atomic per host, so dedup holds
-        even if two scans both report the same new camera.
+        The slow network scan is serialized because every scan publishes into
+        the same live progress sink. This keeps dashboard and Telegram progress
+        monotonic instead of interleaving two independent subnet sweeps.
         """
-        result = discover_cameras(
-            self._app_config.discovery,
-            self._app_config.credentials,
-            progress=self._progress,
-        )
-        added: list[str] = []
-        already_active = 0
-        for found in result.cameras:
-            # Stable per-IP name so the same camera keeps its identity across
-            # rediscovery and shows consistently in /status + the dashboard.
-            camera = CameraConfig(
-                name=f"camera-{found.host}",
-                enabled=True,
-                rtsp_url=found.rtsp_url,
-                host=found.host,
+        with self._discovery_lock:
+            result = discover_cameras(
+                self._app_config.discovery,
+                self._app_config.credentials,
+                progress=self._progress,
+                progress_callback=progress_callback,
             )
-            if self.start_camera(camera):
-                added.append(camera.name)
-            else:
-                already_active += 1
-        return DiscoveryApplied(
-            result=result, added=added, already_active=already_active
-        )
+            found_hosts = {camera.host for camera in result.cameras}
+            added: list[str] = []
+            already_active = 0
+            removed: list[str] = []
+            for found in result.cameras:
+                # Stable per-IP name so the same camera keeps its identity across
+                # rediscovery and shows consistently in /status + the dashboard.
+                camera = CameraConfig(
+                    name=f"camera-{found.host}",
+                    enabled=True,
+                    rtsp_url=found.rtsp_url,
+                    host=found.host,
+                )
+                if self.start_camera(camera):
+                    added.append(camera.name)
+                else:
+                    already_active += 1
+            for host in sorted(self.active_hosts() - found_hosts):
+                name = self._stop_camera(host)
+                if name is not None:
+                    removed.append(name)
+            return DiscoveryApplied(
+                result=result,
+                added=added,
+                already_active=already_active,
+                removed=removed,
+            )
 
     def join(self, timeout: float = 5.0) -> None:
         """Join the monitor threads on shutdown (best-effort within ``timeout``).
 
         ``stop_event`` is expected to already be set by the caller; the monitor
         loops observe it and exit, so this just waits for them to wind down.
+
+        ``timeout`` bounds the TOTAL wait, not each thread: a shared deadline is
+        used so a fleet of cameras all stalled inside a blocking ``capture.read``
+        can't stretch shutdown to ``len(threads) * timeout``.
         """
         with self._threads_lock:
-            threads = list(self._threads.values())
-        for thread in threads:
-            thread.join(timeout=timeout)
+            runtimes = list(self._threads.values())
+            for runtime in runtimes:
+                runtime.stop_event.set()
+        deadline = time.monotonic() + timeout
+        for runtime in runtimes:
+            runtime.thread.join(timeout=max(0.0, deadline - time.monotonic()))

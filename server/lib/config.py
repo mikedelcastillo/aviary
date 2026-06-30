@@ -126,15 +126,19 @@ class DiscoveryConfig:
     # An explicit host list. When non-empty it overrides cidr/auto-detect; tests
     # use this to point the sweep at a localhost fake-RTSP server.
     hosts: tuple[str, ...] = ()
-    # Concurrency of the TCP sweep. A /24 has 254 hosts, so a wide pool lets the
-    # whole subnet finish in roughly one connect-timeout instead of serially.
-    max_workers: int = 256
+    # Concurrency of RTSP probes. Default to one worker per logical CPU, capped
+    # so discovery scales on larger hosts without crowding the LAN.
+    max_workers: int = min(os.cpu_count() or 1, 8)
     # Per-host TCP probe of :554. Kept short because most addresses are dead and
     # we don't want the sweep to stall on each unanswered SYN.
     connect_timeout_seconds: float = 0.5
-    # Per-host RTSP DESCRIBE handshake. Generous relative to the TCP probe since
-    # only the (few) hosts with :554 open reach this stage.
+    # Per-host RTSP DESCRIBE read/auth timeout after the TCP connection opens.
     rtsp_timeout_seconds: float = 3.0
+    # Discovery is best-effort against tiny WiFi devices that may briefly reject
+    # or stall an RTSP socket while existing streams are active. Retry transient
+    # connect/protocol failures a few times before declaring the host absent.
+    probe_attempts: int = 3
+    probe_retry_delay_seconds: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -159,6 +163,17 @@ class AppConfig:
     # so it sweeps the tilt axis too. 4 x 3 = 12 cells by default.
     ptz_scan_cols: int = 4
     ptz_scan_rows: int = 3
+    # Daily/weekly bird-care reminders (food, water, bedtime, weekly clean)
+    # keyed to observed light + local sunrise/sunset. On by default (just needs
+    # a notifier; no AI required); CARE_REMINDERS=0 turns them off.
+    care_reminders: bool = True
+    # Location for sunrise/sunset, defaulting to Manila (the host runs PH time).
+    latitude: float = 14.5995
+    longitude: float = 120.9842
+    # The optional post-wake "how the birds slept" report. Off by default — the
+    # /sleep command and the /status night-in-progress line work regardless;
+    # SLEEP_MORNING_REPORT=1 also pushes a summary each morning when they wake.
+    sleep_morning_report: bool = False
 
 
 def _require_env(name: str) -> str:
@@ -311,4 +326,8 @@ def build_config() -> AppConfig:
         raw_photo_alerts=raw_photo_alerts,
         ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),
         ptz_scan_rows=max(1, int(_as_float("PTZ_SCAN_ROWS", 3))),
+        care_reminders=_as_bool("CARE_REMINDERS", True),
+        latitude=_as_float("AVIARY_LATITUDE", 14.5995),
+        longitude=_as_float("AVIARY_LONGITUDE", 120.9842),
+        sleep_morning_report=_as_bool("SLEEP_MORNING_REPORT", False),
     )

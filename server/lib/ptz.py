@@ -250,26 +250,45 @@ class OnvifPtzCamera:
         credentials: CameraCredentials,
         *,
         timeout: float = 6.0,
+        attempts: int = 3,
+        retry_delay: float = 0.25,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self.host = host
         self._credentials = credentials
         self._timeout = timeout
+        self._attempts = max(1, attempts)
+        self._retry_delay = max(0.0, retry_delay)
         self._now = now
         self._token: str | None = None
         self._token_resolved = False
 
     def _call(self, body: str, action: str) -> tuple[int | None, str]:
-        return _soap_call(
-            self.host, body, action, self._credentials, timeout=self._timeout, now=self._now
-        )
+        result: tuple[int | None, str] = (None, "")
+        for attempt in range(1, self._attempts + 1):
+            result = _soap_call(
+                self.host,
+                body,
+                action,
+                self._credentials,
+                timeout=self._timeout,
+                now=self._now,
+            )
+            code, _ = result
+            if code is not None and 200 <= code < 500:
+                return result
+            if attempt < self._attempts and self._retry_delay > 0:
+                time.sleep(self._retry_delay)
+        return result
 
     def profile_token(self) -> str | None:
         """The media profile token, fetched once and cached."""
         if not self._token_resolved:
             _, text = self._call(get_profiles_body(), f"{_NS_MEDIA}/GetProfiles")
             self._token = parse_profile_token(text)
-            self._token_resolved = True
+            # Do not permanently cache a missing token: on lossy WiFi a single
+            # dropped GetProfiles would otherwise disable PTZ for the whole run.
+            self._token_resolved = self._token is not None
         return self._token
 
     def has_ptz(self) -> bool:
@@ -350,12 +369,16 @@ class PtzManager:
         credentials: CameraCredentials,
         *,
         timeout: float = 6.0,
+        attempts: int = 3,
+        retry_delay: float = 0.25,
         scan_cols: int = DEFAULT_SCAN_COLS,
         scan_rows: int = DEFAULT_SCAN_ROWS,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
         self._credentials = credentials
         self._timeout = timeout
+        self._attempts = max(1, attempts)
+        self._retry_delay = max(0.0, retry_delay)
         self._scan_cols = scan_cols
         self._scan_rows = scan_rows
         self._now = now
@@ -367,10 +390,21 @@ class PtzManager:
         with self._lock:
             if host in self._cache:
                 return self._cache[host]
-        camera = OnvifPtzCamera(host, self._credentials, timeout=self._timeout, now=self._now)
+        camera = OnvifPtzCamera(
+            host,
+            self._credentials,
+            timeout=self._timeout,
+            attempts=self._attempts,
+            retry_delay=self._retry_delay,
+            now=self._now,
+        )
         result = camera if camera.has_ptz() else None
         with self._lock:
-            self._cache[host] = result
+            # Positive capability is stable and worth caching. A negative probe
+            # can just be packet loss or a camera still booting, so do not cache
+            # it unless a test/operator explicitly pre-seeded the cache.
+            if result is not None:
+                self._cache[host] = result
         if result is not None:
             LOGGER.info("PTZ available on %s", host)
         return result
@@ -382,14 +416,17 @@ class PtzManager:
             return None
         return OnvifPatrol(cameras, cols=self._scan_cols, rows=self._scan_rows)
 
-    def go_home(self, hosts) -> tuple[int, int]:
+    def go_home(self, hosts) -> tuple[int, int, int]:
         """Send every PTZ camera among ``hosts`` to its first saved preset.
 
-        Returns ``(homed, total_ptz)``. Used by ``/home`` and run after discovery
-        so the cameras always face their saved viewpoint.
+        Returns ``(homed, total_ptz, without_preset)`` — where ``without_preset``
+        counts PTZ cameras that had no saved home preset to aim at, so ``/home``
+        can tell the user to set one in the Tapo app. Used by ``/home`` and run
+        after discovery so the cameras always face their saved viewpoint.
         """
         cameras = [cam for host in sorted(hosts) if (cam := self.camera_for(host))]
         homed = 0
+        without_preset = 0
         for camera in cameras:
             try:
                 preset = camera.first_preset_token()
@@ -397,6 +434,7 @@ class PtzManager:
                 LOGGER.exception("PTZ get-presets failed on %s", camera.host)
                 preset = None
             if preset is None:
+                without_preset += 1
                 LOGGER.warning("PTZ %s has no saved preset to home to", camera.host)
                 continue
             try:
@@ -405,7 +443,7 @@ class PtzManager:
                     LOGGER.info("PTZ %s sent to home preset %s", camera.host, preset)
             except Exception:
                 LOGGER.exception("PTZ home failed on %s", camera.host)
-        return homed, len(cameras)
+        return homed, len(cameras), without_preset
 
 
 class OnvifPatrol:

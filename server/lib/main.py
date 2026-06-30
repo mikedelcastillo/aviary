@@ -7,7 +7,10 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import threading
+import time
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 
 import cv2
@@ -16,6 +19,7 @@ from dotenv import load_dotenv
 
 from lib.ai.chat import chat_reply
 from lib.ai.client import OllamaClient
+from lib.ai.context import build_chat_context, format_system_state
 from lib.ai.intent import Intent
 from lib.ai.memory import ConversationMemory
 from lib.ai.router import NaturalLanguageRouter
@@ -24,6 +28,9 @@ from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
+from lib.care import care_reply, care_tip, toxic_food_in
+from lib.care_scheduler import CareScheduler
+from lib.clock import now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
 from lib.console import (
     ConsoleDispatcher,
@@ -33,20 +40,24 @@ from lib.console import (
 )
 from lib.control import RuntimeControl, parse_duration
 from lib.memory_maker import MemoryMaker
-from lib.dashboard import Dashboard
+from lib.dashboard import Dashboard, STALE_FRAME_SECONDS
 from lib.detector import ObjectDetector
+from lib.detection_log import DetectionLogger
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
-from lib.find import BirdFinder
+from lib.find import BirdFinder, currently_visible, format_visible
 from lib.imaging import downscale_array_to_jpeg
 from lib.ir import IRState
 from lib.labels import pretty_labels
 from lib.ptz import PtzManager
+from lib.quality import StreamQualityController
 from lib.objects import ObjectRegistry
 from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_sentence
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
+from lib.sleep import SleepTracker, format_status_line
 from lib.stats import CameraStats
-from lib.supervisor import CameraSupervisor, format_discovery_report
+from lib.suntimes import sun_times
+from lib.supervisor import CameraSupervisor, format_discovery_progress, format_discovery_report
 from lib.telegram.commands import build_status_message, run_command_bot
 from lib.terminal_logging import NativeStderrRedirect
 from lib.telegram.notifier import TelegramNotifier
@@ -62,7 +73,9 @@ VLM_DESCRIBE_TIMEOUT_SECONDS = 150.0
 
 # Silent background re-discovery cadence, so cameras that come online later get
 # picked up without a manual /discover.
-AUTO_DISCOVER_SECONDS = 30 * 60.0
+AUTO_DISCOVER_SECONDS = 10 * 60.0
+CAMERA_ACTION_WAIT_SECONDS = 75.0
+CAMERA_ACTION_POLL_SECONDS = 1.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -89,6 +102,12 @@ def install_signal_handlers(stop_event: threading.Event) -> None:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    # SIGHUP: a graceful stop too, so tearing down the background tmux session
+    # (`server-down` → tmux kill-session) shuts the server down cleanly — flushing
+    # the "stopping" Telegram broadcast — instead of an abrupt hangup kill.
+    hup = getattr(signal, "SIGHUP", None)
+    if hup is not None:
+        signal.signal(hup, request_stop)
 
 
 def start_command_thread(
@@ -96,16 +115,22 @@ def start_command_thread(
     user_ids: list[str],
     stop_event: threading.Event,
     status_provider: Callable[[], str] | None = None,
-    discover_provider: Callable[[], str] | None = None,
+    discover_provider: Callable[..., str] | None = None,
+    restart_provider: Callable[[], str] | None = None,
+    detection_provider: Callable[[str], str] | None = None,
     home_provider: Callable[[], str] | None = None,
+    quality_provider: Callable[[str], str] | None = None,
     autofind_provider: Callable[[str], str] | None = None,
     snapshot_provider: Callable[[int], str] | None = None,
     pause_provider: Callable[[float | None], str] | None = None,
     resume_provider: Callable[[], str] | None = None,
     find_provider: Callable[[int, str], str] | None = None,
+    find_progress_message: Callable[[int | None], None] | None = None,
     nl_provider: Callable[[int, str], None] | None = None,
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
+    sleep_provider: Callable[[int, str], None] | None = None,
+    care_provider: Callable[[str], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -113,15 +138,21 @@ def start_command_thread(
         args=(bot_token, user_ids, status_provider, stop_event),
         kwargs={
             "discover_provider": discover_provider,
+            "restart_provider": restart_provider,
+            "detection_provider": detection_provider,
             "home_provider": home_provider,
+            "quality_provider": quality_provider,
             "autofind_provider": autofind_provider,
             "snapshot_provider": snapshot_provider,
             "pause_provider": pause_provider,
             "resume_provider": resume_provider,
             "find_provider": find_provider,
+            "find_progress_message": find_progress_message,
             "nl_provider": nl_provider,
             "photo_provider": photo_provider,
             "activity_provider": activity_provider,
+            "sleep_provider": sleep_provider,
+            "care_provider": care_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -142,10 +173,15 @@ def build_nl_router(
     discover_provider,
     status_provider,
     snapshot_provider,
+    restart_provider=None,
     home_provider=None,
+    quality_provider=None,
     autofind_provider=None,
     activity_responder=None,
     memory=None,
+    chat_context=None,
+    sleep_provider=None,
+    care_provider=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -171,9 +207,21 @@ def build_nl_router(
 
     def send_chat_reply(chat_id: int, text: str) -> None:
         history = memory.history(chat_id) if memory is not None else None
+        # Ground the reply in live system state + relevant care knowledge so the
+        # caretaker can actually answer questions (status, time, diet, sleep,
+        # toxic foods) instead of only chit-chatting. Best-effort: a context
+        # failure must never block the reply.
+        context = None
+        if chat_context is not None:
+            try:
+                context = chat_context(text)
+            except Exception:
+                LOGGER.exception("Building chat context failed")
         failed = False
         try:
-            reply = chat_reply(client, app_config.ollama.llm_model, text, history=history)
+            reply = chat_reply(
+                client, app_config.ollama.llm_model, text, history=history, context=context
+            )
         except Exception:
             LOGGER.exception("Chat reply failed")
             reply = "🤖 My language brain (Ollama) is unreachable right now."
@@ -187,28 +235,61 @@ def build_nl_router(
 
     def dispatch(chat_id: int, intent: Intent, text: str) -> None:
         action = intent.action
+        def update_or_send(message_id, reply: str) -> None:
+            if (
+                message_id is not None
+                and hasattr(notifier, "edit_message_text")
+                and notifier.edit_message_text(chat_id, message_id, reply)
+            ):
+                return
+            notifier.send_text(chat_id, reply)
+
+        # Safety first: a question naming a toxic food ("can percy eat avocado?")
+        # must get the grounded care answer instead of "I haven't logged that" —
+        # but ONLY when it was read as conversation/activity, never when it's a
+        # real command (a "pause" that happens to mention a food must still pause).
+        if action in ("chat", "activity") and toxic_food_in(text) is not None:
+            send_chat_reply(chat_id, text)
+            return
         if action == "pause":
             notifier.send_text(chat_id, control.pause(parse_duration(intent.argument)))
         elif action == "resume":
             notifier.send_text(chat_id, control.resume())
         elif action == "find":
-            notifier.send_text(chat_id, find_provider(chat_id, intent.argument))
+            message_id = notifier.send_text(chat_id, find_provider(chat_id, intent.argument))
+            if hasattr(finder, "attach_progress_message"):
+                finder.attach_progress_message(message_id)
         elif action == "stop_find":
             notifier.send_text(chat_id, finder.stop_current())
         elif action == "discover":
-            notifier.send_text(chat_id, "Scanning the local network for cameras...")
-            notifier.send_text(chat_id, discover_provider())
+            message_id = notifier.send_text(chat_id, "Scanning the local network for cameras...")
+            def edit_discover(text: str) -> None:
+                if message_id is not None and hasattr(notifier, "edit_message_text"):
+                    notifier.edit_message_text(chat_id, message_id, text)
+
+            def progress_update(text: str) -> None:
+                edit_discover(text)
+
+            edit_discover(discover_provider(progress_update))
+        elif action == "restart" and restart_provider is not None:
+            notifier.send_text(chat_id, restart_provider())
         elif action == "home" and home_provider is not None:
             notifier.send_text(chat_id, home_provider())
+        elif action == "quality" and quality_provider is not None:
+            notifier.send_text(chat_id, quality_provider(intent.argument))
         elif action == "autofind" and autofind_provider is not None:
             notifier.send_text(chat_id, autofind_provider(intent.argument))
         elif action == "status":
             notifier.send_text(chat_id, status_provider())
         elif action == "snapshot":
-            notifier.send_text(chat_id, "Capturing snapshots from all cameras...")
-            notifier.send_text(chat_id, snapshot_provider(chat_id))
+            message_id = notifier.send_text(chat_id, "Capturing snapshots from all cameras...")
+            update_or_send(message_id, snapshot_provider(chat_id))
         elif action == "activity" and activity_responder is not None:
             activity_responder.respond(chat_id, text, intent.argument)
+        elif action == "sleep" and sleep_provider is not None:
+            sleep_provider(chat_id, intent.argument)
+        elif action == "care" and care_provider is not None:
+            notifier.send_text(chat_id, care_provider(intent.argument))
         else:  # chat (or activity with no responder)
             send_chat_reply(chat_id, text)
 
@@ -231,10 +312,102 @@ def build_nl_router(
 
 def home_report(ptz_manager, hosts) -> str:
     """Send PTZ cameras to their saved viewpoint and report how many."""
-    homed, total = ptz_manager.go_home(hosts)
+    homed, total, without_preset = ptz_manager.go_home(hosts)
     if total == 0:
         return "No pan-tilt cameras to home."
-    return f"🏠 Sent {homed}/{total} pan-tilt camera(s) to their saved viewpoint."
+    message = f"🏠 Sent {homed}/{total} pan-tilt camera(s) to their saved viewpoint."
+    if without_preset:
+        # A bare "0/2" is mystifying; tell the user WHY a camera didn't move.
+        message += (
+            f"\n⚠️ {without_preset} camera(s) have no saved home preset — "
+            "set one in the Tapo app so I can aim them."
+        )
+    return message
+
+
+def _duration_text(seconds: float) -> str:
+    total = int(round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def ready_camera_hosts(
+    stats: dict[str, CameraStats],
+    stats_lock: threading.Lock,
+    *,
+    max_frame_age: float = STALE_FRAME_SECONDS,
+) -> set[str]:
+    """Hosts whose capture loop is connected and publishing fresh frames."""
+    with stats_lock:
+        snapshots = [camera.snapshot() for camera in stats.values()]
+    ready: set[str] = set()
+    for snap in snapshots:
+        since_frame = snap["since_frame"]
+        if (
+            snap["status"] == "connected"
+            and since_frame is not None
+            and since_frame <= max_frame_age
+        ):
+            ready.add(str(snap["name"]).removeprefix("camera-"))
+    return ready
+
+
+def wait_for_camera_action_window(
+    *,
+    discovery_progress: DiscoveryProgress,
+    stats: dict[str, CameraStats],
+    stats_lock: threading.Lock,
+    stop_event: threading.Event,
+    cancel_event: threading.Event | None = None,
+    timeout_seconds: float = CAMERA_ACTION_WAIT_SECONDS,
+    poll_seconds: float = CAMERA_ACTION_POLL_SECONDS,
+) -> tuple[bool, str, set[str]]:
+    """Wait until discovery is idle and at least one camera stream is fresh.
+
+    PTZ requests are much more reliable once the camera has completed its RTSP
+    reconnect and the app has seen a frame. The returned host set is the ready
+    subset, so commands do not move cameras still marked connecting/reconnecting.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    saw_discovery = discovery_progress.is_active()
+    saw_cameras_not_ready = False
+
+    while not stop_event.is_set() and not (cancel_event and cancel_event.is_set()):
+        discovering = discovery_progress.is_active()
+        if discovering:
+            saw_discovery = True
+        active = ready_camera_hosts(stats, stats_lock)
+        all_hosts = set()
+        with stats_lock:
+            all_hosts = {
+                str(camera.name).removeprefix("camera-") for camera in stats.values()
+            }
+        if not discovering and not all_hosts:
+            return True, "", set()
+        if not discovering and active:
+            message = ""
+            if saw_discovery:
+                message = "Discovery finished; camera streams are live. Continuing."
+            elif saw_cameras_not_ready:
+                message = "Camera streams recovered. Continuing."
+            return True, message, active
+        if all_hosts and not active:
+            saw_cameras_not_ready = True
+        if time.monotonic() >= deadline:
+            reason = (
+                "Timed out waiting for discovery to finish."
+                if discovering
+                else "Timed out waiting for a live camera stream."
+            )
+            return False, reason, active
+        time.sleep(poll_seconds)
+
+    return False, "Cancelled before cameras were ready.", set()
 
 
 def make_console_dispatcher(
@@ -255,6 +428,10 @@ def make_console_dispatcher(
     supervisor: CameraSupervisor,
     status_provider,
     discover_provider,
+    restart_provider,
+    detection_provider,
+    home_provider,
+    quality_provider,
     snapshot_text,
     stop_event: threading.Event,
 ) -> ConsoleDispatcher:
@@ -313,11 +490,17 @@ def make_console_dispatcher(
         ollama_client,
         find_provider=console_find,
         discover_provider=discover_provider,
+        restart_provider=restart_provider,
+        detection_provider=detection_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_text,
-        home_provider=lambda: home_report(ptz_manager, supervisor.active_hosts()),
+        home_provider=home_provider,
+        quality_provider=quality_provider,
         activity_responder=activity_responder,
         memory=ConversationMemory() if ollama_client is not None else None,
+        # The console has no live-state plumbing here, but care knowledge still
+        # grounds diet/sleep/health questions in the terminal chat.
+        chat_context=lambda text: build_chat_context(text, member_species=member_species),
     )
 
     def nl_handle(chat_id: int, text: str) -> None:
@@ -330,6 +513,8 @@ def make_console_dispatcher(
         emit=emit,
         status_text=status_provider,
         discover_text=discover_provider,
+        restart_text=restart_provider,
+        detection_text=detection_provider,
         snapshot_text=snapshot_text,
         pause=control.pause,
         resume=control.resume,
@@ -341,7 +526,8 @@ def make_console_dispatcher(
             if activity_responder is not None
             else None
         ),
-        home_text=lambda: home_report(ptz_manager, supervisor.active_hosts()),
+        home_text=home_provider,
+        quality_text=quality_provider,
         toggle_logs=ConsoleLogToggle().toggle,
         on_quit=stop_event.set,
     )
@@ -427,18 +613,28 @@ def main() -> None:
     # Per-camera IR/night state, stamped by each camera loop from the frame it
     # already decoded; /status, auto-find and the activity feed read it cheaply.
     ir_state = IRState()
+    # Flock sleep tracker — assigned later (needs a notifier). The /status line
+    # below reads it lazily, so the placeholder keeps the closure valid.
+    sleep_tracker: SleepTracker | None = None
     stats: dict[str, CameraStats] = {}
     stats_lock = threading.Lock()
     # Shared live state of the current discovery sweep. The supervisor's workers
     # publish per-host progress into it; the dashboard reads it to render the
     # colour-coded discovery grid in place of the camera band while a scan runs.
     discovery_progress = DiscoveryProgress()
+    quality_controller = StreamQualityController(
+        app_config.credentials,
+        port=app_config.discovery.rtsp_port,
+        mode="stream1",
+    )
+    detection_logger = DetectionLogger(app_config.collect.directory.parent / "detection")
 
     # Delivery runs off the capture threads. The prepare stage is light (collect
     # + snapshot write), and the single Telegram worker is unaffected by this
     # pool size, so a small fixed pool is plenty regardless of how many cameras
     # discovery eventually finds — no need to scale it per camera.
     dispatcher = AlertDispatcher(app_config, notifier, stop_event, workers=4)
+    restart_requested = threading.Event()
 
     supervisor = CameraSupervisor(
         app_config,
@@ -452,6 +648,8 @@ def main() -> None:
         progress=discovery_progress,
         control=control,
         ir_state=ir_state,
+        quality=quality_controller,
+        detection_logger=detection_logger,
     )
 
     # /userinfo stays available, /status exposes the runtime data, and /discover
@@ -461,6 +659,18 @@ def main() -> None:
     def status_provider() -> str:
         with stats_lock:
             snap = dict(stats)
+        now_utc = datetime.now(timezone.utc)
+        logged_last_seen: dict[str, tuple[float, str]] = {}
+        try:
+            for row in detection_logger.activity_for_day(now_utc):
+                if row.last_seen_at is None:
+                    continue
+                since = max(0.0, (now_utc - row.last_seen_at).total_seconds())
+                current = logged_last_seen.get(row.label)
+                if current is None or since < current[0]:
+                    logged_last_seen[row.label] = (since, row.camera)
+        except Exception:
+            LOGGER.exception("Reading detection log for /status failed")
         message = build_status_message(
             snap,
             registry,
@@ -468,11 +678,17 @@ def main() -> None:
             camera_display=namer.display,
             known_birds=sorted(pronouns),
             ir_cameras=ir_state.ir_cameras(),
+            logged_last_seen=logged_last_seen,
         )
         # Lead with the privacy banner when paused so /status makes it obvious
         # why every camera reads "paused" and nothing is being recorded.
         if control.is_paused():
             return f"{control.status()}\n\n{message}"
+        # While the flock is asleep, show the night-in-progress line.
+        if sleep_tracker is not None:
+            night_line = format_status_line(sleep_tracker.in_progress(), now_ph())
+            if night_line:
+                message = f"{message}\n\n{night_line}"
         return message
 
     # /snapshot grabs every camera's latest live frame, saves it under the
@@ -560,10 +776,14 @@ def main() -> None:
             registry,
             detector.known_labels,
             notify=notifier.send_text,
+            edit_message=notifier.edit_message_text,
             grab_frame=grab_frame,
             send_photo=notifier.send_photo,
             describe_frame=describe_frame if ollama_client is not None else None,
-            make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
+            make_patrol=lambda: ptz_manager.build_patrol(
+                ready_camera_hosts(stats, stats_lock)
+            ),
+            wait_until_ready=lambda stop, cancel: _wait_for_find_cameras(stop, cancel),
             camera_display=namer.display,
             species_members=species_members,
         )
@@ -636,8 +856,80 @@ def main() -> None:
             daemon=True,
         ).start()
 
+    def _wait_for_ready_cameras(
+        stop: threading.Event,
+        cancel: threading.Event | None = None,
+    ) -> tuple[bool, str, set[str]]:
+        return wait_for_camera_action_window(
+            discovery_progress=discovery_progress,
+            stats=stats,
+            stats_lock=stats_lock,
+            stop_event=stop,
+            cancel_event=cancel,
+        )
+
+    def _wait_for_find_cameras(
+        stop: threading.Event,
+        cancel: threading.Event,
+    ) -> tuple[bool, str]:
+        ok, message, hosts = _wait_for_ready_cameras(stop, cancel)
+        if not ok:
+            return False, f"{message} Search skipped."
+        if not hosts:
+            return False, "No camera streams are live yet; send /discover once cameras are online."
+        return True, message
+
     def home_provider() -> str:
-        return home_report(ptz_manager, supervisor.active_hosts())
+        ok, message, hosts = _wait_for_ready_cameras(stop_event)
+        if not ok:
+            return f"{message}\nNo PTZ command was sent."
+        report = home_report(ptz_manager, hosts)
+        return f"{message}\n{report}" if message else report
+
+    def quality_provider(argument: str) -> str:
+        arg = argument.strip().lower()
+        if not arg:
+            return quality_controller.status()
+        return quality_controller.set_mode(arg)
+
+    def detection_provider(argument: str) -> str:
+        tokens = [token.strip() for token in argument.split() if token.strip()]
+        day = datetime.now(timezone.utc)
+        label_parts: list[str] = []
+        for token in tokens:
+            try:
+                day = datetime.fromisoformat(token).replace(tzinfo=timezone.utc)
+            except ValueError:
+                label_parts.append(token)
+        label = " ".join(label_parts).strip().lower() or None
+        rows = detection_logger.activity_for_day(day, label=label)
+        day_text = day.date().isoformat()
+        if not rows:
+            target = f" for {label}" if label else ""
+            return f"No detection activity logged{target} on {day_text} UTC."
+        total = sum(row.total_seconds for row in rows)
+        lines = [f"Detection activity on {day_text} UTC — total {_duration_text(total)}:"]
+        for row in rows[:30]:
+            lines.append(
+                f"  • {row.label} · {namer.display(row.camera)} — "
+                f"{_duration_text(row.total_seconds)} ({row.observations} observations)"
+            )
+        if len(rows) > 30:
+            lines.append(f"  • +{len(rows) - 30} more")
+        lines.append(f"Saved in {app_config.collect.directory.parent / 'detection' / (day_text + '.json')}")
+        return "\n".join(lines)
+
+    def restart_provider() -> str:
+        def request_restart() -> None:
+            # Let the command handler send its acknowledgement before the main
+            # thread starts shutting down the notifier and camera workers.
+            time.sleep(0.5)
+            LOGGER.info("Restart requested; re-execing current process")
+            restart_requested.set()
+            stop_event.set()
+
+        threading.Thread(target=request_restart, name="restart-request", daemon=True).start()
+        return "Restarting Aviary server..."
 
     # Auto-find: search for birds missing >10 min while the cameras are in
     # daylight; auto-disables when all cameras go to night/IR.
@@ -666,11 +958,20 @@ def main() -> None:
             return auto_finder.set_enabled(False)
         return auto_finder.status()
 
-    def discover_provider() -> str:
-        report = format_discovery_report(supervisor.discover_and_apply())
+    def discover_provider(progress_update: Callable[[str], None] | None = None) -> str:
+        def on_progress(progress: dict) -> None:
+            if progress_update is not None:
+                progress_update(format_discovery_progress(progress))
+
+        report = format_discovery_report(supervisor.discover_and_apply(on_progress))
         # Face the saved viewpoint FIRST so the cameras are aimed right and the
         # naming below describes the home view, not wherever they were left.
-        ptz_manager.go_home(supervisor.active_hosts())
+        ok, wait_message, hosts = _wait_for_ready_cameras(stop_event)
+        if ok and hosts:
+            home = home_report(ptz_manager, hosts)
+            report = f"{report}\n{wait_message}\n{home}" if wait_message else f"{report}\n{home}"
+        elif not ok:
+            report = f"{report}\n{wait_message}\nSkipped homing until cameras are responsive."
         # Re-name every camera: new ones get named, and existing pan-tilt cameras
         # that have moved since last time get a fresh, accurate name.
         trigger_camera_naming(force=True)
@@ -679,6 +980,20 @@ def main() -> None:
     # Activity Q&A ("what did percy do today?") reads the collected-photos log;
     # conversation memory keeps ~20 turns per chat for coherent follow-ups.
     memory = ConversationMemory() if ollama_client is not None else None
+    def care_answer(text: str) -> str | None:
+        # A grounded care answer when ``text`` is actually a care question, else
+        # None — so a care Q routed to the activity path doesn't dead-end.
+        if ollama_client is None:
+            return None
+        context = build_chat_context(text, member_species=member_species)
+        if context is None:
+            return None
+        try:
+            return chat_reply(ollama_client, app_config.ollama.llm_model, text, context=context)
+        except Exception:
+            LOGGER.exception("Care answer failed")
+            return None
+
     activity_responder = (
         ActivityResponder(
             memories_dir,
@@ -691,6 +1006,7 @@ def main() -> None:
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),
             pronoun_note=pronoun_note,
+            care_answer=care_answer,
         )
         if (ollama_client is not None and notifier is not None and finder is not None)
         else None
@@ -710,10 +1026,105 @@ def main() -> None:
             daemon=True,
         ).start()
 
+    # Flock sleep tracker: watches the IR light cycle to record each night's dark
+    # window, scores it (10-12h target + consistency + disturbances), and answers
+    # /sleep. Independent of the AI — only needs a notifier; the morning report is
+    # env-gated off. The motion signal is the peak fresh-bird movement (the same
+    # measure the caretaker's night-motion check uses).
+    def _max_fresh_movement(fresh_seconds: float = 15.0) -> float:
+        best = 0.0
+        for row in registry.snapshot():
+            since = row.get("since")
+            if since is None or since > fresh_seconds:
+                continue
+            best = max(best, row.get("movement_percent") or 0.0)
+        return best
+
+    if notifier is not None:
+        sleep_tracker = SleepTracker(
+            notifier.broadcast_text,
+            stop_event,
+            all_ir=ir_state.all_ir,
+            camera_count=lambda: len(ir_state.known()),
+            movement=_max_fresh_movement,
+            sleep_dir=app_config.collect.directory.parent / "sleep",
+            morning_report=app_config.sleep_morning_report,
+            client=ollama_client,
+            llm_model=app_config.ollama.llm_model,
+        )
+        ir_state.add_listener(sleep_tracker.on_ir)
+        sleep_tracker.start()
+        LOGGER.info("Sleep tracker on (morning report %s)", app_config.sleep_morning_report)
+
+    def sleep_provider(chat_id: int, argument: str) -> None:
+        # Backgrounded (reads the night store off disk) so the poll loop is free.
+        if sleep_tracker is None:
+            notifier.send_text(chat_id, "Sleep tracking is unavailable.")
+            return
+
+        def work() -> None:
+            from lib.sleep import NO_COVERAGE, format_last, format_week, sleep_streak
+
+            arg = (argument or "").strip().lower()
+            if arg in ("week", "trend", "7", "this week", "lately"):
+                # recent() is newest-first; format_week wants oldest-first so the
+                # trend sparkline reads left-to-right through time.
+                notifier.send_text(chat_id, format_week(list(reversed(sleep_tracker.recent(7)))))
+                return
+            recent = sleep_tracker.recent(7)
+            if recent:
+                notifier.send_text(chat_id, format_last(recent[0], streak=sleep_streak(recent)))
+                return
+            in_progress = sleep_tracker.in_progress()
+            line = format_status_line(in_progress, now_ph()) if in_progress is not None else None
+            if line is not None:
+                notifier.send_text(chat_id, f"{line} — I'll have a full report after they wake. 🌙")
+            elif len(ir_state.known()) == 0:
+                notifier.send_text(chat_id, NO_COVERAGE)
+            else:
+                notifier.send_text(chat_id, "No finished nights tracked yet — I'll report after the birds' first full night. 🌙")
+
+        threading.Thread(target=work, name="sleep", daemon=True).start()
+
+    def care_provider(argument: str) -> str:
+        # The /care guide — pure + fast, so it answers inline (no thread/AI).
+        return care_reply(argument, member_species=member_species)
+
     # Natural-language routing: free-text Telegram messages ("stop the cams",
     # "where's percy?") are classified by Ollama and dispatched to the same
     # providers as the slash commands. Wired only when a notifier exists (to
     # reply) and Ollama is enabled; degrades gracefully if Ollama is unreachable.
+    def chat_context_provider(text: str) -> str | None:
+        # Live system state for grounded chat answers ("how are things?", "is it
+        # dark yet?", "are the cameras ok?"). Snapshots the shared stats under its
+        # lock; the care knowledge is folded in by build_chat_context.
+        with stats_lock:
+            snaps = [camera.snapshot() for camera in stats.values()]
+        healthy = sum(
+            1
+            for snap in snaps
+            if snap["status"] == "connected"
+            and (snap["since_frame"] is None or snap["since_frame"] <= STALE_FRAME_SECONDS)
+        )
+        if ir_state.all_ir():
+            daylight = "night"
+        elif ir_state.ir_cameras():
+            daylight = "mixed"
+        else:
+            daylight = "day"
+        visible = currently_visible(registry.snapshot(), 15.0)
+        system_state = format_system_state(
+            now_ph(),
+            paused=control.is_paused(),
+            pause_status=control.status(),
+            cameras_total=len(snaps),
+            cameras_healthy=healthy,
+            visible_text=format_visible(visible, namer.display) if visible else "",
+            daylight=daylight,
+            autofind_on=auto_finder.enabled if auto_finder is not None else None,
+        )
+        return build_chat_context(text, system_state=system_state, member_species=member_species)
+
     nl_router = build_nl_router(
         app_config,
         notifier,
@@ -723,12 +1134,17 @@ def main() -> None:
         ollama_client,
         find_provider=find_provider,
         discover_provider=discover_provider,
+        restart_provider=restart_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_provider,
         home_provider=home_provider,
+        quality_provider=quality_provider,
         autofind_provider=autofind_provider,
         activity_responder=activity_responder,
         memory=memory,
+        chat_context=chat_context_provider,
+        sleep_provider=sleep_provider if sleep_tracker is not None else None,
+        care_provider=care_provider,
     )
 
     start_command_thread(
@@ -737,15 +1153,21 @@ def main() -> None:
         stop_event,
         status_provider=status_provider,
         discover_provider=discover_provider,
+        restart_provider=restart_provider,
+        detection_provider=detection_provider,
         home_provider=home_provider,
+        quality_provider=quality_provider,
         autofind_provider=autofind_provider if auto_finder is not None else None,
         snapshot_provider=snapshot_provider,
         pause_provider=control.pause,
         resume_provider=control.resume,
         find_provider=find_provider if finder is not None else None,
+        find_progress_message=finder.attach_progress_message if finder is not None else None,
         nl_provider=nl_router.handle_async if nl_router is not None else None,
         photo_provider=photo_provider if ollama_client is not None else None,
         activity_provider=activity_provider if activity_responder is not None else None,
+        sleep_provider=sleep_provider if sleep_tracker is not None else None,
+        care_provider=care_provider,
     )
     if auto_finder is not None:
         auto_finder.start()
@@ -777,6 +1199,37 @@ def main() -> None:
             "Caretaker reports every ~%.0f min; raw photo alerts %s",
             app_config.memory_interval_minutes,
             "on" if app_config.raw_photo_alerts else "off",
+        )
+
+    # Daily/weekly care reminders (fresh food + water, produce pickup, midday
+    # enrichment, wind-down, bedtime, weekly clean + weigh) keyed to the observed
+    # light (cameras leaving/entering IR) and PH sunrise/sunset. Independent of
+    # the AI — it only needs a notifier to talk to.
+    if notifier is not None and app_config.care_reminders:
+        def last_night_sleep() -> str | None:
+            # Last night's sleep one-liner folded into the morning nudge — only
+            # when it's genuinely LAST night (its evening was yesterday) and
+            # already finalized, never a stale older night.
+            if sleep_tracker is None:
+                return None
+            night = sleep_tracker.last_finalized()
+            if night is None or night.night_of != now_ph().date() - timedelta(days=1):
+                return None
+            from lib.sleep import format_morning
+
+            return format_morning(night)
+
+        CareScheduler(
+            notifier.broadcast_text,
+            stop_event,
+            all_ir=ir_state.all_ir,
+            camera_count=lambda: len(ir_state.known()),
+            sun_times=lambda day: sun_times(day, app_config.latitude, app_config.longitude),
+            sleep_summary=last_night_sleep,
+            weekly_tip=lambda: care_tip(now_ph().isocalendar()[1]),
+        ).start()
+        LOGGER.info(
+            "Care reminders on (lat=%.4f lon=%.4f)", app_config.latitude, app_config.longitude
         )
 
     # Presentation: the live dashboard by default, or the interactive terminal
@@ -825,11 +1278,10 @@ def main() -> None:
     # camera may have moved since last run — rather than only on the 30-min sweep.
     trigger_camera_naming(force=True)
 
-    # Keep discovering in the background: two quick retries after boot (to catch
-    # cameras whose RTSP was still busy from a previous run — common right after a
-    # restart), then a silent sweep every AUTO_DISCOVER_SECONDS so cameras that
-    # come online later are picked up without the user running /discover.
-    # Idempotent — start_camera dedups by host.
+    # Keep discovering in the background: a silent sweep every
+    # AUTO_DISCOVER_SECONDS so IP changes are picked up without the user running
+    # /discover. Reconciliation happens only after each scan returns, so
+    # unchanged cameras keep running with no drop while discovery is in flight.
     def _rediscover(force: bool = False) -> None:
         try:
             applied = supervisor.discover_and_apply()
@@ -846,10 +1298,6 @@ def main() -> None:
             trigger_camera_naming(force=force)
 
     def _discovery_background() -> None:
-        for delay in (15.0, 45.0):
-            if stop_event.wait(delay):
-                return
-            _rediscover()
         while not stop_event.wait(AUTO_DISCOVER_SECONDS):
             _rediscover(force=True)
 
@@ -897,6 +1345,10 @@ def main() -> None:
                 supervisor=supervisor,
                 status_provider=status_provider,
                 discover_provider=discover_provider,
+                restart_provider=restart_provider,
+                detection_provider=detection_provider,
+                home_provider=home_provider,
+                quality_provider=quality_provider,
                 snapshot_text=snapshot_text,
                 stop_event=stop_event,
             )
@@ -910,7 +1362,7 @@ def main() -> None:
         # Tell the user we're going down BEFORE the slow joins, while the
         # notifier still works. Only on a graceful stop (SIGINT/SIGTERM set
         # stop_event); a SIGKILL can't be announced. Best-effort.
-        if notifier is not None:
+        if notifier is not None and not restart_requested.is_set():
             try:
                 notifier.broadcast_text("🔴 Aviary server stopping — cameras going offline.")
             except Exception:
@@ -921,6 +1373,8 @@ def main() -> None:
             stderr_redirect.stop()
         supervisor.join()
         dispatcher.shutdown()
+        if restart_requested.is_set():
+            os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 if __name__ == "__main__":

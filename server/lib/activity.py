@@ -18,8 +18,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib.ai.chat import strip_thinking
-from lib.ai.vlm import build_detection_context, describe_image
+from lib.ai.chat import clean_reply
 from lib.labels import pretty
 
 
@@ -42,7 +41,8 @@ class Sighting:
 
 @dataclass
 class _BoxDetection:
-    """Minimal duck-typed detection for build_detection_context."""
+    """Minimal duck-typed detection for build_detection_context (used by the
+    activity harness to ground a re-caption in a sighting's saved box)."""
 
     label: str
     bbox_xyxy: tuple[int, int, int, int]
@@ -143,77 +143,19 @@ def summarise_counts(sightings: list[Sighting]) -> str:
 # -- VLM / LLM wrappers ------------------------------------------------------
 
 
-def caption_sighting(
-    client,
-    vlm_model: str,
-    sighting: Sighting,
-    member_species: dict[str, str] | None = None,
-    pronouns: dict[str, str] | None = None,
-    *,
-    timeout_seconds: float | None = None,
-) -> str:
-    """A short VLM caption for one sighting, grounded by its detection box."""
-    context = build_detection_context(
-        [_BoxDetection(sighting.label, sighting.bbox)],
-        sighting.width,
-        sighting.height,
-        member_species,
-        pronouns,
-    )
-    return describe_image(
-        client,
-        vlm_model,
-        sighting.path.read_bytes(),
-        "In one short sentence, say what this bird is doing.",
-        context=context,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-DIGEST_SYSTEM_PROMPT = (
-    "You are the warm, upbeat caretaker of a home aviary sending a short 'daycare "
-    "update' text about the pet birds. Given timestamped observations, write 2-4 "
-    "friendly sentences: who was active, who was together, what they were up to "
-    "(eating, playing, preening, resting). Use each bird's pronoun exactly as it "
-    "appears in the notes (he/she), and refer to birds by NAME only — never add "
-    "the species. Don't invent things not in the notes. No lists, no preamble — "
-    "just the update."
-)
-
-
-def summarise_day(
-    client, llm_model: str, observations: list[str], *, header: str = "", pronoun_note: str = "", timeout_seconds: float | None = None
-) -> str:
-    """Fold per-photo captions into one warm caretaker summary via the LLM."""
-    if not observations:
-        return ""
-    notes = "\n".join(f"- {line}" for line in observations)
-    pronoun_prefix = f"Bird pronouns (use these exactly): {pronoun_note}\n\n" if pronoun_note else ""
-    user = (f"{header}\n" if header else "") + pronoun_prefix + f"Observations:\n{notes}"
-    reply = client.chat(
-        llm_model,
-        [
-            {"role": "system", "content": DIGEST_SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
-        think=True,
-        timeout_seconds=timeout_seconds,
-    )
-    return strip_thinking(reply)
-
-
 _ACTIVITY_SUMMARY_PROMPT = (
     "You are the aviary caretaker giving an activity update from logged memories. "
-    "Write it as bullet points — start each line with '• ' — UP TO 10 bullets. "
-    "Cover EVERY bird that appears in the notes: at least one bullet per bird, "
-    "saying what it did and who it was with. Refer to each bird by NAME, never its "
+    "Write terse bullet points — start each line with '• ' — UP TO 5 bullets, "
+    "each under 18 words. Cover the requested bird first; include other birds only "
+    "when important. Say what happened and when. Refer to each bird by NAME, never its "
     "species. Write NATURALLY: use a pronoun (she/he, per the pronouns given) only "
     "where one naturally fits in a sentence — NEVER write a pronoun in parentheses "
     "or right after a name (no 'Percy (she)', no 'Percy, she,'); the pronouns are "
-    "given for your reference, not to be quoted. When a note begins with how long "
+    "given for your reference, not to be quoted, and are NOT evidence that a bird "
+    "was present. When a note begins with how long "
     "ago it was (e.g. '2 hours ago', '12 minutes ago'), include that timing in the "
-    "bullet naturally (e.g. 'Percy preened on the perch 2 hours ago'). Be warm and "
-    "concrete; don't invent anything not in the notes. No preamble or closing line "
+    "bullet naturally (e.g. 'Percy preened on the perch 2 hours ago'). Be concrete; "
+    "don't invent anything not in the notes. No preamble or closing line "
     "— just the bullets."
 )
 
@@ -221,11 +163,18 @@ _ACTIVITY_SUMMARY_PROMPT = (
 _ACTIVITY_QA_PROMPT = (
     "You are the warm caretaker of a home aviary, answering a question about the "
     "pet birds using ONLY the timestamped memory notes provided. Each note line is "
-    "'(when) [birds seen]: what they were doing'. Answer the SPECIFIC question "
-    "directly in 1-4 sentences. Be concrete about WHEN (e.g. 'around 2pm', 'this "
-    "morning', 'about an hour ago') and WHICH birds. For a question about two or "
-    "more birds being TOGETHER, only say yes if a note lists them together at the "
-    "same time, and say when. For a yes/no question, start with a clear yes or no. "
+    "'(when) [birds seen]: what they were doing'. If a Structured facts section is "
+    "provided, treat it as authoritative for counts, first/last times, together/apart "
+    "evidence, and health/social/activity flags. Answer the SPECIFIC question "
+    "directly in 2-4 short sentences, max 110 words total. Be concrete about WHEN "
+    "(e.g. 'around 2pm', 'this morning', 'about an hour ago') and WHICH birds. For "
+    "together/apart questions, include numerical counts when provided. For broad "
+    "'how was X?' questions, center X and cover observed health flags or lack of "
+    "flags, activity, play/feeding/preening/rest, and social/alone pattern where "
+    "the memory supports it. For a question about two or more birds being TOGETHER, "
+    "only say yes if the facts or a note lists them together at the same time. For "
+    "a yes/no question, start with a clear yes or no. The pronoun note is reference "
+    "only and is NOT evidence that a bird was present. "
     "If the notes don't show what's asked, say you didn't catch it / can't tell "
     "from today's memory — never guess. Use each bird's correct pronoun (per the "
     "pronouns given); refer to birds by NAME, never the species. No preamble."
@@ -240,6 +189,7 @@ def answer_activity_question(
     pronoun_note: str = "",
     window_phrase: str = "",
     *,
+    facts: str = "",
     timeout_seconds: float | None = None,
 ) -> str:
     """Answer a free-form day-lookback question grounded in the memory notes."""
@@ -250,6 +200,8 @@ def answer_activity_question(
     if pronoun_note:
         parts.append(f"Bird pronouns (use these): {pronoun_note}")
     parts.append(f"Question: {question.strip()}")
+    if facts:
+        parts.append(f"Structured facts:\n{facts}")
     header = f"Memory notes from {window_phrase}" if window_phrase else "Memory notes"
     parts.append(f"{header}:\n{body}")
     reply = client.chat(
@@ -261,13 +213,13 @@ def answer_activity_question(
         think=True,
         timeout_seconds=timeout_seconds,
     )
-    return strip_thinking(reply)
+    return clean_reply(reply)
 
 
 def summarise_activity(
     client, model: str, notes: list[str], subject: str = "", pronoun_note: str = "", *, timeout_seconds: float | None = None
 ) -> str:
-    """Fold journal memory notes into a <=3-sentence activity report.
+    """Fold journal memory notes into a terse bulleted activity report.
 
     ``pronoun_note`` states each bird's sex (the notes often don't carry it, so
     the model would otherwise default everyone to "he").
@@ -287,4 +239,4 @@ def summarise_activity(
         think=True,
         timeout_seconds=timeout_seconds,
     )
-    return strip_thinking(reply)
+    return clean_reply(reply)

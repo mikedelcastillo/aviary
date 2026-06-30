@@ -31,7 +31,15 @@ uv run server
 ```
 
 This runs the server natively in the uv venv on the Linux/RTX 5060 host (`uv sync`
-already installed the cu128 torch build). It expects the model at:
+already installed the cu128 torch build).
+
+To run it in the background with boot autostart instead, use `uv run server-up`
+(a systemd user service runs the dashboard inside a dedicated tmux session). Re-run
+`uv run server-up` — or just `uv run server` — to attach to the live dashboard; Esc
+or Ctrl-C detaches and leaves it running. `uv run server-down` stops it and removes
+the autostart.
+
+It expects the model at:
 
 ```text
 data/server/models/current/object_detector.pt
@@ -42,13 +50,16 @@ data/server/models/current/object_detector.pt
 Cameras are not configured by hand. On startup the server scans the local subnet
 for Tapo cameras and consumes whatever it finds:
 
-1. Sweep every host on the subnet for an open RTSP port (`:554`).
-2. For each reachable host, perform an RTSP `DESCRIBE` handshake using
-   `TAPO_CREDENTIALS` to confirm the credentials are accepted and the stream path
+1. Sweep every host on the subnet with a real RTSP `DESCRIBE` probe.
+2. Use `TAPO_CREDENTIALS` to confirm the credentials are accepted and the stream path
    (`/stream1`) exists.
 3. Build the full credentialed RTSP URL per confirmed camera and start consuming
    it. Each camera is named `camera-<host-ip>` for a stable identity across
    rediscovery.
+
+Discovery deliberately avoids a separate throwaway TCP port probe. Each host gets
+one RTSP handshake, with retries for transient drops, because small WiFi cameras
+can intermittently miss when they are poked twice while already streaming.
 
 The subnet is auto-detected from the host's primary IPv4 address (assumed `/24`),
 or taken from `TAPO_DISCOVERY_CIDR` when set. The startup scan is non-fatal: if no
@@ -67,3 +78,46 @@ starts consuming any newly found cameras and replies with a summary (hosts
 scanned, cameras added, auth failures). Cameras are de-duplicated by host, so
 rerunning `/discover` only starts streams for cameras that are not already
 active.
+
+### `/restart` Telegram command
+
+Authenticated users can send `/restart` to gracefully stop camera workers,
+release streams, and replace the current Python process with the same executable
+and arguments. This is a real process restart, not only a rediscovery sweep.
+
+### `/detections` Telegram command
+
+Every positive inference updates a daily JSON file under
+`data/server/detection/YYYY-MM-DD.json`. The log stores merged visibility
+intervals per camera and bird label, plus observation counts and max confidence,
+so it stays compact while still answering "how long was this bird detected
+today?" Send `/detections` for today's totals, `/detections percy` for one bird,
+or `/detections percy 2026-06-27` for a specific UTC day.
+
+### `/quality` Telegram command
+
+`/quality stream1`, `/quality stream2`, and `/quality auto` control which Tapo
+RTSP stream each camera consumes. The server starts on `stream1` by default.
+`stream1` forces the high quality stream, `stream2` forces the lower bandwidth
+stream, and `auto` starts conservatively on `stream2`, promotes stable cameras to
+`stream1`, and falls back to `stream2` when FPS drops, frames stall, or
+reconnects begin.
+
+## Sleep tracking
+
+The server watches the cameras' IR (night) signal to track the flock's sleep.
+When the room goes fully dark (every camera in IR) a night opens; when it
+lightens for good in the morning the night finalizes and is scored 0–100:
+
+- **Duration** vs the 10–12h of darkness the birds need (steep penalty under 8h).
+- **Consistency** — how close bedtime and wake-up are to their rolling usual.
+- **Light at night** and **disturbances** (night-motion bursts, including
+  possible cockatiel night-frights) dent the score.
+
+Ask the bot **`/sleep`** for last night's score and summary, **`/sleep week`**
+for the 7-night trend, or just "how did the birds sleep?". `/status` shows a
+"night in progress" line while they're asleep. Set `SLEEP_MORNING_REPORT=1` to
+also get a short summary each morning when they wake. Nightly records persist
+under `data/server/sleep/` so the trend (and the consistency baseline) build up
+over time. Sleep is measured at the room/flock level — individual birds can't be
+told apart in the dark — so it's reported as "the birds' sleep".

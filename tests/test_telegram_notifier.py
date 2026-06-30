@@ -139,6 +139,69 @@ def test_no_photo_sends_text_to_every_recipient(monkeypatch) -> None:
     assert all(call["json"]["text"] == "Bird, Cat" for call in post.calls)
 
 
+def test_text_is_sent_as_html_with_bold(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("🌙 **Last night** was calm")
+
+    call = post.calls[0]
+    assert call["json"]["parse_mode"] == "HTML"
+    assert call["json"]["text"] == "🌙 <b>Last night</b> was calm"
+
+
+def test_send_text_returns_message_id(monkeypatch) -> None:
+    post = RecordingPost([FakeResponse(200, {"ok": True, "result": {"message_id": 99}})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+
+    assert notifier.send_text("chat", "hello") == 99
+
+
+def test_html_parse_error_falls_back_to_plain(monkeypatch) -> None:
+    # A 400 "can't parse entities" resends as plain text with markers stripped,
+    # so the message is never dropped over formatting.
+    parse_400 = FakeResponse(400, {"ok": False, "description": "Bad Request: can't parse entities"})
+    post = RecordingPost([parse_400, FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("**hi** there")
+
+    assert len(post.calls) == 2
+    assert post.calls[0]["json"]["parse_mode"] == "HTML"
+    plain = post.calls[1]["json"]
+    assert "parse_mode" not in plain
+    assert plain["text"] == "hi there"  # markers gone, no tags
+
+
+def test_non_parse_400_is_not_retried_as_plain(monkeypatch) -> None:
+    # A non-formatting 400 (e.g. chat not found) must NOT be silently resent —
+    # it surfaces as an error rather than wasting a round-trip.
+    bad = FakeResponse(400, {"ok": False, "description": "Bad Request: chat not found"})
+    post = RecordingPost([bad])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    notifier.broadcast_text("hello")  # broadcast swallows the surfaced error
+
+    assert len(post.calls) == 1  # only the HTML attempt, no plain resend
+
+
+def test_edit_not_modified_is_a_noop_not_a_plain_resend(monkeypatch) -> None:
+    # Editing to identical content 400s "message is not modified"; that's a no-op,
+    # not a parse failure, so we must NOT resend a (downgraded) plain version.
+    not_mod = FakeResponse(400, {"ok": False, "description": "Bad Request: message is not modified"})
+    post = RecordingPost([not_mod])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A"], min_send_interval_seconds=0.0)
+    assert notifier.edit_message_text("A", 5, "**unchanged**") is True
+    assert len(post.calls) == 1  # no plain resend that would drop the formatting
+
+
 def test_429_pauses_then_retries(monkeypatch, tmp_path) -> None:
     snapshot = tmp_path / "snap.jpg"
     snapshot.write_bytes(b"bytes")
@@ -297,3 +360,40 @@ def test_retry_after_falls_back_to_header(monkeypatch) -> None:
     notifier.send_detections("camera-1", [detection()], None)
 
     assert clock.slept == [4.0 + RETRY_AFTER_BUFFER_SECONDS]
+
+
+def test_broadcast_album_tracked_downscales_each_image_once(monkeypatch) -> None:
+    # The digest goes to every recipient; downscaling must happen once per image,
+    # not once per (image, recipient) — otherwise N recipients pay N re-encodes.
+    calls = {"n": 0}
+
+    def counting_downscale(image: bytes) -> bytes:
+        calls["n"] += 1
+        return image
+
+    monkeypatch.setattr("lib.telegram.notifier.downscale_jpeg", counting_downscale)
+    post = RecordingPost([FakeResponse(200, {"result": [{"message_id": 7}]})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A", "B", "C"], min_send_interval_seconds=0.0)
+    sent = notifier.broadcast_album_tracked([(b"img-a", "cap"), (b"img-b", None)])
+
+    assert calls["n"] == 2  # two images, downscaled once each (not 2 * 3 recipients)
+    assert sent == {"A": 7, "B": 7, "C": 7}
+
+
+def test_broadcast_album_downscales_each_image_once(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    def counting_downscale(image: bytes) -> bytes:
+        calls["n"] += 1
+        return image
+
+    monkeypatch.setattr("lib.telegram.notifier.downscale_jpeg", counting_downscale)
+    post = RecordingPost([FakeResponse(200, {"ok": True})])
+    monkeypatch.setattr("lib.telegram.notifier.requests.post", post)
+
+    notifier = TelegramNotifier("token", ["A", "B", "C"], min_send_interval_seconds=0.0)
+    notifier.broadcast_album([(b"img-a", "cap"), (b"img-b", None)])
+
+    assert calls["n"] == 2  # downscaled once per image across all three recipients

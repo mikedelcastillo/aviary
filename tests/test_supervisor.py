@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 from lib.config import (
@@ -116,6 +117,107 @@ def test_discover_and_apply_dedups_by_host(monkeypatch) -> None:
     assert second.already_active == 1
     assert list(stats) == ["camera-10.0.0.5"]
     assert supervisor.active_hosts() == {"10.0.0.5"}
+
+
+def test_discover_and_apply_reconciles_stale_hosts_after_scan(monkeypatch) -> None:
+    supervisor, stats, _started = _supervisor(monkeypatch)
+    first_result = DiscoveryResult(
+        cameras=[
+            DiscoveredCamera(
+                host="10.0.0.5",
+                port=554,
+                stream_path="/stream1",
+                rtsp_url="rtsp://user:pass@10.0.0.5:554/stream1",
+            ),
+            DiscoveredCamera(
+                host="10.0.0.6",
+                port=554,
+                stream_path="/stream1",
+                rtsp_url="rtsp://user:pass@10.0.0.6:554/stream1",
+            ),
+        ],
+        hosts_scanned=2,
+        ports_open=2,
+        auth_failures=0,
+        elapsed_seconds=0.2,
+    )
+    second_result = DiscoveryResult(
+        cameras=[
+            DiscoveredCamera(
+                host="10.0.0.6",
+                port=554,
+                stream_path="/stream1",
+                rtsp_url="rtsp://user:pass@10.0.0.6:554/stream1",
+            ),
+            DiscoveredCamera(
+                host="10.0.0.7",
+                port=554,
+                stream_path="/stream1",
+                rtsp_url="rtsp://user:pass@10.0.0.7:554/stream1",
+            ),
+        ],
+        hosts_scanned=2,
+        ports_open=2,
+        auth_failures=0,
+        elapsed_seconds=0.2,
+    )
+    calls = 0
+
+    def fake_discover(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            assert supervisor.active_hosts() == {"10.0.0.5", "10.0.0.6"}
+            assert set(stats) == {"camera-10.0.0.5", "camera-10.0.0.6"}
+        return first_result if calls == 1 else second_result
+
+    monkeypatch.setattr("lib.supervisor.discover_cameras", fake_discover)
+
+    first = supervisor.discover_and_apply()
+    second = supervisor.discover_and_apply()
+
+    assert sorted(first.added) == ["camera-10.0.0.5", "camera-10.0.0.6"]
+    assert second.added == ["camera-10.0.0.7"]
+    assert second.already_active == 1
+    assert second.removed == ["camera-10.0.0.5"]
+    assert supervisor.active_hosts() == {"10.0.0.6", "10.0.0.7"}
+    assert set(stats) == {"camera-10.0.0.6", "camera-10.0.0.7"}
+
+
+def test_discover_and_apply_serializes_overlapping_sweeps(monkeypatch) -> None:
+    supervisor, _stats, _started = _supervisor(monkeypatch)
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_discover(*_args, **_kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return DiscoveryResult(
+            cameras=[],
+            hosts_scanned=2,
+            ports_open=0,
+            auth_failures=0,
+            elapsed_seconds=0.02,
+        )
+
+    monkeypatch.setattr("lib.supervisor.discover_cameras", fake_discover)
+
+    threads = [
+        threading.Thread(target=supervisor.discover_and_apply),
+        threading.Thread(target=supervisor.discover_and_apply),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert max_active == 1
 
 
 def test_format_discovery_report_mentions_auth_failures() -> None:

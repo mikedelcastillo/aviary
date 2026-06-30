@@ -28,7 +28,7 @@ from lib.activity import summarise_activity
 from lib.clock import now_ph
 from lib.find import currently_visible
 from lib.imaging import downscale_jpeg
-from lib.journal import MemoryEntry, append_entry
+from lib.journal import MemoryEntry, MemoryObservation, append_entry
 from lib.labels import pretty
 
 
@@ -189,8 +189,7 @@ class MemoryMaker:
         when = self._now()
 
         # 1) Grab + save the frames.
-        shots: list[tuple[bytes, str, list[str]]] = []  # (image, camera, birds)
-        saved_paths: list[str] = []
+        shots: list[tuple[bytes, str, list[str], str]] = []  # (image, camera, birds, saved path)
         for camera in cameras:
             try:
                 image = self._grab_frame(camera)
@@ -200,41 +199,68 @@ class MemoryMaker:
             if not image:
                 continue
             small = downscale_jpeg(image)
+            saved_path = ""
             try:
-                saved_paths.append(str(self._save_image(small, when, camera)))
+                saved_path = str(self._save_image(small, when, camera))
             except Exception:
                 LOGGER.exception("Saving memory image failed")
             birds = sorted(set(cam_birds[camera]))
-            shots.append((small, camera, birds))
+            shots.append((small, camera, birds, saved_path))
         if not shots:
             return False
 
         # 2) Describe each frame (VLM), summarise, remember.
-        observations = []
-        for image, camera, birds in shots:
+        raw_observations: list[str] = []
+        structured_observations: list[MemoryObservation] = []
+        for image, camera, birds, saved_path in shots:
             try:
                 note = self._describe_frame(image) if self._describe_frame else None
             except Exception:
                 LOGGER.exception("Memory describe failed")
                 note = None
             who = ", ".join(pretty(b) for b in birds)
-            observations.append(f"{who} on {self._camera_display(camera)}: {note or 'seen'}")
+            display_camera = self._camera_display(camera)
+            note = note or "seen"
+            raw_observations.append(f"{who} on {display_camera}: {note}")
+            structured_observations.append(
+                MemoryObservation(
+                    camera=display_camera,
+                    birds=birds,
+                    note=note,
+                    photo=saved_path,
+                )
+            )
         try:
             summary = summarise_activity(
-                self._client, self._llm_model, observations,
+                self._client, self._llm_model, raw_observations,
                 pronoun_note=self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
             )
         except Exception:
             LOGGER.exception("Memory summary failed")
-            summary = "; ".join(observations)
+            summary = "; ".join(raw_observations)
 
         # Only the birds we actually captured a frame for — a bird that was
         # visible on a camera that couldn't produce a frame is NOT reported (so
         # it stays "new" and is retried), nor claimed in the memory entry.
-        captured = {bird for _, _, birds in shots for bird in birds}
+        captured = {bird for _, _, birds, _ in shots for bird in birds}
         all_birds = sorted(captured)
+        saved_paths = [path for _, _, _, path in shots if path]
+        journal_note = (
+            raw_observations[0]
+            if len(raw_observations) == 1
+            else "\n".join(f"- {line}" for line in raw_observations)
+        )
         try:
-            append_entry(self._memories_dir, MemoryEntry(when, all_birds, summary or "(activity)", saved_paths))
+            append_entry(
+                self._memories_dir,
+                MemoryEntry(
+                    when,
+                    all_birds,
+                    journal_note or summary or "(activity)",
+                    saved_paths,
+                    observations=structured_observations,
+                ),
+            )
         except Exception:
             LOGGER.exception("Writing memory entry failed")
 
@@ -245,7 +271,7 @@ class MemoryMaker:
         self._reported_set = frozenset(captured)
         header = f"🐦 {when.strftime('%H:%M')} — " + ", ".join(pretty(b) for b in all_birds)
         caption = _clip_caption(f"{header}\n{summary}".strip())
-        items = [(img, caption if i == 0 else None) for i, (img, _, _) in enumerate(shots)]
+        items = [(img, caption if i == 0 else None) for i, (img, _, _, _) in enumerate(shots)]
         self._activity_msgs = self._notifier.broadcast_album_tracked(items)
         self._last_is_caption = True
         if not self._activity_msgs:

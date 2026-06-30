@@ -21,7 +21,9 @@ dependencies = [
 # Every operational script is a console command: `uv run <name>`. Names are
 # hyphen-case; the Python modules/functions they map to stay underscore.
 [project.scripts]
-server = "lib.main:main"
+server = "lib.server_ctl:server"
+server-up = "lib.server_ctl:up"
+server-down = "lib.server_ctl:down"
 llm-harness = "lib.ai.harness:main"
 activity-harness = "lib.ai.activity_harness:main"
 train = "train:main"

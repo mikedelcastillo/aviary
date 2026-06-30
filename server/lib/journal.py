@@ -13,6 +13,7 @@ section per entry, the note beneath, and a ``> photo: <path>`` line.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -27,6 +28,17 @@ _ENTRY_RE = re.compile(
     re.DOTALL,
 )
 _PHOTO_RE = re.compile(r"^> photo: (.+)$", re.MULTILINE)
+# Leading markdown header hashes on a note line ("## ", "# ") — stripped on write
+# so a note can't forge an entry header (see append_entry).
+_HEADER_HASHES = re.compile(r"(?m)^#+[ \t]+")
+
+
+@dataclass
+class MemoryObservation:
+    camera: str = ""
+    birds: list[str] = field(default_factory=list)
+    note: str = ""
+    photo: str = ""
 
 
 @dataclass
@@ -35,10 +47,107 @@ class MemoryEntry:
     birds: list[str]
     note: str
     photos: list[str] = field(default_factory=list)
+    observations: list[MemoryObservation] = field(default_factory=list)
 
 
 def memory_path(memories_dir: Path, day: date) -> Path:
     return memories_dir / f"{day.isoformat()}.md"
+
+
+def memory_jsonl_path(memories_dir: Path, day: date) -> Path:
+    return memories_dir / f"{day.isoformat()}.jsonl"
+
+
+def _clean_label(label: str) -> str:
+    return str(label).strip().lower()
+
+
+def _clean_observation(observation: MemoryObservation) -> MemoryObservation:
+    return MemoryObservation(
+        camera=str(observation.camera).strip(),
+        birds=sorted({_clean_label(b) for b in observation.birds if str(b).strip()}),
+        note=str(observation.note).strip(),
+        photo=str(observation.photo).strip(),
+    )
+
+
+def _entry_record(entry: MemoryEntry) -> dict:
+    return {
+        "version": 1,
+        "time": entry.time.isoformat(),
+        "birds": sorted({_clean_label(b) for b in entry.birds if str(b).strip()}),
+        "note": entry.note.strip(),
+        "photos": [str(photo) for photo in entry.photos],
+        "observations": [
+            {
+                "camera": obs.camera,
+                "birds": obs.birds,
+                "note": obs.note,
+                "photo": obs.photo,
+            }
+            for obs in (_clean_observation(o) for o in entry.observations)
+            if obs.note or obs.birds or obs.photo or obs.camera
+        ],
+    }
+
+
+def _entry_from_record(data: dict) -> MemoryEntry | None:
+    try:
+        when = datetime.fromisoformat(str(data["time"]))
+    except Exception:
+        return None
+    observations: list[MemoryObservation] = []
+    for raw in data.get("observations") or []:
+        if not isinstance(raw, dict):
+            continue
+        observations.append(
+            _clean_observation(
+                MemoryObservation(
+                    camera=str(raw.get("camera", "")),
+                    birds=[_clean_label(b) for b in raw.get("birds", []) if str(b).strip()],
+                    note=str(raw.get("note", "")),
+                    photo=str(raw.get("photo", "")),
+                )
+            )
+        )
+    return MemoryEntry(
+        time=when,
+        birds=sorted({_clean_label(b) for b in data.get("birds", []) if str(b).strip()}),
+        note=str(data.get("note", "")).strip(),
+        photos=[str(photo) for photo in data.get("photos", []) if str(photo).strip()],
+        observations=observations,
+    )
+
+
+def _load_jsonl_entries(memories_dir: Path, day: date) -> list[MemoryEntry]:
+    path = memory_jsonl_path(memories_dir, day)
+    if not path.exists():
+        return []
+    entries: list[MemoryEntry] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            LOGGER.debug("Skipping malformed memory JSONL record in %s", path)
+            continue
+        if not isinstance(data, dict):
+            continue
+        entry = _entry_from_record(data)
+        if entry is not None and entry.time.date() == day:
+            entries.append(entry)
+    return entries
+
+
+def _entry_key(entry: MemoryEntry) -> tuple:
+    minute = entry.time.replace(second=0, microsecond=0)
+    return (
+        minute,
+        tuple(sorted(entry.birds)),
+        entry.note.strip(),
+        tuple(entry.photos),
+    )
 
 
 def append_entry(memories_dir: Path, entry: MemoryEntry) -> Path:
@@ -47,21 +156,29 @@ def append_entry(memories_dir: Path, entry: MemoryEntry) -> Path:
     path = memory_path(memories_dir, entry.time.date())
     new_file = not path.exists()
     birds = ", ".join(entry.birds) if entry.birds else "quiet"
-    block = f"## {entry.time.strftime('%H:%M')} | {birds}\n{entry.note.strip()}\n"
+    # A VLM note whose line starts with "## " would imitate an entry header and
+    # corrupt parsing on read-back (it could be misread as a new entry). Strip
+    # leading markdown header hashes per line so a note can never forge a header.
+    note = _HEADER_HASHES.sub("", entry.note.strip())
+    block = f"## {entry.time.strftime('%H:%M')} | {birds}\n{note}\n"
     for photo in entry.photos:
         block += f"> photo: {photo}\n"
     with path.open("a", encoding="utf-8") as handle:
         if new_file:
             handle.write(f"# Aviary memories — {entry.time.date().isoformat()}\n\n")
         handle.write(block + "\n")
+    record_entry = MemoryEntry(entry.time, entry.birds, note, entry.photos, entry.observations)
+    with memory_jsonl_path(memories_dir, entry.time.date()).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_entry_record(record_entry), ensure_ascii=False) + "\n")
     return path
 
 
 def load_entries(memories_dir: Path, day: date) -> list[MemoryEntry]:
     """Parse a day's memory file into entries (empty if the file is absent)."""
     path = memory_path(memories_dir, day)
+    json_entries = _load_jsonl_entries(memories_dir, day)
     if not path.exists():
-        return []
+        return sorted(json_entries, key=lambda e: e.time)
     text = path.read_text(encoding="utf-8")
     entries: list[MemoryEntry] = []
     for match in _ENTRY_RE.finditer(text):
@@ -76,6 +193,17 @@ def load_entries(memories_dir: Path, day: date) -> list[MemoryEntry]:
             continue
         birds = [b.strip().lower() for b in birds_raw.split(",") if b.strip() and b.strip() != "quiet"]
         entries.append(MemoryEntry(time=when, birds=birds, note=note, photos=photos))
+    if json_entries:
+        by_key: dict[tuple, list[MemoryEntry]] = {}
+        for entry in json_entries:
+            by_key.setdefault(_entry_key(entry), []).append(entry)
+        merged: list[MemoryEntry] = []
+        for entry in entries:
+            matches = by_key.get(_entry_key(entry))
+            merged.append(matches.pop(0) if matches else entry)
+        extras = [entry for matches in by_key.values() for entry in matches]
+        entries = merged + extras
+        entries.sort(key=lambda e: e.time)
     return entries
 
 

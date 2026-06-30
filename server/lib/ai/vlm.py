@@ -21,11 +21,12 @@ from lib.labels import pretty
 MAX_VLM_DIM = 1024
 
 
-# One/two-sentence "what's happening" used by /find and the stream narrator.
+# One-sentence "what's happening" used by /find and the stream narrator.
 SCENE_PROMPT = (
-    "This is a frame from a pet-bird camera. In ONE or two short sentences, say "
-    "what the bird or birds are doing, and whether multiple birds are together. "
-    "Be concrete and brief. If no bird is clearly visible, just say so."
+    "This is a frame from a pet-bird camera. In ONE short sentence under 25 words, say "
+    "what the named bird or birds are doing, whether they are together or alone, "
+    "and any obvious feeding, play, rest, preening, or health concern. Be concrete. "
+    "If no bird is clearly visible, just say so."
 )
 
 # A short, unique label for a camera's view (replaces the IP-based name).
@@ -89,8 +90,10 @@ def build_detection_context(
         "This is a still from a pet-bird camera. The camera detected these birds: "
         + "; ".join(parts)
         + ". They may be small or far from the camera. The word in parentheses after "
-        "a name is that bird's pronoun, for your reference only. Describe the scene "
-        "naturally, calling each bird by NAME and using she/he only where it reads "
+        "a name is that bird's pronoun, for your reference only. Use the detector list "
+        "as evidence that those named birds are present; if "
+        "a bird is hard to see, say it is hard to see rather than saying no birds are present. "
+        "Describe the scene naturally, calling each bird by NAME and using she/he only where it reads "
         "naturally — do NOT write a pronoun in parentheses, and do NOT mention any "
         "species or breed."
     )
