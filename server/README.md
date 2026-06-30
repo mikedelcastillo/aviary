@@ -31,7 +31,15 @@ uv run server
 ```
 
 This runs the server natively in the uv venv on the Linux/RTX 5060 host (`uv sync`
-already installed the cu128 torch build). It expects the model at:
+already installed the cu128 torch build).
+
+To run it in the background with boot autostart instead, use `uv run server-up`
+(a systemd user service runs the dashboard inside a dedicated tmux session). Re-run
+`uv run server-up` — or just `uv run server` — to attach to the live dashboard; Esc
+or Ctrl-C detaches and leaves it running. `uv run server-down` stops it and removes
+the autostart.
+
+It expects the model at:
 
 ```text
 data/server/models/current/object_detector.pt

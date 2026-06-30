@@ -45,7 +45,9 @@ Run any subsystem with a short named command (think `npm run`):
 | `uv run extract-frames` | extract frames from an RTSP stream or video |
 | `uv run synth-ir` | synthesize IR-style frames from day frames |
 | `uv run cut-paste-ir` | cut-paste IR augmentation |
-| `uv run server` | run the camera inference + alert server |
+| `uv run server` | run the camera inference + alert server in the foreground (attaches to the background server if one is already up) |
+| `uv run server-up` | run the server in the background and start it on boot; re-run to attach to the live dashboard (Esc / Ctrl-C detaches) |
+| `uv run server-down` | stop the background server and remove the boot autostart |
 | `uv run tests` | run the pytest suite |
 
 Pass flags after the command, e.g. `uv run extract-frames --help`.

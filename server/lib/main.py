@@ -102,6 +102,12 @@ def install_signal_handlers(stop_event: threading.Event) -> None:
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    # SIGHUP: a graceful stop too, so tearing down the background tmux session
+    # (`server-down` → tmux kill-session) shuts the server down cleanly — flushing
+    # the "stopping" Telegram broadcast — instead of an abrupt hangup kill.
+    hup = getattr(signal, "SIGHUP", None)
+    if hup is not None:
+        signal.signal(hup, request_stop)
 
 
 def start_command_thread(
