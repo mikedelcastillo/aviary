@@ -44,6 +44,7 @@ from lib.dashboard import Dashboard, STALE_FRAME_SECONDS
 from lib.detector import ObjectDetector
 from lib.detection_log import DetectionLogger
 from lib.durations import format_duration as _duration_text
+from lib.weather import WeatherMonitor, fetch_forecast, has_location, summarize as summarize_weather
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder, currently_visible, format_visible
@@ -132,6 +133,7 @@ def start_command_thread(
     activity_provider: Callable[[int, str], None] | None = None,
     sleep_provider: Callable[[int, str], None] | None = None,
     care_provider: Callable[[str], str] | None = None,
+    weather_provider: Callable[[], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -154,6 +156,7 @@ def start_command_thread(
             "activity_provider": activity_provider,
             "sleep_provider": sleep_provider,
             "care_provider": care_provider,
+            "weather_provider": weather_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -183,6 +186,7 @@ def build_nl_router(
     chat_context=None,
     sleep_provider=None,
     care_provider=None,
+    weather_provider=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -302,6 +306,8 @@ def build_nl_router(
             sleep_provider(chat_id, intent.argument)
         elif action == "care" and care_provider is not None:
             notifier.send_text(chat_id, care_provider(intent.argument))
+        elif action == "weather" and weather_provider is not None:
+            notifier.send_text(chat_id, weather_provider())
         else:  # chat (or activity with no responder)
             send_chat_reply(chat_id, text)
 
@@ -1132,6 +1138,23 @@ def main() -> None:
         )
         return build_chat_context(text, system_state=system_state, member_species=member_species)
 
+    # /weather: today's outlook + bird-safety advice, fetched on demand. Stays
+    # None (command hidden) until a location is configured in .env, so we never
+    # query the 0,0 placeholder.
+    weather_provider = None
+    if notifier is not None and has_location(app_config.latitude, app_config.longitude):
+        def _weather_summary() -> str:
+            forecast = fetch_forecast(app_config.latitude, app_config.longitude)
+            if forecast is None:
+                return "Couldn't reach the weather service just now — try again shortly."
+            return summarize_weather(
+                forecast,
+                hot_c=app_config.weather_hot_c,
+                cold_c=app_config.weather_cold_c,
+            )
+
+        weather_provider = _weather_summary
+
     nl_router = build_nl_router(
         app_config,
         notifier,
@@ -1152,6 +1175,7 @@ def main() -> None:
         chat_context=chat_context_provider,
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
         care_provider=care_provider,
+        weather_provider=weather_provider,
     )
 
     start_command_thread(
@@ -1175,9 +1199,30 @@ def main() -> None:
         activity_provider=activity_provider if activity_responder is not None else None,
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
         care_provider=care_provider,
+        weather_provider=weather_provider,
     )
     if auto_finder is not None:
         auto_finder.start()
+
+    # Weather watch: poll the forecast several times a day and warn on a hot day
+    # or a cold night for the flock. Needs a notifier + a configured location.
+    if (
+        app_config.weather_alerts
+        and notifier is not None
+        and has_location(app_config.latitude, app_config.longitude)
+    ):
+        WeatherMonitor(
+            notifier.broadcast_text,
+            stop_event,
+            lambda: fetch_forecast(app_config.latitude, app_config.longitude),
+            hot_c=app_config.weather_hot_c,
+            cold_c=app_config.weather_cold_c,
+        ).start()
+        LOGGER.info(
+            "Weather alerts on (hot>=%.0f°C, cold<=%.0f°C)",
+            app_config.weather_hot_c,
+            app_config.weather_cold_c,
+        )
 
     # The caretaker: smart activity reports (immediate on new birds, edit-in-place
     # otherwise) + persistent day memory under data/server/memories. Only when the
@@ -1231,7 +1276,9 @@ def main() -> None:
             stop_event,
             all_ir=ir_state.all_ir,
             camera_count=lambda: len(ir_state.known()),
-            sun_times=lambda day: sun_times(day, app_config.latitude, app_config.longitude),
+            sun_times=lambda day: sun_times(
+                day, app_config.latitude, app_config.longitude, app_config.utc_offset_hours
+            ),
             sleep_summary=last_night_sleep,
             weekly_tip=lambda: care_tip(now_ph().isocalendar()[1]),
             state_path=app_config.collect.directory.parent / "care_scheduler.json",

@@ -3,10 +3,12 @@
 The care scheduler anchors the day to the sun — a wind-down before sunset, a
 morning routine near sunrise — so the birds' light/dark cycle stays natural and
 consistent. This implements the standard "sunrise equation" (NOAA/Almanac) and
-returns naive local times for a fixed UTC offset. The Philippines has no DST, so
-a constant +8 offset is exact; the default location is Manila, overridable.
+returns naive local times for a fixed UTC offset.
 
-Returned times are tz-naive (Asia/Manila wall clock), matching :mod:`lib.clock`.
+The location and UTC offset are supplied by the caller from configuration (set in
+.env), never hardcoded here — the defaults below are a neutral 0,0/UTC placeholder
+so no real location lives in the repo. Returned times are tz-naive, matching
+:mod:`lib.clock`.
 """
 
 from __future__ import annotations
@@ -14,10 +16,10 @@ from __future__ import annotations
 import math
 from datetime import date, time
 
-# Default location: Manila (no DST, UTC+8).
-DEFAULT_LATITUDE = 14.5995
-DEFAULT_LONGITUDE = 120.9842
-PH_UTC_OFFSET_HOURS = 8.0
+# Neutral placeholders — the real location + UTC offset come from config (.env).
+DEFAULT_LATITUDE = 0.0
+DEFAULT_LONGITUDE = 0.0
+DEFAULT_UTC_OFFSET_HOURS = 0.0
 
 # Official sunrise/sunset zenith (accounts for atmospheric refraction + sun disc).
 _ZENITH = 90.833
@@ -64,7 +66,7 @@ def sun_times(
     day: date,
     latitude: float = DEFAULT_LATITUDE,
     longitude: float = DEFAULT_LONGITUDE,
-    tz_offset_hours: float = PH_UTC_OFFSET_HOURS,
+    tz_offset_hours: float = DEFAULT_UTC_OFFSET_HOURS,
 ) -> tuple[time | None, time | None]:
     """Return ``(sunrise, sunset)`` local times for ``day`` at the location."""
     return (

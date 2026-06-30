@@ -282,6 +282,7 @@ def run_command_bot(
     activity_provider: Callable[[int, str], None] | None = None,
     sleep_provider: Callable[[int, str], None] | None = None,
     care_provider: Callable[[str], str] | None = None,
+    weather_provider: Callable[[], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -297,6 +298,7 @@ def run_command_bot(
             ("/activity", activity_provider is not None),
             ("/sleep", sleep_provider is not None),
             ("/care", care_provider is not None),
+            ("/weather", weather_provider is not None),
             ("/detections", detection_provider is not None),
             ("/restart", restart_provider is not None),
             ("/discover", discover_provider is not None),
@@ -586,6 +588,23 @@ def run_command_bot(
 
                         Thread(target=run_home, name="telegram-home", daemon=True).start()
                     LOGGER.info("Handled /home for user %s", user_id)
+                    continue
+
+                if command == "/weather":
+                    if str(user_id) not in allowed or weather_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        # Fetches a forecast over the network, so run it off the
+                        # poll loop to keep other commands responsive.
+                        def run_weather(cid: int = chat_id) -> None:
+                            try:
+                                send(cid, weather_provider())
+                            except Exception as exc:
+                                LOGGER.exception("Weather request failed")
+                                send(cid, f"Weather lookup failed: {exc}")
+
+                        Thread(target=run_weather, name="telegram-weather", daemon=True).start()
+                    LOGGER.info("Handled /weather for user %s", user_id)
                     continue
 
                 if command == "/autofind":

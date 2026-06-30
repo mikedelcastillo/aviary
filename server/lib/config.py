@@ -169,9 +169,23 @@ class AppConfig:
     # keyed to observed light + local sunrise/sunset. On by default (just needs
     # a notifier; no AI required); CARE_REMINDERS=0 turns them off.
     care_reminders: bool = True
-    # Location for sunrise/sunset, defaulting to Manila (the host runs PH time).
-    latitude: float = 14.5995
-    longitude: float = 120.9842
+    # Location for sunrise/sunset and the weather outlook. NO real coordinates
+    # live in the repo — set AVIARY_LATITUDE / AVIARY_LONGITUDE in .env. The 0,0
+    # placeholder means "unset": sun times fall back to clock anchors and the
+    # weather feature stays idle until a location is configured.
+    latitude: float = 0.0
+    longitude: float = 0.0
+    # UTC offset (hours) for sunrise/sunset local times — set AVIARY_UTC_OFFSET_HOURS
+    # in .env. 0 = UTC. (Assumes no DST, which suits a fixed-offset deployment.)
+    utc_offset_hours: float = 0.0
+    # Weather outlook + bird-safety warnings (Open-Meteo, no API key; needs a
+    # location set above). On by default; WEATHER_ALERTS=0 turns off the proactive
+    # hot-day / cold-night warnings (the /weather command still works).
+    weather_alerts: bool = True
+    # Bird-safety thresholds in °C: warn when the day's high reaches hot_c or the
+    # night's low drops to cold_c. Defaults suit tropical cage birds.
+    weather_hot_c: float = 32.0
+    weather_cold_c: float = 10.0
     # The optional post-wake "how the birds slept" report. Off by default — the
     # /sleep command and the /status night-in-progress line work regardless;
     # SLEEP_MORNING_REPORT=1 also pushes a summary each morning when they wake.
@@ -329,7 +343,11 @@ def build_config() -> AppConfig:
         ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),
         ptz_scan_rows=max(1, int(_as_float("PTZ_SCAN_ROWS", 3))),
         care_reminders=_as_bool("CARE_REMINDERS", True),
-        latitude=_as_float("AVIARY_LATITUDE", 14.5995),
-        longitude=_as_float("AVIARY_LONGITUDE", 120.9842),
+        latitude=_as_float("AVIARY_LATITUDE", 0.0),
+        longitude=_as_float("AVIARY_LONGITUDE", 0.0),
+        utc_offset_hours=_as_float("AVIARY_UTC_OFFSET_HOURS", 0.0),
+        weather_alerts=_as_bool("WEATHER_ALERTS", True),
+        weather_hot_c=_as_float("WEATHER_HOT_C", 32.0),
+        weather_cold_c=_as_float("WEATHER_COLD_C", 10.0),
         sleep_morning_report=_as_bool("SLEEP_MORNING_REPORT", False),
     )

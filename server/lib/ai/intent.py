@@ -24,7 +24,7 @@ LOGGER = logging.getLogger("lib.ai.intent")
 # conversation, routed to the memory/VLM layer rather than a command.
 ACTIONS = (
     "pause", "resume", "find", "stop_find", "discover", "restart", "home", "quality", "autofind",
-    "status", "snapshot", "activity", "sleep", "care", "chat",
+    "status", "snapshot", "activity", "sleep", "care", "weather", "chat",
 )
 
 # Ollama ``format`` schema: constrains the model to a valid action + argument.
@@ -96,6 +96,11 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'can\'t they eat"). argument = a topic (diet, sleep, temperature, health, toxic, '
         'enrichment, social) or a species/bird if named, else "". (A conversational care '
         'question like "can they eat avocado" or "is it too cold" is "chat", not "care".)\n'
+        '- "weather": the actual outside weather/forecast and what it means for the birds — '
+        '"what\'s the weather", "weather forecast", "how hot will it be today", "will it be '
+        'cold tonight", "is it going to rain", "weather for the birds". argument = "". '
+        '(A general care question like "is it too cold for them" with no ask about the '
+        'forecast is "chat", not "weather".)\n'
         '- "chat": greetings, thanks, small talk, AND any general bird-CARE or knowledge '
         'question — what is safe or toxic to eat, diet/feeding, sleep and light needs, '
         'temperature, enrichment, illness and "why is X fluffed/plucking/quiet", or how '
