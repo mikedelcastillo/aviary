@@ -623,3 +623,9 @@ def test_machine_sampler_telemetry_respects_window_override():
 def test_machine_command_and_action_registered():
     assert "/machine" in COMMAND_DESCRIPTIONS
     assert "machine" in ACTIONS
+
+
+def test_weather_command_registered_in_menu():
+    # Regression: /weather was registered for polling but missing its menu
+    # description, so it was silently dropped from the slash menu.
+    assert "/weather" in COMMAND_DESCRIPTIONS

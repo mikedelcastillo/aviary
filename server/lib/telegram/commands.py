@@ -39,6 +39,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/sleep": "How the birds slept — sleep score + summary (e.g. /sleep, /sleep week)",
     "/care": "Bird-care guide (e.g. /care, /care diet, /care toxic, /care cockatiel)",
+    "/weather": "Weather outlook + bird-safety advice for the flock",
     "/detections": "Daily detection stats (/detections [bird] [YYYY-MM-DD])",
     "/restart": "Restart the Aviary server process",
     "/discover": "Scan the local network for cameras",
