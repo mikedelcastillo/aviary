@@ -44,6 +44,22 @@ def test_parse_intent_accepts_care_action() -> None:
     assert parse_intent('{"action": "care", "argument": "diet"}') == Intent("care", "diet")
 
 
+def test_parse_intent_accepts_weather_action() -> None:
+    assert parse_intent('{"action": "weather", "argument": ""}') == Intent("weather", "")
+
+
+def test_system_prompt_routes_forecast_questions_to_weather() -> None:
+    prompt = build_system_prompt(["percy"]).lower()
+    # The forecast phrasings the user expects must be present so the model routes
+    # them to "weather" rather than the care-knowledge "chat".
+    assert '"weather"' in prompt
+    assert "will it rain" in prompt
+    assert "how hot will it be later" in prompt
+    assert "will it be cold later" in prompt
+    # And the care/forecast boundary is spelled out.
+    assert "is it too cold for them" in prompt
+
+
 def test_system_prompt_mentions_care_guide() -> None:
     prompt = build_system_prompt(["percy"]).lower()
     assert "care guide" in prompt
