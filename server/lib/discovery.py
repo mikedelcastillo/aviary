@@ -414,7 +414,10 @@ def _probe_rtsp(
 ) -> _ProbeOutcome:
     """Probe RTSP with bounded retries for transient camera/network stalls."""
     attempts = max(1, discovery.probe_attempts)
-    retryable = {_ProbeOutcome.PORT_CLOSED, _ProbeOutcome.ERROR}
+    # A closed TCP port is a definitive "nothing here", not a transient RTSP
+    # stall, so it is NOT retried — retrying it multiplies the cost of every dead
+    # address. Only a mid-handshake ERROR is worth a retry.
+    retryable = {_ProbeOutcome.ERROR}
     outcome = _ProbeOutcome.ERROR
     for attempt in range(1, attempts + 1):
         outcome = _probe_rtsp_once(host, discovery, credentials)
@@ -522,6 +525,10 @@ def discover_cameras(
         return outcome
 
     try:
+        # One wide pass: most of a /24 is dead, but a closed port now costs a
+        # single connect timeout (PORT_CLOSED is not retried) and the high worker
+        # cap probes the whole subnet near-simultaneously, so the sweep stays fast
+        # without a separate prefilter stage.
         with ThreadPoolExecutor(max_workers=discovery.max_workers) as pool:
             outcomes = list(pool.map(_probe, hosts))
 

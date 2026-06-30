@@ -135,12 +135,14 @@ def _resolved_bird_text(text: str, argument: str, known_labels: list[str]) -> tu
 def _entry_observations(entry: MemoryEntry) -> list[MemoryObservation]:
     if entry.observations:
         return entry.observations
+    # Legacy entry with no structured observations: synthesize one observation
+    # PER saved photo so the photo-selection loop can surface all of them, not
+    # just photos[0]. Keep a single no-photo observation when the entry has none.
+    if not entry.photos:
+        return [MemoryObservation(birds=entry.birds, note=entry.note, photo="")]
     return [
-        MemoryObservation(
-            birds=entry.birds,
-            note=entry.note,
-            photo=entry.photos[0] if entry.photos else "",
-        )
+        MemoryObservation(birds=entry.birds, note=entry.note, photo=photo)
+        for photo in entry.photos
     ]
 
 

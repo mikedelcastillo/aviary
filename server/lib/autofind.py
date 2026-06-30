@@ -125,15 +125,18 @@ class AutoFinder:
         # single chat_id), so the kickoff notice goes to that SAME chat — not a
         # broadcast that promises every user a result only one of them receives.
         chat_id = self._notifier.user_ids[0] if getattr(self._notifier, "user_ids", None) else 0
+        # Mark as alerted BEFORE notifying/searching. If the send or finder.start
+        # raises, it does so every check tick; updating _alerted first means we
+        # alert once instead of re-spamming the same kickoff notice on every tick.
+        # (_alerted is cleared when a bird reappears, so this never permanently
+        # suppresses a later, legitimate alert.)
+        with self._lock:
+            self._alerted.update(overdue)
         self._notifier.send_text(
             chat_id,
             f"🔍 Auto-find: haven't seen {_phrase(overdue)} in over {minutes} min — searching all cameras…",
         )
         self._finder.start(chat_id, " and ".join(overdue), self._stop)
-        # Mark as alerted only AFTER the search has actually been launched, so a
-        # failure above doesn't permanently suppress re-alerting these birds.
-        with self._lock:
-            self._alerted.update(overdue)
 
     def _overdue(self) -> list[str]:
         last = bird_last_seen(self._registry.snapshot())

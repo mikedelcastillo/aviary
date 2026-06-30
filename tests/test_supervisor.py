@@ -15,7 +15,7 @@ from lib.config import (
 )
 from lib.discovery import DiscoveredCamera, DiscoveryResult
 from lib.objects import ObjectRegistry
-from lib.supervisor import CameraSupervisor, format_discovery_report
+from lib.supervisor import CameraSupervisor, RETIRE_AFTER_MISSES, format_discovery_report
 
 
 def _app_config() -> AppConfig:
@@ -179,7 +179,16 @@ def test_discover_and_apply_reconciles_stale_hosts_after_scan(monkeypatch) -> No
     assert sorted(first.added) == ["camera-10.0.0.5", "camera-10.0.0.6"]
     assert second.added == ["camera-10.0.0.7"]
     assert second.already_active == 1
-    assert second.removed == ["camera-10.0.0.5"]
+    # A single missed sweep must NOT retire a healthy, streaming camera — a
+    # transient probe miss is absorbed by the consecutive-miss grace.
+    assert second.removed == []
+    assert "10.0.0.5" in supervisor.active_hosts()
+
+    # 10.0.0.5 stays missing; it is retired only after RETIRE_AFTER_MISSES misses.
+    last = second
+    for _ in range(RETIRE_AFTER_MISSES - 1):
+        last = supervisor.discover_and_apply()
+    assert last.removed == ["camera-10.0.0.5"]
     assert supervisor.active_hosts() == {"10.0.0.6", "10.0.0.7"}
     assert set(stats) == {"camera-10.0.0.6", "camera-10.0.0.7"}
 

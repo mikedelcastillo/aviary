@@ -57,6 +57,12 @@ from lib.stats import CameraStats
 
 LOGGER = logging.getLogger("lib.supervisor")
 
+# A camera is retired only after this many CONSECUTIVE sweeps in which it was
+# active but not reconfirmed. A single dropped RTSP DESCRIBE (or a brief LAN
+# blip) must never tear down a healthy, streaming camera. With the 10-minute
+# auto-sweep this is a ~30-minute grace before a genuinely-gone camera is dropped.
+RETIRE_AFTER_MISSES = 3
+
 
 @dataclass
 class DiscoveryApplied:
@@ -213,6 +219,9 @@ class CameraSupervisor:
         # Lock) because ``discover_and_apply`` may already hold it when it calls
         # ``start_camera`` re-entrantly.
         self._threads_lock = threading.RLock()
+        # host -> consecutive sweeps it was active but unconfirmed. Drives the
+        # miss-grace before a camera is retired (see RETIRE_AFTER_MISSES).
+        self._misses: dict[str, int] = {}
         # Only one discovery sweep may own the shared DiscoveryProgress sink at
         # a time. Initial discovery, auto-discovery, natural language, and
         # /discover all come through here.
@@ -279,6 +288,10 @@ class CameraSupervisor:
             name = f"camera-{host}"
             with self._stats_lock:
                 self._stats.pop(name, None)
+        # Drop the retired camera's IR vote too, mirroring the pause path
+        # (lib.camera). A lingering stale vote would otherwise wedge all_ir().
+        if self._ir_state is not None:
+            self._ir_state.forget(name)
         LOGGER.info("Retired stale camera %s", name)
         return name
 
@@ -321,10 +334,23 @@ class CameraSupervisor:
                     added.append(camera.name)
                 else:
                     already_active += 1
-            for host in sorted(self.active_hosts() - found_hosts):
-                name = self._stop_camera(host)
-                if name is not None:
-                    removed.append(name)
+            # Retire stale cameras conservatively: never on a sweep that confirmed
+            # NOTHING (almost always a transient network/scope blip rather than
+            # every camera vanishing at once), and only after RETIRE_AFTER_MISSES
+            # consecutive misses so one dropped probe can't tear down a live camera.
+            if found_hosts:
+                for host in sorted(self.active_hosts()):
+                    if host in found_hosts:
+                        self._misses.pop(host, None)
+                        continue
+                    misses = self._misses.get(host, 0) + 1
+                    if misses >= RETIRE_AFTER_MISSES:
+                        self._misses.pop(host, None)
+                        name = self._stop_camera(host)
+                        if name is not None:
+                            removed.append(name)
+                    else:
+                        self._misses[host] = misses
             return DiscoveryApplied(
                 result=result,
                 added=added,

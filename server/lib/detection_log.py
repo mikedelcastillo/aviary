@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from lib.clock import PH_TZ
 from lib.detector import Detection
 
 
@@ -27,7 +28,12 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _day_path(directory: Path, observed_at: datetime) -> Path:
-    return directory / f"{observed_at.astimezone(timezone.utc).date().isoformat()}.json"
+    # Key each file by the flock's LOCAL (Manila) calendar day, not UTC, so "today"
+    # means the same 24h window here as it does for /activity, /sleep and the
+    # caretaker. The timestamps stored inside stay UTC; only the day boundary is
+    # local. (UTC keying rolled the day at 08:00 Manila — mid-morning — which made
+    # /detections and /status disagree with everything else.)
+    return directory / f"{observed_at.astimezone(PH_TZ).date().isoformat()}.json"
 
 
 @dataclass(frozen=True)
@@ -167,8 +173,8 @@ class DetectionLogger:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         return {
-            "date": observed_at.date().isoformat(),
-            "timezone": "UTC",
+            "date": observed_at.astimezone(PH_TZ).date().isoformat(),
+            "timezone": "Asia/Manila",
             "created_at": _iso(datetime.now(timezone.utc)),
             "updated_at": _iso(datetime.now(timezone.utc)),
             "cameras": {},

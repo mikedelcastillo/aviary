@@ -23,8 +23,10 @@ def test_default_model_confidence_is_half() -> None:
     assert ModelConfig.confidence == 0.5
 
 
-def test_discovery_workers_default_to_cpu_count_capped_at_eight() -> None:
-    assert DiscoveryConfig.max_workers == min(os.cpu_count() or 1, 8)
+def test_discovery_workers_default_high_for_wide_sweep() -> None:
+    # The sweep fans wide so a /24 finishes in seconds; a closed port costs one
+    # connect timeout and is not retried, so a high cap doesn't crowd the LAN.
+    assert DiscoveryConfig.max_workers == 256
 
 
 def test_confidence_env_overrides_default(monkeypatch) -> None:

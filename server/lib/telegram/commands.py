@@ -12,6 +12,7 @@ import requests
 
 from lib.control import parse_duration
 from lib.dashboard import STALE_FRAME_SECONDS
+from lib.durations import format_duration as _format_duration
 from lib.find import bird_last_seen
 from lib.labels import pretty
 from lib.objects import ObjectRegistry
@@ -89,22 +90,6 @@ def command_argument(text: str) -> str:
     """
     parts = text.strip().split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
-
-
-def _format_duration(seconds: float | None) -> str:
-    if seconds is None:
-        return "never"
-    seconds = int(seconds)
-    days, remainder = divmod(seconds, 86_400)
-    hours, remainder = divmod(remainder, 3_600)
-    minutes, secs = divmod(remainder, 60)
-    if days:
-        return f"{days}d {hours}h"
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
 
 
 def _format_frame_age(seconds: float | None) -> str:
@@ -344,7 +329,7 @@ def run_command_bot(
             response = requests.post(
                 f"{base_url}/sendMessage",
                 json={"chat_id": chat_id, "text": render_telegram_html(text), "parse_mode": "HTML"},
-                timeout=5,
+                timeout=15,
             )
             response.raise_for_status()
             return _extract_message_id(response)
@@ -354,7 +339,7 @@ def run_command_bot(
                 response = requests.post(
                     f"{base_url}/sendMessage",
                     json={"chat_id": chat_id, "text": to_plain(text)},
-                    timeout=5,
+                    timeout=15,
                 )
                 response.raise_for_status()
                 return _extract_message_id(response)
@@ -551,7 +536,13 @@ def run_command_bot(
                             progress_dirty.set()
                             progress_thread.join(timeout=2.0)
                             with edit_lock:
-                                edit_existing(chat_id, status_id, report)
+                                # If the initial ack never sent (status_id is None),
+                                # edit_existing would no-op and the user would see
+                                # nothing — send the report as a fresh message.
+                                if status_id is None:
+                                    send(chat_id, report)
+                                else:
+                                    edit_existing(chat_id, status_id, report)
                     LOGGER.info("Handled /discover for user %s", user_id)
                     continue
 
@@ -583,11 +574,17 @@ def run_command_bot(
                     if str(user_id) not in allowed or home_provider is None:
                         send(chat_id, "Unauthorized.")
                     else:
-                        try:
-                            send(chat_id, home_provider())
-                        except Exception as exc:  # never let a PTZ error kill polling
-                            LOGGER.exception("Home failed")
-                            send(chat_id, f"Homing failed: {exc}")
+                        # home_provider() can block for up to ~75s waiting for the
+                        # cameras to be ready, so run it off the poll loop — handling
+                        # it inline would freeze every other user's commands.
+                        def run_home(cid: int = chat_id) -> None:
+                            try:
+                                send(cid, home_provider())
+                            except Exception as exc:  # never let a PTZ error kill polling
+                                LOGGER.exception("Home failed")
+                                send(cid, f"Homing failed: {exc}")
+
+                        Thread(target=run_home, name="telegram-home", daemon=True).start()
                     LOGGER.info("Handled /home for user %s", user_id)
                     continue
 

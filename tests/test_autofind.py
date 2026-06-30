@@ -132,21 +132,26 @@ def test_overdue_not_repeated_until_bird_returns() -> None:
     assert len(finder.starts) == 2
 
 
-def test_failed_search_launch_does_not_suppress_realert() -> None:
-    # If launching the search fails, the overdue birds must NOT be marked alerted
-    # (which would permanently suppress re-alerting them).
+def test_failed_search_launch_alerts_once_not_every_tick() -> None:
+    # If launching the search fails on EVERY tick (e.g. a persistent finder/PTZ
+    # fault), the kickoff notice must be sent once — not re-spammed each tick. The
+    # bird is marked alerted before the (failing) launch so it isn't re-notified
+    # until it reappears (which clears _alerted).
     class FailingFinder(FakeFinder):
         def start(self, chat, target, stop):
             raise RuntimeError("launch failed")
 
-    af = _af(FakeReg([row("percy", since=700)]), FailingFinder(), FakeNotifier())
+    notifier = FakeNotifier()
+    af = _af(FakeReg([row("percy", since=700)]), FailingFinder(), notifier)
     af._enabled = True
     af._last_condition = "clear"
-    try:
-        af._tick()
-    except RuntimeError:
-        pass
-    assert "percy" not in af._alerted  # still overdue, will retry next tick
+    for _ in range(3):
+        try:
+            af._tick()
+        except RuntimeError:
+            pass
+    assert "percy" in af._alerted
+    assert len(notifier.texts) == 1  # alerted once, no per-tick spam
 
 
 def test_alerted_cleared_at_dawn() -> None:

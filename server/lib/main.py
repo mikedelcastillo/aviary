@@ -30,7 +30,7 @@ from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
 from lib.care import care_reply, care_tip, toxic_food_in
 from lib.care_scheduler import CareScheduler
-from lib.clock import now_ph
+from lib.clock import PH_TZ, now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
 from lib.console import (
     ConsoleDispatcher,
@@ -43,6 +43,7 @@ from lib.memory_maker import MemoryMaker
 from lib.dashboard import Dashboard, STALE_FRAME_SECONDS
 from lib.detector import ObjectDetector
 from lib.detection_log import DetectionLogger
+from lib.durations import format_duration as _duration_text
 from lib.discovery import DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder, currently_visible, format_visible
@@ -267,7 +268,18 @@ def build_nl_router(
                 if message_id is not None and hasattr(notifier, "edit_message_text"):
                     notifier.edit_message_text(chat_id, message_id, text)
 
+            # Debounce progress edits: discovery fires the callback ~twice per host
+            # (~500x on a /24), and each edit is a blocking, rate-limited Telegram
+            # call that would otherwise saturate the send gate and flood-control the
+            # bot. Skip intermediate edits closer than 0.5s; the final report is
+            # always sent below, unthrottled.
+            last_edit = [0.0]
+
             def progress_update(text: str) -> None:
+                now = time.monotonic()
+                if now - last_edit[0] < 0.5:
+                    return
+                last_edit[0] = now
                 edit_discover(text)
 
             edit_discover(discover_provider(progress_update))
@@ -323,17 +335,6 @@ def home_report(ptz_manager, hosts) -> str:
             "set one in the Tapo app so I can aim them."
         )
     return message
-
-
-def _duration_text(seconds: float) -> str:
-    total = int(round(seconds))
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h {minutes}m"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
 
 
 def ready_camera_hosts(
@@ -662,13 +663,17 @@ def main() -> None:
         now_utc = datetime.now(timezone.utc)
         logged_last_seen: dict[str, tuple[float, str]] = {}
         try:
-            for row in detection_logger.activity_for_day(now_utc):
-                if row.last_seen_at is None:
-                    continue
-                since = max(0.0, (now_utc - row.last_seen_at).total_seconds())
-                current = logged_last_seen.get(row.label)
-                if current is None or since < current[0]:
-                    logged_last_seen[row.label] = (since, row.camera)
+            # Read today AND yesterday's (local-day) files so a sighting from
+            # earlier this evening still surfaces across the local-midnight roll —
+            # the most-recent (smallest "since") wins per label.
+            for day in (now_utc - timedelta(days=1), now_utc):
+                for row in detection_logger.activity_for_day(day):
+                    if row.last_seen_at is None:
+                        continue
+                    since = max(0.0, (now_utc - row.last_seen_at).total_seconds())
+                    current = logged_last_seen.get(row.label)
+                    if current is None or since < current[0]:
+                        logged_last_seen[row.label] = (since, row.camera)
         except Exception:
             LOGGER.exception("Reading detection log for /status failed")
         message = build_status_message(
@@ -894,21 +899,23 @@ def main() -> None:
 
     def detection_provider(argument: str) -> str:
         tokens = [token.strip() for token in argument.split() if token.strip()]
-        day = datetime.now(timezone.utc)
+        # "Today" and any explicit YYYY-MM-DD are the flock's LOCAL (Manila) day,
+        # matching how the detection log now keys its files.
+        day = datetime.now(PH_TZ)
         label_parts: list[str] = []
         for token in tokens:
             try:
-                day = datetime.fromisoformat(token).replace(tzinfo=timezone.utc)
+                day = datetime.fromisoformat(token).replace(tzinfo=PH_TZ)
             except ValueError:
                 label_parts.append(token)
         label = " ".join(label_parts).strip().lower() or None
         rows = detection_logger.activity_for_day(day, label=label)
-        day_text = day.date().isoformat()
+        day_text = day.astimezone(PH_TZ).date().isoformat()
         if not rows:
             target = f" for {label}" if label else ""
-            return f"No detection activity logged{target} on {day_text} UTC."
+            return f"No detection activity logged{target} on {day_text}."
         total = sum(row.total_seconds for row in rows)
-        lines = [f"Detection activity on {day_text} UTC — total {_duration_text(total)}:"]
+        lines = [f"Detection activity on {day_text} — total {_duration_text(total)}:"]
         for row in rows[:30]:
             lines.append(
                 f"  • {row.label} · {namer.display(row.camera)} — "
@@ -1227,6 +1234,7 @@ def main() -> None:
             sun_times=lambda day: sun_times(day, app_config.latitude, app_config.longitude),
             sleep_summary=last_night_sleep,
             weekly_tip=lambda: care_tip(now_ph().isocalendar()[1]),
+            state_path=app_config.collect.directory.parent / "care_scheduler.json",
         ).start()
         LOGGER.info(
             "Care reminders on (lat=%.4f lon=%.4f)", app_config.latitude, app_config.longitude
@@ -1298,6 +1306,13 @@ def main() -> None:
             trigger_camera_naming(force=force)
 
     def _discovery_background() -> None:
+        # Two quick post-boot retries catch a camera whose RTSP socket is still
+        # held by the previous process run (e.g. just after a /restart) before the
+        # first in-sweep probe — too slow for the periodic 10-minute sweep alone.
+        for delay in (15.0, 45.0):
+            if stop_event.wait(delay):
+                return
+            _rediscover()
         while not stop_event.wait(AUTO_DISCOVER_SECONDS):
             _rediscover(force=True)
 

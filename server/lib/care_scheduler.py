@@ -22,9 +22,11 @@ injected ``now`` and light state, so it is fully unit-testable without real time
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Callable
 
 from lib.care import FRESH_FOOD_MINUTES
@@ -97,6 +99,7 @@ class CareScheduler:
         weekly_day: int = 6,  # Sunday (Mon=0 .. Sun=6)
         sleep_summary: Callable[[], str | None] | None = None,
         weekly_tip: Callable[[], str | None] | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self._notify_all = notify_all
         self._stop = stop_event
@@ -119,6 +122,48 @@ class CareScheduler:
         self._fired: dict[str, str] = {}  # reminder key -> period key it last fired for
         self._was_dark: bool | None = None
         self._morning_fired_at: datetime | None = None
+        # Persist the dedup state so a restart mid-window (a crash, /restart, or
+        # boot autostart) doesn't re-send a reminder that already went out today.
+        self._state_path = state_path
+        self._load_state()
+
+    def _load_state(self) -> None:
+        if self._state_path is None or not self._state_path.exists():
+            return
+        try:
+            data = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            LOGGER.exception("Could not read care state %s", self._state_path)
+            return
+        fired = data.get("fired")
+        if isinstance(fired, dict):
+            self._fired = {str(k): str(v) for k, v in fired.items()}
+        if isinstance(data.get("was_dark"), bool):
+            self._was_dark = data["was_dark"]
+        stamp = data.get("morning_fired_at")
+        if isinstance(stamp, str):
+            try:
+                self._morning_fired_at = datetime.fromisoformat(stamp)
+            except ValueError:
+                pass
+
+    def _save_state(self) -> None:
+        if self._state_path is None:
+            return
+        payload = {
+            "fired": self._fired,
+            "was_dark": self._was_dark,
+            "morning_fired_at": (
+                self._morning_fired_at.isoformat() if self._morning_fired_at else None
+            ),
+        }
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(self._state_path)
+        except OSError:
+            LOGGER.exception("Could not write care state %s", self._state_path)
 
     def start(self) -> None:
         threading.Thread(target=self._run, name="care-scheduler", daemon=True).start()
@@ -140,6 +185,7 @@ class CareScheduler:
 
     def _fire(self, key: str, period: str) -> None:
         self._fired[key] = period
+        self._save_state()
         try:
             self._notify_all(self._compose(key))
         except Exception:
@@ -172,10 +218,18 @@ class CareScheduler:
         week_key = _iso_week(today)
         now_t = now.time()
 
-        dark = self._all_ir() and self._camera_count() > 0
-        lights_came_on = self._was_dark is True and not dark
-        lights_went_off = self._was_dark is False and dark
-        self._was_dark = dark
+        # Observed-light transitions drive the morning/bedtime nudges, but ONLY
+        # when cameras are actually reporting. Losing all coverage (privacy mode
+        # forgets each camera's IR vote, or every camera drops at once) must NOT
+        # be read as the lights changing — hold the last known state instead, so a
+        # coverage gap can't fire a spurious "good morning" / "lights out".
+        lights_came_on = False
+        lights_went_off = False
+        if self._camera_count() > 0:
+            dark = self._all_ir()
+            lights_came_on = self._was_dark is True and not dark
+            lights_went_off = self._was_dark is False and dark
+            self._was_dark = dark
 
         sunrise, sunset = self._sun_times(today)
         morning_anchor = sunrise or self._morning_fallback
@@ -189,6 +243,7 @@ class CareScheduler:
             if (lights_came_on and time(4, 0) <= now_t <= time(11, 0)) or _within(now_t, morning_anchor, self._window):
                 self._fire("morning", day_key)
                 self._morning_fired_at = now
+                self._save_state()  # persist the stamp so produce-pickup survives a restart
 
         # Produce pickup: ~2h after the morning nudge fired (food safety).
         if self._fired.get("morning") == day_key and self._due("food_pickup", day_key):
