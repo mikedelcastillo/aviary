@@ -438,6 +438,7 @@ def discover_cameras(
     *,
     clock: Callable[[], float] = time.monotonic,
     progress: DiscoveryProgress | None = None,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> DiscoveryResult:
     """Sweep the configured scope and return the confirmed cameras plus stats.
 
@@ -462,14 +463,28 @@ def discover_cameras(
     else:
         LOGGER.info("Discovery: no hosts in scope to scan")
 
-    if progress is not None:
-        progress.begin(hosts, _network_prefix(hosts))
+    progress_sink = progress
+    if progress_sink is None and progress_callback is not None:
+        progress_sink = DiscoveryProgress()
+
+    def _publish_progress() -> None:
+        if progress_sink is None or progress_callback is None:
+            return
+        try:
+            progress_callback(progress_sink.snapshot())
+        except Exception:
+            LOGGER.exception("Discovery progress callback failed")
+
+    if progress_sink is not None:
+        progress_sink.begin(hosts, _network_prefix(hosts))
+        _publish_progress()
 
     def _probe(host: str) -> _ProbeOutcome:
         # Logs + marks state in the worker thread so progress streams in real
         # time (in completion order).
-        if progress is not None:
-            progress.mark(host, HOST_TESTING)
+        if progress_sink is not None:
+            progress_sink.mark(host, HOST_TESTING)
+            _publish_progress()
         LOGGER.debug(
             "Discovery: testing %s:%d%s",
             host,
@@ -478,26 +493,31 @@ def discover_cameras(
         )
         outcome = _probe_rtsp(host, discovery, credentials)
         if outcome is _ProbeOutcome.CONFIRMED:
-            if progress is not None:
-                progress.mark(host, HOST_FOUND)
+            if progress_sink is not None:
+                progress_sink.mark(host, HOST_FOUND)
+                _publish_progress()
             LOGGER.info("Discovery: %s CONFIRMED (auth + %s OK)", host, discovery.stream_path)
         elif outcome is _ProbeOutcome.AUTH_FAILED:
-            if progress is not None:
-                progress.mark(host, HOST_FAILED)
+            if progress_sink is not None:
+                progress_sink.mark(host, HOST_FAILED)
+                _publish_progress()
             LOGGER.warning("Discovery: %s credentials REJECTED (check TAPO_CREDENTIALS)", host)
         elif outcome is _ProbeOutcome.STREAM_NOT_FOUND:
-            if progress is not None:
-                progress.mark(host, HOST_FAILED)
+            if progress_sink is not None:
+                progress_sink.mark(host, HOST_FAILED)
+                _publish_progress()
             LOGGER.info(
                 "Discovery: %s reachable but %s not available", host, discovery.stream_path
             )
         elif outcome is _ProbeOutcome.PORT_CLOSED:
-            if progress is not None:
-                progress.mark(host, HOST_FAILED)
+            if progress_sink is not None:
+                progress_sink.mark(host, HOST_FAILED)
+                _publish_progress()
             LOGGER.debug("Discovery: %s did not answer on :%d", host, discovery.rtsp_port)
         else:
-            if progress is not None:
-                progress.mark(host, HOST_FAILED)
+            if progress_sink is not None:
+                progress_sink.mark(host, HOST_FAILED)
+                _publish_progress()
             LOGGER.debug("Discovery: %s probe error", host)
         return outcome
 
@@ -558,8 +578,9 @@ def discover_cameras(
     finally:
         # Always clear the active flag so the dashboard reverts to the camera
         # band even if the sweep raised partway through.
-        if progress is not None:
-            progress.end()
+        if progress_sink is not None:
+            progress_sink.end()
+            _publish_progress()
 
 
 def main() -> None:

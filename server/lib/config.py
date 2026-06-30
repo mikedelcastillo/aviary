@@ -126,10 +126,9 @@ class DiscoveryConfig:
     # An explicit host list. When non-empty it overrides cidr/auto-detect; tests
     # use this to point the sweep at a localhost fake-RTSP server.
     hosts: tuple[str, ...] = ()
-    # Concurrency of RTSP probes. Keep this deliberately low: Tapo cameras and
-    # consumer routers drop requests under bursty scans, so discovery favours
-    # reliability over finishing a /24 in one timeout window.
-    max_workers: int = 3
+    # Concurrency of RTSP probes. Default to one worker per logical CPU, capped
+    # so discovery scales on larger hosts without crowding the LAN.
+    max_workers: int = min(os.cpu_count() or 1, 8)
     # Per-host TCP probe of :554. Kept short because most addresses are dead and
     # we don't want the sweep to stall on each unanswered SYN.
     connect_timeout_seconds: float = 0.5

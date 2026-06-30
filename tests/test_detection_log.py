@@ -71,3 +71,4 @@ def test_detection_logger_query_filters_day_label_and_camera(tmp_path) -> None:
     assert rows[0].label == "percy"
     assert rows[0].total_seconds == 2.0
     assert rows[0].observations == 1
+    assert rows[0].last_seen_at == day

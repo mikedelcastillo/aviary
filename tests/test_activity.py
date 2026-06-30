@@ -72,5 +72,6 @@ def test_activity_prompts_keep_answers_short() -> None:
     qa = _ACTIVITY_QA_PROMPT.lower()
     assert "up to 5 bullets" in summary
     assert "under 18 words" in summary
-    assert "1-2 short sentences" in qa
-    assert "max 45 words" in qa
+    assert "2-4 short sentences" in qa
+    assert "max 110 words" in qa
+    assert "structured facts" in qa

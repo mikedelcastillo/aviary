@@ -57,7 +57,7 @@ from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.sleep import SleepTracker, format_status_line
 from lib.stats import CameraStats
 from lib.suntimes import sun_times
-from lib.supervisor import CameraSupervisor, format_discovery_report
+from lib.supervisor import CameraSupervisor, format_discovery_progress, format_discovery_report
 from lib.telegram.commands import build_status_message, run_command_bot
 from lib.terminal_logging import NativeStderrRedirect
 from lib.telegram.notifier import TelegramNotifier
@@ -73,7 +73,7 @@ VLM_DESCRIBE_TIMEOUT_SECONDS = 150.0
 
 # Silent background re-discovery cadence, so cameras that come online later get
 # picked up without a manual /discover.
-AUTO_DISCOVER_SECONDS = 30 * 60.0
+AUTO_DISCOVER_SECONDS = 10 * 60.0
 CAMERA_ACTION_WAIT_SECONDS = 75.0
 CAMERA_ACTION_POLL_SECONDS = 1.0
 
@@ -109,7 +109,7 @@ def start_command_thread(
     user_ids: list[str],
     stop_event: threading.Event,
     status_provider: Callable[[], str] | None = None,
-    discover_provider: Callable[[], str] | None = None,
+    discover_provider: Callable[..., str] | None = None,
     restart_provider: Callable[[], str] | None = None,
     detection_provider: Callable[[str], str] | None = None,
     home_provider: Callable[[], str] | None = None,
@@ -257,7 +257,14 @@ def build_nl_router(
             notifier.send_text(chat_id, finder.stop_current())
         elif action == "discover":
             message_id = notifier.send_text(chat_id, "Scanning the local network for cameras...")
-            update_or_send(message_id, discover_provider())
+            def edit_discover(text: str) -> None:
+                if message_id is not None and hasattr(notifier, "edit_message_text"):
+                    notifier.edit_message_text(chat_id, message_id, text)
+
+            def progress_update(text: str) -> None:
+                edit_discover(text)
+
+            edit_discover(discover_provider(progress_update))
         elif action == "restart" and restart_provider is not None:
             notifier.send_text(chat_id, restart_provider())
         elif action == "home" and home_provider is not None:
@@ -646,6 +653,18 @@ def main() -> None:
     def status_provider() -> str:
         with stats_lock:
             snap = dict(stats)
+        now_utc = datetime.now(timezone.utc)
+        logged_last_seen: dict[str, tuple[float, str]] = {}
+        try:
+            for row in detection_logger.activity_for_day(now_utc):
+                if row.last_seen_at is None:
+                    continue
+                since = max(0.0, (now_utc - row.last_seen_at).total_seconds())
+                current = logged_last_seen.get(row.label)
+                if current is None or since < current[0]:
+                    logged_last_seen[row.label] = (since, row.camera)
+        except Exception:
+            LOGGER.exception("Reading detection log for /status failed")
         message = build_status_message(
             snap,
             registry,
@@ -653,6 +672,7 @@ def main() -> None:
             camera_display=namer.display,
             known_birds=sorted(pronouns),
             ir_cameras=ir_state.ir_cameras(),
+            logged_last_seen=logged_last_seen,
         )
         # Lead with the privacy banner when paused so /status makes it obvious
         # why every camera reads "paused" and nothing is being recorded.
@@ -932,8 +952,12 @@ def main() -> None:
             return auto_finder.set_enabled(False)
         return auto_finder.status()
 
-    def discover_provider() -> str:
-        report = format_discovery_report(supervisor.discover_and_apply())
+    def discover_provider(progress_update: Callable[[str], None] | None = None) -> str:
+        def on_progress(progress: dict) -> None:
+            if progress_update is not None:
+                progress_update(format_discovery_progress(progress))
+
+        report = format_discovery_report(supervisor.discover_and_apply(on_progress))
         # Face the saved viewpoint FIRST so the cameras are aimed right and the
         # naming below describes the home view, not wherever they were left.
         ok, wait_message, hosts = _wait_for_ready_cameras(stop_event)
@@ -1248,11 +1272,10 @@ def main() -> None:
     # camera may have moved since last run — rather than only on the 30-min sweep.
     trigger_camera_naming(force=True)
 
-    # Keep discovering in the background: two quick retries after boot (to catch
-    # cameras whose RTSP was still busy from a previous run — common right after a
-    # restart), then a silent sweep every AUTO_DISCOVER_SECONDS so cameras that
-    # come online later are picked up without the user running /discover.
-    # Idempotent — start_camera dedups by host.
+    # Keep discovering in the background: a silent sweep every
+    # AUTO_DISCOVER_SECONDS so IP changes are picked up without the user running
+    # /discover. Reconciliation happens only after each scan returns, so
+    # unchanged cameras keep running with no drop while discovery is in flight.
     def _rediscover(force: bool = False) -> None:
         try:
             applied = supervisor.discover_and_apply()
@@ -1269,10 +1292,6 @@ def main() -> None:
             trigger_camera_naming(force=force)
 
     def _discovery_background() -> None:
-        for delay in (15.0, 45.0):
-            if stop_event.wait(delay):
-                return
-            _rediscover()
         while not stop_event.wait(AUTO_DISCOVER_SECONDS):
             _rediscover(force=True)
 

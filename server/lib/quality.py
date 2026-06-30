@@ -96,6 +96,10 @@ class StreamQualityController:
                 path = STREAM_PATHS[self._mode]
             self._cameras[host] = _CameraQuality(path=path, version=self._version)
 
+    def unregister(self, host: str) -> None:
+        with self._lock:
+            self._cameras.pop(host, None)
+
     def selected(self, host: str) -> tuple[str, int]:
         with self._lock:
             state = self._cameras.setdefault(host, _CameraQuality())

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import time
 from collections.abc import Callable
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 
 import requests
 
@@ -23,6 +24,8 @@ from lib.textfmt import render_telegram_html, to_plain
 LOGGER = logging.getLogger("lib.telegram.commands")
 
 StatusProvider = Callable[[], str]
+DiscoverProgress = Callable[[str], None]
+DiscoverProvider = Callable[..., str]
 
 # Descriptions for Telegram's slash-command menu — the list that pops up when a
 # user types "/" in a chat with the bot. Registered at startup via
@@ -151,6 +154,7 @@ def build_status_message(
     *,
     known_birds: list[str] | None = None,
     ir_cameras: set[str] | None = None,
+    logged_last_seen: dict[str, tuple[float, str]] | None = None,
 ) -> str:
     """A compact, scannable status: which birds were last seen when, and each
     camera's health (with an IR/night marker).
@@ -165,6 +169,12 @@ def build_status_message(
     snapshots = [stats[name].snapshot() for name in stats]
     object_rows = registry.snapshot() if registry is not None else []
     last_seen = bird_last_seen(object_rows)
+    for label, (since, camera) in (logged_last_seen or {}).items():
+        key = label.strip().lower()
+        if not key:
+            continue
+        if key not in last_seen or since < last_seen[key][0]:
+            last_seen[key] = (since, camera)
     ir_cameras = ir_cameras or set()
 
     healthy = sum(
@@ -246,13 +256,32 @@ def _extract_message_id(response) -> int | None:
     return result.get("message_id") if isinstance(result, dict) else None
 
 
+def _call_discover_provider(
+    provider: DiscoverProvider,
+    progress_update: DiscoverProgress,
+) -> str:
+    """Call either a legacy zero-arg provider or a progress-aware provider."""
+    try:
+        signature = inspect.signature(provider)
+    except (TypeError, ValueError):
+        return provider(progress_update)
+    for parameter in signature.parameters.values():
+        if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+            return provider(progress_update)
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD):
+            return provider(progress_update)
+        if parameter.kind is parameter.KEYWORD_ONLY:
+            return provider(progress_update=progress_update)
+    return provider()
+
+
 def run_command_bot(
     bot_token: str,
     allowed_user_ids: list[str],
     status_provider: StatusProvider | None = None,
     stop_event: Event | None = None,
     poll_timeout_seconds: int = 30,
-    discover_provider: Callable[[], str] | None = None,
+    discover_provider: DiscoverProvider | None = None,
     restart_provider: Callable[[], str] | None = None,
     detection_provider: Callable[[str], str] | None = None,
     home_provider: Callable[[], str] | None = None,
@@ -315,7 +344,7 @@ def run_command_bot(
             response = requests.post(
                 f"{base_url}/sendMessage",
                 json={"chat_id": chat_id, "text": render_telegram_html(text), "parse_mode": "HTML"},
-                timeout=15,
+                timeout=5,
             )
             response.raise_for_status()
             return _extract_message_id(response)
@@ -325,7 +354,7 @@ def run_command_bot(
                 response = requests.post(
                     f"{base_url}/sendMessage",
                     json={"chat_id": chat_id, "text": to_plain(text)},
-                    timeout=15,
+                    timeout=5,
                 )
                 response.raise_for_status()
                 return _extract_message_id(response)
@@ -345,13 +374,13 @@ def run_command_bot(
                     "text": render_telegram_html(text),
                     "parse_mode": "HTML",
                 },
-                timeout=15,
+                timeout=5,
             )
             if response.status_code == 400 and _is_parse_error(response):
                 response = requests.post(
                     f"{base_url}/editMessageText",
                     json={"chat_id": chat_id, "message_id": message_id, "text": to_plain(text)},
-                    timeout=15,
+                    timeout=5,
                 )
             if response.status_code == 400 and _is_not_modified(response):
                 return message_id
@@ -360,6 +389,35 @@ def run_command_bot(
         except requests.RequestException as exc:
             LOGGER.warning("Failed to edit message: %s", exc)
             return send(chat_id, text)
+
+    def edit_existing(chat_id: int, message_id: int | None, text: str) -> int | None:
+        """Edit an existing message only; never create a second discover message."""
+        if message_id is None:
+            return None
+        try:
+            response = requests.post(
+                f"{base_url}/editMessageText",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": render_telegram_html(text),
+                    "parse_mode": "HTML",
+                },
+                timeout=5,
+            )
+            if response.status_code == 400 and _is_parse_error(response):
+                response = requests.post(
+                    f"{base_url}/editMessageText",
+                    json={"chat_id": chat_id, "message_id": message_id, "text": to_plain(text)},
+                    timeout=5,
+                )
+            if response.status_code == 400 and _is_not_modified(response):
+                return message_id
+            response.raise_for_status()
+            return message_id
+        except requests.RequestException as exc:
+            LOGGER.warning("Failed to edit discover message: %s", exc)
+            return None
 
     while stop_event is None or not stop_event.is_set():
         try:
@@ -452,12 +510,48 @@ def run_command_bot(
                         send(chat_id, "Unauthorized.")
                     else:
                         status_id = send(chat_id, "Scanning the local network for cameras...")
+                        edit_lock = Lock()
+                        progress_lock = Lock()
+                        progress_dirty = Event()
+                        progress_stop = Event()
+                        latest_progress: str | None = None
+
+                        def progress_update(text: str) -> None:
+                            nonlocal latest_progress
+                            with progress_lock:
+                                latest_progress = text
+                            progress_dirty.set()
+
+                        def edit_progress() -> None:
+                            while not progress_stop.is_set():
+                                if not progress_dirty.wait(0.25):
+                                    continue
+                                progress_dirty.clear()
+                                with progress_lock:
+                                    text = latest_progress
+                                if text is None:
+                                    continue
+                                with edit_lock:
+                                    edit_existing(chat_id, status_id, text)
+
+                        progress_thread = Thread(
+                            target=edit_progress,
+                            name="telegram-discover-progress",
+                            daemon=True,
+                        )
+                        progress_thread.start()
+
                         try:
-                            report = discover_provider()
+                            report = _call_discover_provider(discover_provider, progress_update)
                         except Exception as exc:  # never let a scan error kill polling
                             LOGGER.exception("Discovery failed")
                             report = f"Discovery failed: {exc}"
-                        edit(chat_id, status_id, report)
+                        finally:
+                            progress_stop.set()
+                            progress_dirty.set()
+                            progress_thread.join(timeout=2.0)
+                            with edit_lock:
+                                edit_existing(chat_id, status_id, report)
                     LOGGER.info("Handled /discover for user %s", user_id)
                     continue
 

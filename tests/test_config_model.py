@@ -5,9 +5,11 @@ Imports only lib.config (no ultralytics), so these stay fast and isolated.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from lib.config import ModelConfig, _model_confidence, _model_image_size
+from lib.config import DiscoveryConfig, ModelConfig, _model_confidence, _model_image_size
 
 
 def test_confidence_defaults_to_model_config_when_unset(monkeypatch) -> None:
@@ -19,6 +21,10 @@ def test_confidence_defaults_to_model_config_when_unset(monkeypatch) -> None:
 def test_default_model_confidence_is_half() -> None:
     # The Python default sits at the F1 peak measured on the held-out test split.
     assert ModelConfig.confidence == 0.5
+
+
+def test_discovery_workers_default_to_cpu_count_capped_at_eight() -> None:
+    assert DiscoveryConfig.max_workers == min(os.cpu_count() or 1, 8)
 
 
 def test_confidence_env_overrides_default(monkeypatch) -> None:

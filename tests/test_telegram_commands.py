@@ -14,8 +14,9 @@ from lib.telegram.commands import (
 
 
 class Response:
-    def __init__(self, payload: dict | None = None) -> None:
+    def __init__(self, payload: dict | None = None, status_code: int = 200) -> None:
         self._payload = payload or {}
+        self.status_code = status_code
 
     def json(self) -> dict:
         return self._payload
@@ -56,6 +57,23 @@ def test_status_message_lists_missing_roster_birds_and_ir() -> None:
     assert "Percy" in message
     assert "not seen yet" in message and "Draft" in message
     assert "🌙 IR" in message
+
+
+def test_status_message_uses_logged_last_seen_for_roster_birds() -> None:
+    registry = ObjectRegistry()
+    stats = {"camera-1": CameraStats("camera-1", 0.25, registry)}
+    stats["camera-1"].set_status("connected")
+
+    message = build_status_message(
+        stats,
+        registry,
+        known_birds=["jynx", "draft"],
+        logged_last_seen={"jynx": (90.0, "camera-1")},
+    )
+
+    assert "Jynx — 1m 30s ago" in message
+    assert "not seen yet: Draft" in message
+    assert "not seen yet: Jynx" not in message
 
 
 def test_dashboard_frame_age_uses_seconds_after_one_second() -> None:
@@ -202,9 +220,9 @@ def test_discover_command_requires_allowed_user(monkeypatch) -> None:
     assert provider_called is False
 
 
-def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> None:
+def test_discover_command_acks_then_edits_report_for_allowed_user(monkeypatch) -> None:
     stop_event = threading.Event()
-    sent_messages: list[str] = []
+    calls: list[dict] = []
 
     def get(_url, params, timeout):
         return Response(
@@ -222,16 +240,14 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
             }
         )
 
-    def post(_url, json, timeout):
+    def post(url, json, timeout):
         # Skip the startup setMyCommands registration; record only replies.
         if "text" not in json:
             return Response()
-        sent_messages.append(json["text"])
-        # Stop only once both the ack and the report have been sent so the loop
-        # doesn't exit before the second message.
-        if len(sent_messages) >= 2:
+        calls.append({"url": url, "json": json})
+        if json["text"] == "found 2 cameras":
             stop_event.set()
-        return Response()
+        return Response({"result": {"message_id": 77}})
 
     monkeypatch.setattr("lib.telegram.commands.requests.get", get)
     monkeypatch.setattr("lib.telegram.commands.requests.post", post)
@@ -244,10 +260,13 @@ def test_discover_command_acks_then_reports_for_allowed_user(monkeypatch) -> Non
         discover_provider=lambda: "found 2 cameras",
     )
 
-    assert sent_messages == [
+    assert [call["json"]["text"] for call in calls] == [
         "Scanning the local network for cameras...",
         "found 2 cameras",
     ]
+    assert calls[0]["url"].endswith("/sendMessage")
+    assert calls[1]["url"].endswith("/editMessageText")
+    assert calls[1]["json"]["message_id"] == 77
 
 
 def test_discover_command_edits_ack_when_message_id_available(monkeypatch) -> None:
@@ -296,6 +315,60 @@ def test_discover_command_edits_ack_when_message_id_available(monkeypatch) -> No
     assert calls[1]["url"].endswith("/editMessageText")
     assert calls[1]["json"]["message_id"] == 77
     assert calls[1]["json"]["text"] == "found 2 cameras"
+
+
+def test_discover_command_edits_live_progress_before_final_report(monkeypatch) -> None:
+    stop_event = threading.Event()
+    calls: list[dict] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/discover",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" not in json:
+            return Response()
+        calls.append({"url": url, "json": json})
+        if json["text"] == "final report":
+            stop_event.set()
+        return Response({"result": {"message_id": 77}})
+
+    def discover_provider(progress_update) -> str:
+        progress_update("found 1 so far")
+        return "final report"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        discover_provider=discover_provider,
+    )
+
+    assert [call["json"]["text"] for call in calls] == [
+        "Scanning the local network for cameras...",
+        "found 1 so far",
+        "final report",
+    ]
+    assert calls[1]["url"].endswith("/editMessageText")
+    assert calls[1]["json"]["message_id"] == 77
+    assert calls[2]["url"].endswith("/editMessageText")
+    assert calls[2]["json"]["message_id"] == 77
 
 
 def test_restart_command_calls_provider_for_allowed_user(monkeypatch) -> None:

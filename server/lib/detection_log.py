@@ -37,6 +37,7 @@ class DetectionActivity:
     total_seconds: float
     observations: int
     intervals: list[dict]
+    last_seen_at: datetime | None = None
 
 
 class DetectionLogger:
@@ -133,6 +134,11 @@ class DetectionLogger:
                         total_seconds=float(entry.get("total_detected_seconds") or 0.0),
                         observations=int(entry.get("observations") or 0),
                         intervals=list(entry.get("intervals") or []),
+                        last_seen_at=(
+                            _parse_iso(entry["last_seen_at"])
+                            if entry.get("last_seen_at")
+                            else None
+                        ),
                     )
                 )
         rows.sort(key=lambda row: (row.label, row.camera))

@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from lib.journal import MemoryEntry, append_entry, load_entries, load_recent, memory_path
+from lib.journal import (
+    MemoryEntry,
+    MemoryObservation,
+    append_entry,
+    load_entries,
+    load_recent,
+    memory_jsonl_path,
+    memory_path,
+)
 
 
 def test_append_creates_dated_file_with_header(tmp_path) -> None:
@@ -23,6 +31,32 @@ def test_append_then_load_roundtrip_multiple_photos(tmp_path) -> None:
     assert entries[0].photos == ["b1.jpg", "b2.jpg"]
     assert entries[1].note == "Percy naps."
     assert entries[1].photos == []
+
+
+def test_append_writes_structured_jsonl_observations(tmp_path) -> None:
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 9, 5, 12),
+            ["percy", "matcha"],
+            "raw note",
+            ["p.jpg"],
+            observations=[
+                MemoryObservation(
+                    camera="Big Cage",
+                    birds=["percy"],
+                    note="Percy preened alone.",
+                    photo="p.jpg",
+                )
+            ],
+        ),
+    )
+    assert memory_jsonl_path(tmp_path, date(2026, 6, 25)).exists()
+    entries = load_entries(tmp_path, date(2026, 6, 25))
+    assert len(entries) == 1
+    assert entries[0].time.second == 12
+    assert entries[0].observations[0].camera == "Big Cage"
+    assert entries[0].observations[0].birds == ["percy"]
 
 
 def test_note_with_fake_header_does_not_corrupt_parsing(tmp_path) -> None:

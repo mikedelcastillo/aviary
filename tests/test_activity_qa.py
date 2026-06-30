@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from lib.activity_qa import ActivityResponder, parse_activity_arg
-from lib.journal import MemoryEntry, append_entry
+from lib.journal import MemoryEntry, MemoryObservation, append_entry
 
 KNOWN = ["bambi", "draft", "matcha", "percy", "pizza"]
 
@@ -75,6 +75,76 @@ def test_respond_recovers_bird_from_text_when_router_argument_empty(tmp_path) ->
     )
     assert "Percy napped" in client.user
     assert "Bambi ate" not in client.user
+
+
+def test_individual_question_uses_relevant_structured_observation(tmp_path) -> None:
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 14, 0),
+            ["percy", "matcha"],
+            "two-camera report",
+            observations=[
+                MemoryObservation("Big Cage", ["percy"], "Percy preened alone."),
+                MemoryObservation("Desk", ["matcha"], "Matcha chewed a toy."),
+            ],
+        ),
+    )
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "what did percy do today?", ""
+    )
+    assert "Percy preened alone" in client.user
+    assert "Matcha chewed" not in client.user
+
+
+def test_pair_apart_question_includes_structured_counts(tmp_path) -> None:
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 9, 0),
+            ["draft"],
+            "draft only",
+            observations=[MemoryObservation("Play Gym", ["draft"], "Draft perched alone.")],
+        ),
+    )
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 10, 0),
+            ["pizza"],
+            "pizza only",
+            observations=[MemoryObservation("Cage", ["pizza"], "Pizza ate seeds alone.")],
+        ),
+    )
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 11, 0),
+            ["draft", "pizza"],
+            "together",
+            observations=[MemoryObservation("Cage", ["draft", "pizza"], "Draft and Pizza stood side by side.")],
+        ),
+    )
+    append_entry(
+        tmp_path,
+        MemoryEntry(
+            datetime(2026, 6, 25, 12, 0),
+            ["draft", "pizza"],
+            "separate views",
+            observations=[
+                MemoryObservation("Play Gym", ["draft"], "Draft climbed on the play gym."),
+                MemoryObservation("Cage", ["pizza"], "Pizza rested in the cage."),
+            ],
+        ),
+    )
+    client = FakeClient()
+    _responder(tmp_path, lambda c, t: None, client=client).respond(
+        7, "Did draft and pizza spend time apart today?", ""
+    )
+    assert "Draft + Pizza same-frame/view observations: 1" in client.user
+    assert "Draft + Pizza apart/only-one observations: 4" in client.user
+    assert "separate views in same report 1 at 12:00" in client.user
 
 
 def test_pure_photo_request_sends_photos_without_llm_reasoning(tmp_path) -> None:

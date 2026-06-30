@@ -24,6 +24,7 @@ from lib.config import CameraCredentials, DiscoveryConfig
 from lib.discovery import (
     HOST_FAILED,
     HOST_FOUND,
+    HOST_TESTING,
     DiscoveryProgress,
     _ProbeOutcome,
     build_rtsp_url,
@@ -384,6 +385,29 @@ def test_discover_limits_concurrent_rtsp_probes(monkeypatch) -> None:
 
     assert result.hosts_scanned == 12
     assert max_active <= 3
+
+
+def test_discover_publishes_live_progress(monkeypatch) -> None:
+    snapshots: list[dict] = []
+
+    def fake_probe(host, discovery, credentials):
+        return _ProbeOutcome.CONFIRMED if host.endswith(".2") else _ProbeOutcome.PORT_CLOSED
+
+    monkeypatch.setattr("lib.discovery._probe_rtsp", fake_probe)
+    config = DiscoveryConfig(
+        hosts=("10.0.0.1", "10.0.0.2"),
+        max_workers=1,
+        connect_timeout_seconds=0.01,
+        rtsp_timeout_seconds=0.01,
+    )
+
+    result = discover_cameras(config, _credentials(), progress_callback=snapshots.append)
+
+    assert len(result.cameras) == 1
+    assert snapshots[0]["counts"][HOST_TESTING] == 0
+    assert any(snapshot["counts"][HOST_TESTING] == 1 for snapshot in snapshots)
+    assert any(snapshot["counts"][HOST_FOUND] == 1 for snapshot in snapshots)
+    assert snapshots[-1]["active"] is False
 
 
 def test_discover_counts_auth_failure() -> None:

@@ -151,7 +151,8 @@ _ACTIVITY_SUMMARY_PROMPT = (
     "species. Write NATURALLY: use a pronoun (she/he, per the pronouns given) only "
     "where one naturally fits in a sentence — NEVER write a pronoun in parentheses "
     "or right after a name (no 'Percy (she)', no 'Percy, she,'); the pronouns are "
-    "given for your reference, not to be quoted. When a note begins with how long "
+    "given for your reference, not to be quoted, and are NOT evidence that a bird "
+    "was present. When a note begins with how long "
     "ago it was (e.g. '2 hours ago', '12 minutes ago'), include that timing in the "
     "bullet naturally (e.g. 'Percy preened on the perch 2 hours ago'). Be concrete; "
     "don't invent anything not in the notes. No preamble or closing line "
@@ -162,11 +163,18 @@ _ACTIVITY_SUMMARY_PROMPT = (
 _ACTIVITY_QA_PROMPT = (
     "You are the warm caretaker of a home aviary, answering a question about the "
     "pet birds using ONLY the timestamped memory notes provided. Each note line is "
-    "'(when) [birds seen]: what they were doing'. Answer the SPECIFIC question "
-    "directly in 1-2 short sentences, max 45 words total. Be concrete about WHEN (e.g. 'around 2pm', 'this "
-    "morning', 'about an hour ago') and WHICH birds. For a question about two or "
-    "more birds being TOGETHER, only say yes if a note lists them together at the "
-    "same time, and say when. For a yes/no question, start with a clear yes or no. "
+    "'(when) [birds seen]: what they were doing'. If a Structured facts section is "
+    "provided, treat it as authoritative for counts, first/last times, together/apart "
+    "evidence, and health/social/activity flags. Answer the SPECIFIC question "
+    "directly in 2-4 short sentences, max 110 words total. Be concrete about WHEN "
+    "(e.g. 'around 2pm', 'this morning', 'about an hour ago') and WHICH birds. For "
+    "together/apart questions, include numerical counts when provided. For broad "
+    "'how was X?' questions, center X and cover observed health flags or lack of "
+    "flags, activity, play/feeding/preening/rest, and social/alone pattern where "
+    "the memory supports it. For a question about two or more birds being TOGETHER, "
+    "only say yes if the facts or a note lists them together at the same time. For "
+    "a yes/no question, start with a clear yes or no. The pronoun note is reference "
+    "only and is NOT evidence that a bird was present. "
     "If the notes don't show what's asked, say you didn't catch it / can't tell "
     "from today's memory — never guess. Use each bird's correct pronoun (per the "
     "pronouns given); refer to birds by NAME, never the species. No preamble."
@@ -181,6 +189,7 @@ def answer_activity_question(
     pronoun_note: str = "",
     window_phrase: str = "",
     *,
+    facts: str = "",
     timeout_seconds: float | None = None,
 ) -> str:
     """Answer a free-form day-lookback question grounded in the memory notes."""
@@ -191,6 +200,8 @@ def answer_activity_question(
     if pronoun_note:
         parts.append(f"Bird pronouns (use these): {pronoun_note}")
     parts.append(f"Question: {question.strip()}")
+    if facts:
+        parts.append(f"Structured facts:\n{facts}")
     header = f"Memory notes from {window_phrase}" if window_phrase else "Memory notes"
     parts.append(f"{header}:\n{body}")
     reply = client.chat(
