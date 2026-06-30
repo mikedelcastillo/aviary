@@ -53,7 +53,9 @@ STEM_RE = re.compile(
 
 
 def parse_args() -> argparse.Namespace:
-    repo_root = Path(__file__).resolve().parents[2]
+    # Run from the repo root: when installed as a console script the module
+    # lives in site-packages, so resolving via __file__ points into .venv.
+    repo_root = Path.cwd()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--collect-root",
