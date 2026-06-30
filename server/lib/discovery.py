@@ -525,11 +525,11 @@ def discover_cameras(
         return outcome
 
     try:
-        # One wide pass: most of a /24 is dead, but a closed port now costs a
-        # single connect timeout (PORT_CLOSED is not retried) and the high worker
-        # cap probes the whole subnet near-simultaneously, so the sweep stays fast
-        # without a separate prefilter stage.
-        with ThreadPoolExecutor(max_workers=discovery.max_workers) as pool:
+        # One wide pass: most of a /24 is dead, but a closed port costs only a
+        # single connect timeout (PORT_CLOSED is not retried). The worker cap
+        # (discovery.max_workers) bounds how many hosts are probed at once so the
+        # sweep flows in steady waves rather than blasting the whole subnet at once.
+        with ThreadPoolExecutor(max_workers=max(1, discovery.max_workers)) as pool:
             outcomes = list(pool.map(_probe, hosts))
 
         reachable = [
