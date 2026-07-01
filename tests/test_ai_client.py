@@ -216,3 +216,63 @@ def test_post_json_raises_after_exhausting_retries() -> None:
         pass
     else:
         raise AssertionError("expected HTTPError after retries exhausted")
+
+
+def test_chat_passes_num_predict_cap() -> None:
+    session = FakeSession(FakeResponse({"message": {"content": "ok"}}))
+    client = OllamaClient("http://x", session=session)
+    client.chat("m", [{"role": "user", "content": "hi"}], num_predict=512)
+    _url, payload, _timeout = session.posts[0]
+    assert payload["options"]["num_predict"] == 512
+
+
+def test_generate_passes_num_predict_cap() -> None:
+    session = FakeSession(FakeResponse({"response": "ok"}))
+    client = OllamaClient("http://x", session=session)
+    client.generate("m", "p", num_predict=256)
+    _url, payload, _timeout = session.posts[0]
+    assert payload["options"]["num_predict"] == 256
+
+
+def test_post_json_does_not_retry_read_timeout() -> None:
+    # A ReadTimeout means the backend accepted the request and is still
+    # generating; retrying spawns a SECOND full generation instead of cancelling
+    # the first, tripling CPU on a busy backend. It must fail fast, not retry.
+    calls = {"n": 0}
+
+    class ReadTimeoutSession:
+        def post(self, url, json, timeout):
+            calls["n"] += 1
+            raise requests.exceptions.ReadTimeout("generation too slow")
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=ReadTimeoutSession(), max_retries=3, retry_backoff_seconds=0)
+    try:
+        client.chat("m", [])
+    except requests.exceptions.ReadTimeout:
+        pass
+    else:
+        raise AssertionError("expected ReadTimeout to surface without retry")
+    assert calls["n"] == 1  # not retried
+
+
+def test_post_json_still_retries_connect_timeout() -> None:
+    # A ConnectTimeout never reached the backend (nothing is generating), so a
+    # retry is safe and routes around a briefly-unreachable Olla backend.
+    calls = {"n": 0}
+
+    class ConnectTimeoutThenOk:
+        def post(self, url, json, timeout):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise requests.exceptions.ConnectTimeout("no route")
+            return FakeResponse({"message": {"content": "ok"}})
+
+        def get(self, url, timeout):
+            return FakeResponse({})
+
+    client = OllamaClient("http://x", session=ConnectTimeoutThenOk(), max_retries=2, retry_backoff_seconds=0)
+    assert client.chat("m", []) == "ok"
+    assert calls["n"] == 2  # connect failure retried, then succeeded

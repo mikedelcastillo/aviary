@@ -148,7 +148,7 @@ def chat_reply(
     """
     messages = build_chat_messages(text, history, context=context)
     for _ in range(2):
-        reply = clean_reply(client.chat(model, messages, think=True))
+        reply = clean_reply(client.chat(model, messages, think=True, num_predict=1024))
         if reply:
             return reply
     return CHAT_FALLBACK

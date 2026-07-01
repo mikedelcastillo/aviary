@@ -64,13 +64,17 @@ class OllamaClient:
         fmt: Any | None = None,
         think: bool | None = None,
         temperature: float | None = None,
+        num_predict: int | None = None,
         timeout_seconds: float | None = None,
     ) -> str:
         """One non-streaming /api/chat turn; returns the assistant message text.
 
         ``fmt`` is Ollama's ``format`` (``"json"`` or a JSON schema) for
         structured output. ``think=False`` disables a thinking model's
-        deliberation so intent parsing stays fast.
+        deliberation so intent parsing stays fast. ``num_predict`` caps the
+        generated tokens — a reasoning model (qwen3) with no ceiling can decode
+        thousands of tokens per call and, on a CPU-spilled backend, peg the CPU
+        for minutes; capping it bounds the worst case.
         """
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
         if fmt is not None:
@@ -79,6 +83,8 @@ class OllamaClient:
             payload["think"] = think
         if temperature is not None:
             payload.setdefault("options", {})["temperature"] = temperature
+        if num_predict is not None:
+            payload.setdefault("options", {})["num_predict"] = num_predict
         data = self._post_json("/api/chat", payload, timeout_seconds or self.timeout_seconds)
         return (data.get("message") or {}).get("content", "") or ""
 
@@ -90,11 +96,13 @@ class OllamaClient:
         images: list[str] | None = None,
         fmt: Any | None = None,
         temperature: float | None = None,
+        num_predict: int | None = None,
         timeout_seconds: float | None = None,
     ) -> str:
         """One non-streaming /api/generate call; returns the response text.
 
         ``images`` are base64-encoded JPEG/PNG strings for a vision model.
+        ``num_predict`` caps the generated tokens (bounds a runaway caption).
         """
         payload: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if images:
@@ -103,6 +111,8 @@ class OllamaClient:
             payload["format"] = fmt
         if temperature is not None:
             payload.setdefault("options", {})["temperature"] = temperature
+        if num_predict is not None:
+            payload.setdefault("options", {})["num_predict"] = num_predict
         # Queue behind the vision semaphore so concurrent callers don't pile onto
         # the GPU at once; the timeout only starts once we hold a slot.
         with self._vision_slots:
@@ -132,6 +142,13 @@ class OllamaClient:
                 # like 5xx and connection/timeout errors.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 if status is not None and 400 <= status < 500 and status not in (408, 429):
+                    raise
+                # A ReadTimeout means the backend accepted the request and is
+                # still generating server-side; retrying does NOT cancel that
+                # work, it spawns a *second* full generation on top of the first
+                # and triples CPU on an already-slow backend. Fail fast instead.
+                # (A ConnectTimeout — never reached the backend — still retries.)
+                if isinstance(exc, requests.exceptions.ReadTimeout):
                     raise
                 if attempt < self._max_retries:
                     LOGGER.warning(

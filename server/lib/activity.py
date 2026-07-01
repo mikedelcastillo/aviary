@@ -211,6 +211,7 @@ def answer_activity_question(
             {"role": "user", "content": "\n\n".join(parts)},
         ],
         think=True,
+        num_predict=768,
         timeout_seconds=timeout_seconds,
     )
     return clean_reply(reply)
@@ -236,7 +237,8 @@ def summarise_activity(
             {"role": "system", "content": _ACTIVITY_SUMMARY_PROMPT},
             {"role": "user", "content": ask},
         ],
-        think=True,
+        think=False,
+        num_predict=512,
         timeout_seconds=timeout_seconds,
     )
     return clean_reply(reply)
