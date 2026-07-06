@@ -1,8 +1,8 @@
 """Flock-level bird sleep tracking: nightly sleep scores + a warm summary.
 
 The room darkens (all cameras in IR) and lightens together, so this measures the
-FLOCK's sleep honestly from the same IR signal the care scheduler trusts — no
-fabricated per-bird precision. ``model`` holds the records + persistence;
+FLOCK's sleep honestly from that shared IR signal — no fabricated per-bird
+precision. ``model`` holds the records + persistence;
 ``score`` the research-grounded 0-100 score; ``detect`` the pure detection state
 machine; ``narrate`` the warm copy; ``tracker`` the one thin threaded shell.
 """

@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 
 import cv2
 
@@ -102,6 +103,7 @@ def monitor_camera(
     ir_state: IRState | None = None,
     quality: StreamQualityController | None = None,
     detection_logger: DetectionLogger | None = None,
+    rgb_reaction: Callable[[str, list, bool], None] | None = None,
 ) -> None:
     # Log the exact URL (password masked) so a camera stuck on "connecting" can
     # be diagnosed: if this line appears but "Stream opened" never follows, the
@@ -220,8 +222,17 @@ def monitor_camera(
                 frame_size = frame_size_from_shape(frame.shape)
                 # Stamp the camera's IR/night flag from the frame we already
                 # decoded, so the rest of the server reads it cached.
+                is_ir = is_ir_array(frame)
                 if ir_state is not None:
-                    ir_state.update(camera.name, is_ir_array(frame))
+                    ir_state.update(camera.name, is_ir)
+                # Feed the RGB status display: day frames light each bird's LED,
+                # night/IR frames drive the single night LED. Best-effort — a
+                # lights error must never kill the capture loop.
+                if rgb_reaction is not None and detections:
+                    try:
+                        rgb_reaction(camera.name, detections, is_ir)
+                    except Exception:
+                        LOGGER.exception("RGB reaction failed for %s", camera.name)
                 # Record after inference returns, so the cell's FPS reflects true
                 # capture+YOLO throughput, not the raw stream rate.
                 stats.record_inference(

@@ -8,8 +8,56 @@ sends fast and reliable while staying perfectly clear on a phone.
 
 from __future__ import annotations
 
+import hashlib
+
 import cv2
 import numpy as np
+
+
+def _label_color(label: str) -> tuple[int, int, int]:
+    """A bright, deterministic BGR color per label, so each bird reads the same."""
+    hue = int(hashlib.md5(label.encode("utf-8")).hexdigest(), 16) % 180
+    bgr = cv2.cvtColor(np.uint8([[[hue, 220, 255]]]), cv2.COLOR_HSV2BGR)[0][0]
+    return (int(bgr[0]), int(bgr[1]), int(bgr[2]))
+
+
+def draw_boxes(
+    image_bytes: bytes,
+    boxes: list[tuple],
+    *,
+    quality: int = 85,
+) -> bytes:
+    """Draw labeled detection rectangles onto a JPEG and re-encode it.
+
+    Each box is ``(label, (x1, y1, x2, y2))`` or ``(label, bbox, color)`` where
+    ``color`` is an explicit BGR tuple (e.g. the bird's roster color). Without an
+    explicit color a consistent per-label color is derived. Returns the input
+    unchanged when there are no boxes or it can't be decoded, so callers can use it
+    unconditionally.
+    """
+    if not boxes:
+        return image_bytes
+    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if array is None:
+        return image_bytes
+    height, width = array.shape[:2]
+    thickness = max(2, round(min(height, width) / 300))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.5, min(height, width) / 900)
+    for box in boxes:
+        label, (x1, y1, x2, y2) = box[0], box[1]
+        color = box[2] if len(box) > 2 and box[2] else _label_color(label or "?")
+        cv2.rectangle(array, (x1, y1), (x2, y2), color, thickness)
+        if label:
+            (text_w, text_h), base = cv2.getTextSize(label, font, font_scale, thickness)
+            top = max(text_h + 4, y1)  # keep the label on-screen for a box at the edge
+            cv2.rectangle(array, (x1, top - text_h - 4), (x1 + text_w + 4, top + base - 2), color, -1)
+            cv2.putText(
+                array, label, (x1 + 2, top - 2), font, font_scale,
+                (255, 255, 255), max(1, thickness - 1), cv2.LINE_AA,
+            )
+    ok, buffer = cv2.imencode(".jpg", array, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    return buffer.tobytes() if ok else image_bytes
 
 
 def downscale_array_to_jpeg(frame, max_dim: int = 1280, quality: int = 80) -> bytes:

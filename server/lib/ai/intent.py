@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from lib.ai.client import OllamaClient
@@ -20,11 +21,18 @@ from lib.ai.client import OllamaClient
 
 LOGGER = logging.getLogger("lib.ai.intent")
 
+# Intent classification is the gate every free-text message waits behind, so it
+# gets a TIGHT timeout — far below the client's generous default. A healthy
+# gemma3:4b classifies in ~2-5s (cold load included); anything past this means
+# the backend is wedged, and failing lets the message be queued for replay
+# instead of leaving the user staring at "typing…" for two minutes.
+INTENT_TIMEOUT_SECONDS = 45.0
+
 # Every action the router can emit. "chat" is the catch-all for questions and
 # conversation, routed to the memory/VLM layer rather than a command.
 ACTIONS = (
     "pause", "resume", "find", "stop_find", "discover", "restart", "home", "quality", "autofind",
-    "status", "snapshot", "activity", "sleep", "care", "weather", "machine", "chat",
+    "status", "snapshot", "activity", "sleep", "weather", "machine", "chat",
 )
 
 # Ollama ``format`` schema: constrains the model to a valid action + argument.
@@ -79,7 +87,7 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'pizza been up to", "what are the birds doing", "what\'s going on", "anything '
         'happening?", "how was matcha today", "did pizza eat today", "did matcha and jynx '
         'spend time together", "did the birds take a bath", "when did the birds go in their '
-        'cage", "are the birds asleep", "what did jynx do this morning", "show me recent '
+        'cage", "what did jynx do this morning", "show me recent '
         'photos of pizza", "show me a photo of percy", "show me photos of budgie with other '
         'birds", "has bambi spent time with jynx this week", "where are the birds", "where '
         'is everyone". Time spans (today, this morning, this week, yesterday) and photo '
@@ -90,12 +98,6 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         'birds sleep", "how did they sleep last night", "what was their sleep score", "did '
         'anyone have a night fright", "how have they been sleeping this week", "are they '
         'sleeping well". argument = "week" for a multi-night trend, else "".\n'
-        '- "care": an explicit request for the bird-care GUIDE/reference — "care guide", '
-        '"care tips", "care info", "how do I care for them", "tell me about cockatiel care", '
-        '"show me the care guide", or a list of toxic foods ("what foods are toxic", "what '
-        'can\'t they eat"). argument = a topic (diet, sleep, temperature, health, toxic, '
-        'enrichment, social) or a species/bird if named, else "". (A conversational care '
-        'question like "can they eat avocado" or "is it too cold" is "chat", not "care".)\n'
         '- "weather": the actual outside weather/forecast and what it means for the birds. '
         'ANY question about what the weather IS or WILL BE — rain, heat, cold, the forecast, '
         'later today or tonight. Examples: "what\'s the weather", "weather forecast", "will '
@@ -111,44 +113,70 @@ def build_system_prompt(findable_birds: list[str]) -> str:
         '"cpu temp", "how hot is the gpu", "gpu usage", "is the gpu busy", "network '
         'speed", "how much bandwidth", "server load", "is the cluster healthy", "olla '
         'status", "are the ollama nodes up", "how are the nodes". argument = "".\n'
-        '- "chat": greetings, thanks, small talk, AND any general bird-CARE or knowledge '
-        'question — what is safe or toxic to eat, diet/feeding, sleep and light needs, '
-        'temperature, enrichment, illness and "why is X fluffed/plucking/quiet", or how '
-        'to care for them. These are answered from care knowledge, NOT the activity log, '
-        'even when they name a bird. argument = "".\n\n'
+        '- "chat": greetings, thanks, small talk, AND any general bird-care, health, or '
+        'how-to question the server does not act on — what is safe to eat, diet/feeding, '
+        'sleep needs, temperature, enrichment, or "why is X fluffed/plucking/quiet". These '
+        'are conversation, NOT the activity log, even when they name a bird. argument = "".\n\n'
         "Rules:\n"
+        '- A greeting or pleasantry with no request — "hi", "hello", "hey", "good '
+        'morning", "good evening", "good night", "thanks", "thank you", "how are you" '
+        '— is "chat", NEVER a command. In particular, "home" requires an explicit ask to '
+        "aim, point, or reset the cameras — a greeting is not one.\n"
         '- The SERVER\'s own hardware — CPU/GPU usage or temperature, memory, network '
         'speed, machine load, or the Olla/Ollama cluster node health — is "machine". '
         'The CAMERAS and birds being online/healthy ("are the cameras ok", "what\'s '
         'online", "system status", "how are things") is "status".\n'
         '- A question about what is SAFE or recommended ("can they eat avocado", "is it '
         'too cold for them", "how long should they sleep", "why is percy plucking") is '
-        '"chat" (care knowledge). A question about what a bird DID or is DOING ("did pizza '
-        'eat today", "what is percy up to") is "activity".\n'
+        '"chat". A question about what a bird DID or is DOING ("did pizza eat today", '
+        '"what is percy up to") is "activity".\n'
         '- A question about the FORECAST or what the weather WILL be — "will it rain '
         'today", "how hot will it be later", "will it be cold later/tonight", "what\'s '
         'the weather" — is "weather". A general care question about what temperature is '
-        'safe FOR THE BIRDS ("is it too cold for them", "do they need a heater") is "chat".\n'
+        'safe FOR THE BIRDS ("is it too cold for them", "do they need a heater") is "chat". '
+        'The room\'s CURRENT light — "is it dark yet", "is it night", "are the lights off", '
+        '"is it daytime" — is "chat" (live state), NOT weather.\n'
         '- "how did they sleep" / "sleep score" / "did they sleep well" / "any night '
-        'frights" is "sleep" (last night\'s rest). "how LONG should they sleep" is "chat" '
-        '(care advice). "are they asleep right now" is "chat" (live state).\n'
+        'frights" is "sleep" (last night\'s rest). "how LONG should they sleep" is "chat". '
+        '"are they asleep right now" is "chat" (live state).\n'
         '- "where is percy" -> find (locate one specific bird). "where are the birds" / '
         '"where is everyone" -> activity (a summary of all, not a single-bird locate). '
         '"what did percy do today" / "what is percy up to" / "show me photos of percy" -> '
-        'activity. "find the cockatiels" / "find any bird" -> find. "show me the cameras" / '
-        '"take a snapshot" -> snapshot (live capture), but "show me photos of <bird>" -> '
-        "activity (recent collected photos). Use find to locate, activity for "
-        "behaviour/photos/summaries.\n"
+        'activity. "find the cockatiels" / "find any bird" -> find. Only "show me the '
+        'cameras" / "take a snapshot" / "what do the cameras see now" is snapshot (a LIVE '
+        'capture). ANY request to show saved PHOTOS/PICTURES of a bird or of birds doing '
+        'something — "show me a photo/picture of percy", "photos of birds eating", "picture '
+        'of percy taking a bath", "pics of bambi and percy beside each other" — is '
+        '"activity" (it searches the collected photos), NEVER snapshot. Use find to locate, '
+        "activity for behaviour/photos/summaries.\n"
         f"- Known birds: {birds}. Groups: cockatiels, lovebirds, budgies, birds. If a find "
         "target is not known, still put what they said in argument.\n"
         "- Output ONLY the JSON object."
     )
 
 
-def build_messages(user_text: str, findable_birds: list[str]) -> list[dict[str, str]]:
+def build_messages(
+    user_text: str,
+    findable_birds: list[str],
+    prior: tuple[str, str] | None = None,
+) -> list[dict[str, str]]:
+    """Intent-classification messages. ``prior`` is the previous (message, action)
+    so a short follow-up ("what about percy?", "and jynx?") inherits that action."""
+    user = user_text
+    if prior and prior[0].strip():
+        prev_text, prev_action = prior
+        user = (
+            f"CONVERSATION CONTEXT — the user's previous message was: {prev_text!r}, which "
+            f"was handled as action \"{prev_action}\". If the NEW message below is a short "
+            "follow-up that only swaps the subject (e.g. \"what about percy?\", \"and jynx?\", "
+            "\"how about the cockatiels?\", \"her?\"), give it the SAME action as that "
+            "previous message, with the newly-named bird(s) as the argument. Otherwise "
+            "classify it fresh on its own merits.\n\n"
+            f"NEW message to classify: {user_text!r}"
+        )
     return [
         {"role": "system", "content": build_system_prompt(findable_birds)},
-        {"role": "user", "content": user_text},
+        {"role": "user", "content": user},
     ]
 
 
@@ -169,6 +197,15 @@ def parse_intent(content: str) -> Intent:
     if action not in ACTIONS:
         action = "chat"
     argument = str(data.get("argument", "") or "").strip()
+    # The small router model occasionally hallucinates a whole activity narrative
+    # into `argument` ("the cockatiels were preening while budgie perched…") instead
+    # of the short bird/group/duration reference it should hold. A real argument is
+    # brief (even "percy and matcha and jynx and bambi and draft and pizza" is ~53
+    # chars); anything sentence-length is that hallucination. Drop it so the
+    # downstream bird filter falls back to all birds instead of the wrong subset.
+    if len(argument) > 80:
+        LOGGER.warning("Dropping over-long intent argument (%d chars): %r", len(argument), argument[:120])
+        argument = ""
     return Intent(action, argument)
 
 
@@ -177,17 +214,43 @@ def classify_intent(
     model: str,
     user_text: str,
     findable_birds: list[str],
+    prior: tuple[str, str] | None = None,
 ) -> Intent:
     """Ask the language model to route ``user_text`` to a single action.
 
-    ``think=False`` and ``temperature=0`` keep it fast and deterministic. Raises
-    on a client/transport error so the caller can reply that the AI is offline.
+    ``think=False`` and ``temperature=0`` keep it fast and deterministic. ``prior``
+    is the previous (message, action) so a short follow-up ("what about percy?")
+    inherits that action instead of defaulting to ``find``. Raises on a
+    client/transport error so the caller can reply that the AI is offline.
     """
     content = client.chat(
         model,
-        build_messages(user_text, findable_birds),
+        build_messages(user_text, findable_birds, prior),
         fmt=INTENT_SCHEMA,
         think=False,
         temperature=0.0,
+        timeout_seconds=INTENT_TIMEOUT_SECONDS,
     )
-    return parse_intent(content)
+    return _correct_photo_snapshot(parse_intent(content), user_text, findable_birds)
+
+
+_PHOTO_WORDS = {"photo", "photos", "picture", "pictures", "pic", "pics", "image", "images"}
+
+
+def _correct_photo_snapshot(intent: Intent, text: str, findable_birds: list[str]) -> Intent:
+    """Reroute a "show me a photo of <bird>" that the model mislabeled as snapshot.
+
+    A snapshot is a LIVE capture of ALL cameras and never targets a named bird, so a
+    photo/picture request that names a bird (or "birds") is really an activity search
+    over the saved photos — small models sometimes trip on phrasings like "a picture
+    of percy taking a bath". Identity/behaviour queries are the responder's job.
+    """
+    if intent.action != "snapshot":
+        return intent
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    if not (words & _PHOTO_WORDS):
+        return intent
+    names = {b.lower() for b in findable_birds} | {"birds", "bird"}
+    if words & names:
+        return Intent("activity", intent.argument)
+    return intent

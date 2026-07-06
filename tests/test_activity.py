@@ -6,10 +6,30 @@ from datetime import datetime, timezone
 from lib.activity import (
     _ACTIVITY_QA_PROMPT,
     _ACTIVITY_SUMMARY_PROMPT,
+    _strip_stray_yesno,
     load_sightings,
     select_highlights,
     summarise_counts,
 )
+
+
+def test_strip_stray_yesno_drops_prefix_on_open_questions() -> None:
+    # An open "what/who/when" question must not start with a stray Yes/No.
+    assert _strip_stray_yesno("Yes. Around sunrise they gathered near the gym.",
+                              "what did they do when the sun rose?") == \
+        "Around sunrise they gathered near the gym."
+    assert _strip_stray_yesno("Yes, Percy was the most active today.",
+                              "who was most active?") == "Percy was the most active today."
+    assert _strip_stray_yesno("No — they mostly rested this morning.",
+                              "what did the birds do this morning?") == "They mostly rested this morning."
+
+
+def test_strip_stray_yesno_keeps_prefix_on_yesno_questions() -> None:
+    # A genuine yes/no question legitimately opens with Yes/No — leave it.
+    assert _strip_stray_yesno("Yes, Percy and Matcha were together around 2pm.",
+                              "was percy with matcha today?").startswith("Yes")
+    assert _strip_stray_yesno("No, I didn't catch Draft flying today.",
+                              "did draft fly today?").startswith("No")
 
 
 def _write_sighting(collect_dir, label, conf, when_epoch, camera="camera-192.168.1.8") -> None:
@@ -70,8 +90,9 @@ def test_summarise_counts(tmp_path) -> None:
 def test_activity_prompts_keep_answers_short() -> None:
     summary = _ACTIVITY_SUMMARY_PROMPT.lower()
     qa = _ACTIVITY_QA_PROMPT.lower()
-    assert "up to 5 bullets" in summary
-    assert "under 18 words" in summary
-    assert "2-4 short sentences" in qa
-    assert "max 110 words" in qa
-    assert "structured facts" in qa
+    assert "2-4 bullet" in summary
+    assert "under 16 words" in summary
+    assert "2-3 short sentences" in qa
+    assert "counts" in qa  # it must lean on the exact count tallies
+    # gemma3 was emitting **markdown headers** — both prompts now forbid it.
+    assert "no markdown" in summary and "no markdown" in qa

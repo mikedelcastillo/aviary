@@ -6,18 +6,22 @@ light-at-night + disturbances are the two penalising disruptors:
 
     DURATION 0.40 · CONSISTENCY 0.25 · DARKNESS 0.20 · DISTURBANCE 0.15
 
-Targets come from the verified care research (``lib.care.SLEEP_HOURS`` = 10-12h
-of dark; a consistent bedtime within ~30 min; night-frights are the heaviest
-single disturbance). ``confidence`` is reported SEPARATELY from the number — it
-only hedges the copy, it never inflates or deflates the score.
+Targets come from the verified sleep research (10-12h of dark; a consistent
+bedtime within ~30 min; night-frights are the heaviest single disturbance).
+``confidence`` is reported SEPARATELY from the number — it only hedges the copy,
+it never inflates or deflates the score.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from lib.care import SLEEP_HOURS
 from lib.sleep.model import LIGHT, MOTION, NIGHT_FRIGHT, SleepNight
+
+# Nightly dark-sleep target (hours) for the adult flock — the anchor the score and
+# the narration both use. (Was lib.care.SLEEP_HOURS before the care feature was
+# removed; kept here with the sleep code that actually needs it.)
+SLEEP_HOURS = (10, 12)
 
 WEIGHTS = {"duration": 0.40, "consistency": 0.25, "darkness": 0.20, "disturbance": 0.15}
 

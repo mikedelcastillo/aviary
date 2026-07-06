@@ -76,7 +76,17 @@ class OllamaConfig:
     # bird photos. Both default to models the user already has pulled.
     enabled: bool
     base_url: str = "http://localhost:11434"
-    llm_model: str = "qwen3:4b"
+    # MUST be an INSTRUCT model, not a reasoning one. A reasoning model (qwen3) spends
+    # its whole num_predict budget "thinking" and returns empty chat/activity replies
+    # (the "Sorry — I garbled that" fallback), or leaks that reasoning into the answer.
+    # gemma3:4b answers directly, stays terse, and routes intents just as accurately.
+    llm_model: str = "gemma3:4b"
+    # The model for ACTIVITY/MEMORY recall (day/week summaries, "who was most active",
+    # "any bird didn't eat", co-occurrence). This reasons over per-bird tallies, which
+    # a 4B model gets wrong (it confabulates); a bigger instruct model (gemma3:12b) is
+    # markedly more accurate. Kept separate so intent/chat stay on the fast 4B. Falls
+    # back to llm_model when unset.
+    recall_model: str = "gemma3:12b"
     # 3B (not 7B): on an 8GB GPU the 7B VLM (4.75GB) + LLM (3.2GB) + YOLO spilled
     # to CPU. The 3B is 2.16GB at the same ~20s latency and near-identical caption
     # quality, so all three coexist on-GPU (~5.8GB) with headroom. See bench.
@@ -86,6 +96,11 @@ class OllamaConfig:
     # Max concurrent vision (image) calls; the rest queue. 1 keeps the GPU from
     # being swamped when many frames are captioned/named at once.
     vision_concurrency: int = 1
+    # Ollama keep_alive: how long a worker keeps a model loaded after a request
+    # ("30m", "1h", "-1" = forever). This server's calls are sporadic (a chat
+    # turn, a 5-minute memory beat) — longer than Ollama's 5m default, so
+    # without this nearly every call pays a cold model load first.
+    keep_alive: str = "30m"
 
 
 @dataclass(frozen=True)
@@ -165,10 +180,6 @@ class AppConfig:
     # so it sweeps the tilt axis too. 4 x 3 = 12 cells by default.
     ptz_scan_cols: int = 4
     ptz_scan_rows: int = 3
-    # Daily/weekly bird-care reminders (food, water, bedtime, weekly clean)
-    # keyed to observed light + local sunrise/sunset. On by default (just needs
-    # a notifier; no AI required); CARE_REMINDERS=0 turns them off.
-    care_reminders: bool = True
     # Location for sunrise/sunset and the weather outlook. NO real coordinates
     # live in the repo — set AVIARY_LATITUDE / AVIARY_LONGITUDE in .env. The 0,0
     # placeholder means "unset": sun times fall back to clock anchors and the
@@ -190,6 +201,22 @@ class AppConfig:
     # /sleep command and the /status night-in-progress line work regardless;
     # SLEEP_MORNING_REPORT=1 also pushes a summary each morning when they wake.
     sleep_morning_report: bool = False
+    # RGB status display (lib.rgb): drive the motherboard / header / strip LEDs to
+    # mirror aviary state — a loading-wave during discovery, each bird's color on
+    # detection, a single LED at night. Off by default; needs a running OpenRGB
+    # SDK server (see scripts/install-rgb.sh). rgb_strip_len sets the pixel count of an empty
+    # addressable header (e.g. an ARGB fan); rgb_night_led picks the night LED
+    # (-1 = auto = last LED). Per-LED→bird mapping lives in data/server/rgb_layout.json
+    # (write it with `uv run rgb-calibrate`).
+    # rgb_strip_len: -1 = leave the addressable header at OpenRGB's detected size;
+    # 0 = force it OFF (disable the ARGB header, e.g. back to onboard-only);
+    # N = set N pixels (the count of the ARGB strip/fan plugged into the header).
+    rgb_enabled: bool = False
+    rgb_host: str = "127.0.0.1"
+    rgb_port: int = 6742
+    rgb_brightness: float = 1.0
+    rgb_strip_len: int = -1
+    rgb_night_led: int = -1
 
 
 def _require_env(name: str) -> str:
@@ -291,10 +318,18 @@ def _ollama_config() -> OllamaConfig:
     base_url = os.environ.get("OLLAMA_BASE_URL", "").strip() or OllamaConfig.base_url
     llm_model = os.environ.get("OLLAMA_LLM_MODEL", "").strip() or OllamaConfig.llm_model
     vlm_model = os.environ.get("OLLAMA_VLM_MODEL", "").strip() or OllamaConfig.vlm_model
+    recall_model = (
+        os.environ.get("OLLAMA_RECALL_MODEL", "").strip()
+        or OllamaConfig.recall_model
+        or llm_model
+    )
     vision_concurrency = max(1, int(_as_float("OLLAMA_VISION_CONCURRENCY", OllamaConfig.vision_concurrency)))
+    timeout_seconds = _as_float("OLLAMA_TIMEOUT_SECONDS", OllamaConfig.timeout_seconds)
+    keep_alive = os.environ.get("OLLAMA_KEEP_ALIVE", "").strip() or OllamaConfig.keep_alive
     return OllamaConfig(
         enabled=enabled, base_url=base_url, llm_model=llm_model, vlm_model=vlm_model,
-        vision_concurrency=vision_concurrency,
+        recall_model=recall_model, vision_concurrency=vision_concurrency,
+        timeout_seconds=timeout_seconds, keep_alive=keep_alive,
     )
 
 
@@ -342,7 +377,6 @@ def build_config() -> AppConfig:
         raw_photo_alerts=raw_photo_alerts,
         ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),
         ptz_scan_rows=max(1, int(_as_float("PTZ_SCAN_ROWS", 3))),
-        care_reminders=_as_bool("CARE_REMINDERS", True),
         latitude=_as_float("AVIARY_LATITUDE", 0.0),
         longitude=_as_float("AVIARY_LONGITUDE", 0.0),
         utc_offset_hours=_as_float("AVIARY_UTC_OFFSET_HOURS", 0.0),
@@ -350,4 +384,10 @@ def build_config() -> AppConfig:
         weather_hot_c=_as_float("WEATHER_HOT_C", 32.0),
         weather_cold_c=_as_float("WEATHER_COLD_C", 10.0),
         sleep_morning_report=_as_bool("SLEEP_MORNING_REPORT", False),
+        rgb_enabled=_as_bool("RGB_ENABLED", False),
+        rgb_host=os.environ.get("RGB_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        rgb_port=int(_as_float("RGB_PORT", 6742)),
+        rgb_brightness=_as_float("RGB_BRIGHTNESS", 1.0),
+        rgb_strip_len=int(_as_float("RGB_STRIP_LEN", -1)),
+        rgb_night_led=int(_as_float("RGB_NIGHT_LED", -1)),
     )

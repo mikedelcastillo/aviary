@@ -3,11 +3,29 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from lib.imaging import is_ir_frame
+from lib.imaging import draw_boxes, is_ir_frame
 
 
 def _jpeg(bgr) -> bytes:
     return cv2.imencode(".jpg", bgr)[1].tobytes()
+
+
+def test_draw_boxes_annotates_and_stays_decodable() -> None:
+    base = np.zeros((200, 300, 3), np.uint8)
+    out = draw_boxes(_jpeg(base), [("Percy", (10, 20, 120, 160))])
+    decoded = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded is not None and decoded.shape == (200, 300, 3)
+    # Something was drawn — the all-black frame now has colored pixels.
+    assert decoded.max() > 0
+
+
+def test_draw_boxes_no_boxes_returns_input_unchanged() -> None:
+    data = _jpeg(np.zeros((32, 32, 3), np.uint8))
+    assert draw_boxes(data, []) == data
+
+
+def test_draw_boxes_survives_undecodable_input() -> None:
+    assert draw_boxes(b"not a jpeg", [("Percy", (0, 0, 5, 5))]) == b"not a jpeg"
 
 
 def test_is_ir_frame_detects_grayscale() -> None:

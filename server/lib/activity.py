@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -143,42 +144,76 @@ def summarise_counts(sightings: list[Sighting]) -> str:
 # -- VLM / LLM wrappers ------------------------------------------------------
 
 
+# Written for an INSTRUCT model (gemma3): short, bulleted rules keep it terse,
+# on-subject, and out of markdown. The old qwen3-era wall-of-text made gemma3
+# ramble in **headers** and answer about the wrong bird.
 _ACTIVITY_SUMMARY_PROMPT = (
-    "You are the aviary caretaker giving an activity update from logged memories. "
-    "Write terse bullet points — start each line with '• ' — UP TO 5 bullets, "
-    "each under 18 words. Cover the requested bird first; include other birds only "
-    "when important. Say what happened and when. Refer to each bird by NAME, never its "
-    "species. Write NATURALLY: use a pronoun (she/he, per the pronouns given) only "
-    "where one naturally fits in a sentence — NEVER write a pronoun in parentheses "
-    "or right after a name (no 'Percy (she)', no 'Percy, she,'); the pronouns are "
-    "given for your reference, not to be quoted, and are NOT evidence that a bird "
-    "was present. When a note begins with how long "
-    "ago it was (e.g. '2 hours ago', '12 minutes ago'), include that timing in the "
-    "bullet naturally (e.g. 'Percy preened on the perch 2 hours ago'). Be concrete; "
-    "don't invent anything not in the notes. No preamble or closing line "
-    "— just the bullets."
+    "You are the caretaker of a home aviary giving a short activity update from logged "
+    "memory notes. Each note is '(when) [birds seen]: what they were doing'.\n\n"
+    "Rules:\n"
+    "- Output 2-4 bullet lines, each starting with '• ' and under 16 words. Nothing else "
+    "— no intro, no heading, no closing line.\n"
+    "- Cover the requested bird first; mention another bird only when notable. Say what "
+    "happened and roughly when (e.g. '• Percy preened on the perch around noon').\n"
+    "- Call each bird by NAME with its correct pronoun (per the pronoun note). NEVER use a "
+    "species or breed word (no 'cockatiel', 'parakeet', 'the white bird').\n"
+    "- Plain text only: NO markdown, no **bold**, no headers. Be concrete; invent nothing "
+    "that is not in the notes."
 )
 
 
 _ACTIVITY_QA_PROMPT = (
-    "You are the warm caretaker of a home aviary, answering a question about the "
-    "pet birds using ONLY the timestamped memory notes provided. Each note line is "
-    "'(when) [birds seen]: what they were doing'. If a Structured facts section is "
-    "provided, treat it as authoritative for counts, first/last times, together/apart "
-    "evidence, and health/social/activity flags. Answer the SPECIFIC question "
-    "directly in 2-4 short sentences, max 110 words total. Be concrete about WHEN "
-    "(e.g. 'around 2pm', 'this morning', 'about an hour ago') and WHICH birds. For "
-    "together/apart questions, include numerical counts when provided. For broad "
-    "'how was X?' questions, center X and cover observed health flags or lack of "
-    "flags, activity, play/feeding/preening/rest, and social/alone pattern where "
-    "the memory supports it. For a question about two or more birds being TOGETHER, "
-    "only say yes if the facts or a note lists them together at the same time. For "
-    "a yes/no question, start with a clear yes or no. The pronoun note is reference "
-    "only and is NOT evidence that a bird was present. "
-    "If the notes don't show what's asked, say you didn't catch it / can't tell "
-    "from today's memory — never guess. Use each bird's correct pronoun (per the "
-    "pronouns given); refer to birds by NAME, never the species. No preamble."
+    "You are the caretaker of a home aviary, answering ONE question about the pet birds "
+    "from timestamped memory notes plus an exact COUNTS summary (tallies of sightings, "
+    "activities, and together/apart moments — trust these numbers over the prose).\n\n"
+    "Rules:\n"
+    "- Answer about the bird(s) NAMED in the question — never drift to a different bird.\n"
+    "- For a BROAD question ('what did X do today/this week', 'how is X'), summarise the "
+    "OVERALL pattern from the activity counts — e.g. 'Percy spent the week mostly resting "
+    "and socialising, preening often, with some play' — not one single moment.\n"
+    "- For 'was X with Y' / 'did X spend time with Y': answer YES if they were seen "
+    "together even ONCE (say roughly when and how often); answer NO only when the together "
+    "count is zero. NEVER say 'no' and then describe them being together.\n"
+    "- For a WHOLE-FLOCK question, use the per-bird tallies: 'who was most/least active' "
+    "or 'who ate the most' → name the specific top/bottom bird with the number; 'any bird "
+    "that didn't eat/play?' → name the birds with NO such activity recorded, but add that "
+    "you may simply not have caught it; 'any bird not doing well?' → name any bird with a "
+    "health concern and gently suggest an avian vet, or reassure that they all look fine if "
+    "none is flagged.\n"
+    "- Start with 'Yes' or 'No' ONLY for a yes/no question. An open question ('what did "
+    "X do', 'who was most active') just describes — do NOT begin with 'Yes' or 'No'.\n"
+    "- Keep it to 2-3 short sentences of plain prose; be concrete about WHEN ('around 2pm', "
+    "'this morning', 'early in the week').\n"
+    "- Speak naturally, as if you watched them yourself. NEVER quote the data: do not write "
+    "'counts', 'facts', 'notes', 'window', 'observations', or a raw '(2 hours ago)' stamp.\n"
+    "- Call each bird by NAME with its correct pronoun (per the pronoun note). NEVER use a "
+    "species or breed word (no 'cockatiel', 'parakeet', 'the white bird').\n"
+    "- Plain text ONLY: no markdown, no **bold**, no headers, no bullet lists.\n"
+    "- If the data doesn't cover what was asked, say you didn't catch it from the memory — "
+    "never guess or invent."
 )
+
+
+# Open questions ("what did they do", "who was most active") never take a Yes/No
+# answer, but the recall model sometimes prepends a stray "Yes,"/"No," anyway. We
+# strip it deterministically rather than trusting the prompt rule alone.
+_OPEN_Q_STARTS = ("what", "who", "when", "where", "why", "how", "which", "describe", "tell", "show", "list")
+_LEADING_YESNO = re.compile(r"^\s*(yes|yeah|yep|no|nope)\b[\s,.:;!—-]*", re.IGNORECASE)
+
+
+def _strip_stray_yesno(reply: str, question: str) -> str:
+    """Drop a leading "Yes"/"No" from the answer to an OPEN question (a yes/no
+    question keeps it — the answer legitimately starts there)."""
+    q = question.strip().lstrip("\"'“‘ ").lower()
+    if not any(q.startswith(w) for w in _OPEN_Q_STARTS):
+        return reply
+    m = _LEADING_YESNO.match(reply)
+    if not m:
+        return reply
+    rest = reply[m.end():]
+    if not rest:
+        return reply
+    return rest[0].upper() + rest[1:]
 
 
 def answer_activity_question(
@@ -201,7 +236,7 @@ def answer_activity_question(
         parts.append(f"Bird pronouns (use these): {pronoun_note}")
     parts.append(f"Question: {question.strip()}")
     if facts:
-        parts.append(f"Structured facts:\n{facts}")
+        parts.append(f"Counts (exact tallies — trust over prose, but never quote):\n{facts}")
     header = f"Memory notes from {window_phrase}" if window_phrase else "Memory notes"
     parts.append(f"{header}:\n{body}")
     reply = client.chat(
@@ -210,11 +245,14 @@ def answer_activity_question(
             {"role": "system", "content": _ACTIVITY_QA_PROMPT},
             {"role": "user", "content": "\n\n".join(parts)},
         ],
-        think=True,
-        num_predict=768,
+        # llm_model is an instruct model (gemma3): answer directly, no thinking.
+        # With a reasoning model think=True burned the whole 768-token budget on
+        # deliberation and returned EMPTY content; num_predict now caps the answer.
+        think=False,
+        num_predict=400,
         timeout_seconds=timeout_seconds,
     )
-    return clean_reply(reply)
+    return _strip_stray_yesno(clean_reply(reply), question)
 
 
 def summarise_activity(
@@ -237,8 +275,10 @@ def summarise_activity(
             {"role": "system", "content": _ACTIVITY_SUMMARY_PROMPT},
             {"role": "user", "content": ask},
         ],
+        # Instruct model (gemma3): think=False means a direct answer, not leaked
+        # reasoning; 5 short bullets fit comfortably under this cap.
         think=False,
-        num_predict=512,
+        num_predict=350,
         timeout_seconds=timeout_seconds,
     )
     return clean_reply(reply)

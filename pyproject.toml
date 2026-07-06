@@ -11,6 +11,9 @@ dependencies = [
     "requests>=2.32.0",
     "rich>=13.7.0",
     "ultralytics>=8.3.0",
+    # OpenRGB SDK client for the LED status display (lib.rgb). Pure-python, tiny;
+    # the engine no-ops gracefully if the OpenRGB server isn't running.
+    "openrgb-python>=0.3.2",
     # torch/torchvision are pinned to the CUDA 12.8 (cu128) index below — the
     # build with Blackwell/sm_120 support for the RTX 5060. uv resolves the wheel
     # itself; `uv sync` installs the right GPU torch with no post-step.
@@ -26,6 +29,7 @@ server-up = "lib.server_ctl:up"
 server-down = "lib.server_ctl:down"
 llm-harness = "lib.ai.harness:main"
 activity-harness = "lib.ai.activity_harness:main"
+memory-migrate = "lib.memory_migrate:main"
 train = "train:main"
 train-live = "train_live:main"
 train-archive = "train_archive:main"
@@ -41,6 +45,10 @@ cut-paste-ir = "cut_paste_ir:main"
 annotation = "annotation_app:main"
 doctor-fsdb = "doctor_fsdb:main"
 tests = "pytest:console_main"
+# RGB LED status display (lib.rgb)
+rgb-calibrate = "lib.rgb.calibrate:main"
+rgb-demo = "lib.rgb.cli:demo"
+rgb-status = "lib.rgb.cli:status"
 
 [build-system]
 requires = ["hatchling"]

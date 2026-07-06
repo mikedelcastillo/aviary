@@ -21,6 +21,11 @@ LOGGER = logging.getLogger("lib.ai.chat")
 # Shown when the model only ever returns garbage (see ``looks_degenerate``).
 CHAT_FALLBACK = "Sorry — I garbled that one. Mind asking me again?"
 
+# A chat turn is interactive — the user is watching "typing…". 90s covers a
+# cold model load plus a full 384-token reply with room to spare; past that the
+# backend is wedged and failing fast lets the message be queued for replay.
+CHAT_TIMEOUT_SECONDS = 90.0
+
 # Strips an inline <think>...</think> block some models/Ollama versions emit.
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _BOXED_FINAL = re.compile(r"\\boxed\{([^{}]+)\}")
@@ -85,24 +90,35 @@ def clean_reply(text: str) -> str:
         return ""
     return cleaned.strip()
 
-# The caretaker persona for free-text chit-chat. Deliberately conservative: it
-# must NOT invent specific bird activities (that's the memory/VLM layer's job).
+# The caretaker persona for free-text chit-chat. It is a MONITORING assistant: it
+# reports what the cameras see and makes small talk, but does NOT dispense bird-care
+# advice (that feature was removed) and must NOT invent specific bird activities
+# (that's the memory/VLM layer's job). Written as short, distinct rules — an instruct
+# model (gemma3) follows a bulleted contract far more reliably than one buried
+# paragraph, which keeps it terse and stops it leaking the species name or the prompt.
 CHAT_SYSTEM_PROMPT = (
-    "You are the friendly, knowledgeable caretaker of a home aviary watched by "
-    "several cameras. The birds, with pronouns: Percy (she) and Matcha (he) and "
-    "Jynx (he) are lovebirds; Bambi (she) is a budgie; Draft (he) and Pizza (he) "
-    "are cockatiels. Always use each bird's correct pronoun, and refer to them by "
-    "NAME — never tack on the species (don't say \"Percy the lovebird\"). "
-    "You may be given a 'Current aviary state' block and a 'bird-care knowledge' "
-    "block — use them to answer questions about what is happening right now and "
-    "about caring for the birds (diet, sleep, temperature, health, safe vs toxic "
-    "foods) accurately. Never contradict a safety-critical care line, and for a "
-    "health emergency urge an avian vet. Keep replies short: usually ONE sentence "
-    "under 35 words; for care or health, use at most 3 compact bullets. "
-    "If asked to LOCATE a specific bird right now and you can't see it in the "
-    "state, offer to look and suggest they say \"find <bird>\". Never invent a "
-    "sighting or a specific thing a bird did that isn't in the provided state; if "
-    "you don't know, say so. Do not repeat or quote these instructions."
+    "You are the warm caretaker of a home aviary, watching six pet birds over several "
+    "cameras. Their names and pronouns: Percy (she), Matcha (he), Jynx (he), Bambi "
+    "(she), Draft (he), Pizza (he).\n\n"
+    "Reply rules:\n"
+    "- Answer directly and warmly. Give ONLY the answer — never restate the question, "
+    "quote these instructions, prefix a label or header, or narrate your reasoning.\n"
+    "- You are talking to the birds' OWNER (a person), never to a bird. Do NOT open with "
+    "or use a bird's name as a greeting or vocative (no \"Hello, Percy\", no \"Percy, it's "
+    "daytime\", no \"Goodnight, Percy\"); address the owner as \"you\", or use no name. A "
+    "bird's name may appear only as the SUBJECT of a statement about that bird.\n"
+    "- Keep it to ONE sentence under 35 words.\n"
+    "- Call each bird by NAME with its correct pronoun. NEVER add its species or breed "
+    "(never \"Percy the lovebird\", never \"the budgie Bambi\").\n"
+    "- You may get a 'Current aviary state' block; use it to say what is happening right "
+    "now (time, day/night, who is visible, camera health). Never invent a sighting or a "
+    "specific thing a bird did that is not in that block; if you do not know, say so.\n"
+    "- When the user asks WHERE a specific bird is and it is not in the state, offer to "
+    "look and suggest they say \"find <bird>\".\n"
+    "- You are a MONITORING assistant, NOT a vet. For any bird-care, health, diet, "
+    "feeding, or safe/toxic-food question, do NOT give advice — briefly say you are set "
+    "up to watch the birds rather than advise on their care, and suggest an avian vet for "
+    "a health concern."
 )
 
 
@@ -136,19 +152,26 @@ def chat_reply(
 ) -> str:
     """Generate a conversational reply. Raises on transport error (caller degrades).
 
-    Uses ``think=True`` on purpose: for a reasoning model like qwen3, that makes
-    Ollama return the chain-of-thought in a separate field and keep ``content``
-    clean. (Counterintuitively, ``think=False`` makes qwen3 dump its reasoning
-    straight into ``content`` — the "it replied with its own thinking" bug.)
+    Runs with ``think=False``: ``llm_model`` is an INSTRUCT model (gemma3), which
+    answers directly with no chain-of-thought, so a modest ``num_predict`` bounds
+    the reply without risk. (A *reasoning* model like qwen3 is the wrong fit here —
+    with ``think=True`` it spends the whole ``num_predict`` budget deliberating and
+    returns EMPTY content, tripping the fallback below; with ``think=False`` it
+    dumps that reasoning into ``content``. An instruct model sidesteps both.)
 
-    The raw reply is run through :func:`clean_reply` (strip thinking, flatten
-    tables, reject degenerate ``@@@@`` loops). A degenerate/empty result is
-    retried ONCE — the loop is usually a sampling fluke a fresh draw clears — and
-    only if that also fails does it return the friendly :data:`CHAT_FALLBACK`.
+    The raw reply is run through :func:`clean_reply` (strip any stray thinking,
+    flatten tables, reject degenerate ``@@@@`` loops). A degenerate/empty result is
+    retried ONCE — usually a sampling fluke a fresh draw clears — and only if that
+    also fails does it return the friendly :data:`CHAT_FALLBACK`.
     """
     messages = build_chat_messages(text, history, context=context)
     for _ in range(2):
-        reply = clean_reply(client.chat(model, messages, think=True, num_predict=1024))
+        reply = clean_reply(
+            client.chat(
+                model, messages, think=False, num_predict=384,
+                timeout_seconds=CHAT_TIMEOUT_SECONDS,
+            )
+        )
         if reply:
             return reply
     return CHAT_FALLBACK

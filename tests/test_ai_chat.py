@@ -41,7 +41,14 @@ def test_chat_prompt_keeps_replies_short() -> None:
     prompt = CHAT_SYSTEM_PROMPT.lower()
     assert "one sentence" in prompt
     assert "under 35 words" in prompt
-    assert "at most 3 compact bullets" in prompt
+
+
+def test_chat_prompt_defers_care_questions() -> None:
+    # Care was removed: the persona must NOT give care advice, and should point
+    # health concerns at a vet instead.
+    prompt = CHAT_SYSTEM_PROMPT.lower()
+    assert "vet" in prompt
+    assert "monitoring" in prompt
 
 
 # -- markdown tables: Telegram sends plain text, so a GFM pipe table renders as

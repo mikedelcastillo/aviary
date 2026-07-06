@@ -223,13 +223,27 @@ def assess(
     )
 
 
+def _fmt_clock(t: object) -> str | None:
+    """A ``datetime.time`` as a friendly 12-hour clock ("5:47 AM"), or None."""
+    if t is None:
+        return None
+    return t.strftime("%-I:%M %p")
+
+
 def summarize(
     forecast: WeatherForecast,
     *,
     hot_c: float = DEFAULT_HOT_C,
     cold_c: float = DEFAULT_COLD_C,
+    sunrise: object = None,
+    sunset: object = None,
 ) -> str:
-    """The /weather reply: outlook line, warnings, and bird advice."""
+    """The /weather reply: outlook line, warnings, and bird advice.
+
+    ``sunrise``/``sunset`` are optional ``datetime.time`` values (from the
+    location's sun times); when present a "🌅 Sunrise … 🌇 Sunset …" line is
+    added so "what time was sunrise?" gets a real answer.
+    """
     assessment = assess(forecast, hot_c=hot_c, cold_c=cold_c)
     when = f" for {forecast.date_label}" if forecast.date_label else ""
     lines = [f"🌤️ **Weather{when}**"]
@@ -239,6 +253,14 @@ def summarize(
         f"Today: {forecast.condition}, high {_temp(forecast.high_c)}, "
         f"low {_temp(forecast.low_c)} overnight."
     )
+    sr, ss = _fmt_clock(sunrise), _fmt_clock(sunset)
+    if sr or ss:
+        parts = []
+        if sr:
+            parts.append(f"🌅 Sunrise {sr}")
+        if ss:
+            parts.append(f"🌇 Sunset {ss}")
+        lines.append(" · ".join(parts))
     if forecast.precip_prob is not None:
         lines.append(f"Rain chance: {forecast.precip_prob}%.")
     for warning in assessment.warnings:

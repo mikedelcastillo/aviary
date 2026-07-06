@@ -3,8 +3,8 @@
 Every public formatter returns a guaranteed deterministic string from a
 :class:`~lib.sleep.model.SleepNight` (or a list of them); :func:`llm_summary` may
 dress one up via Ollama but ALWAYS falls back to the deterministic template on
-any error, so a report never blocks or crashes the tracker thread. Grounding
-(the 10-12h target, the cockatiel night-fright note) comes from :mod:`lib.care`.
+any error, so a report never blocks or crashes the tracker thread. The 10-12h
+dark-sleep target it anchors on is :data:`lib.sleep.score.SLEEP_HOURS`.
 """
 
 from __future__ import annotations
@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from lib.care import SLEEP_HOURS
 from lib.sleep.model import LIGHT, MOTION, NIGHT_FRIGHT, SleepNight
+from lib.sleep.score import SLEEP_HOURS
 
 LOGGER = logging.getLogger("lib.sleep.narrate")
 
@@ -191,7 +191,7 @@ def format_status_line(in_progress: SleepNight | None, now: datetime) -> str | N
     return f"🌙 **Night in progress** — dark {_hm(minutes)} so far"
 
 
-def llm_summary(client, model: str, night: SleepNight, *, care_context: str = "", timeout_seconds: float | None = None) -> str:
+def llm_summary(client, model: str, night: SleepNight, *, timeout_seconds: float | None = None) -> str:
     """An optional Ollama-written one-liner, with the deterministic morning line
     as the guaranteed fallback on ANY error."""
     fallback = format_morning(night)
@@ -206,13 +206,15 @@ def llm_summary(client, model: str, night: SleepNight, *, care_context: str = ""
         )
         system = (
             "You are the warm caretaker of a home aviary. In ONE short sentence under 30 words, "
-            "tell the owner how the flock slept from these facts. Don't invent anything. "
-            + care_context
+            "tell the owner how the flock slept from these facts. Don't invent anything."
         )
         reply = client.chat(
             model,
             [{"role": "system", "content": system}, {"role": "user", "content": facts}],
-            think=True,
+            # Instruct model (gemma3): answer directly, and bound the one-liner so a
+            # runaway can't peg the CPU (this call previously had no token cap).
+            think=False,
+            num_predict=160,
             timeout_seconds=timeout_seconds,
         )
         return clean_reply(reply) or fallback

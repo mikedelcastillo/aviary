@@ -3,10 +3,27 @@ from __future__ import annotations
 from lib.ai.intent import (
     INTENT_SCHEMA,
     Intent,
+    _correct_photo_snapshot,
+    build_messages,
     build_system_prompt,
     classify_intent,
     parse_intent,
 )
+
+
+def test_photo_of_bird_reroutes_from_snapshot() -> None:
+    birds = ["percy", "matcha", "bambi"]
+    # A photo/picture request naming a bird (or "birds") is a saved-photo search,
+    # not a live snapshot — even when the small model labeled it snapshot.
+    assert _correct_photo_snapshot(Intent("snapshot", "percy"),
+                                   "show me a picture of percy taking a bath", birds).action == "activity"
+    assert _correct_photo_snapshot(Intent("snapshot", ""),
+                                   "show me photos of birds eating", birds).action == "activity"
+    # Real snapshots (no photo-of-a-bird phrasing) are left alone.
+    assert _correct_photo_snapshot(Intent("snapshot", ""), "take a snapshot", birds).action == "snapshot"
+    assert _correct_photo_snapshot(Intent("snapshot", ""), "show me the cameras", birds).action == "snapshot"
+    # Non-snapshot intents pass through untouched.
+    assert _correct_photo_snapshot(Intent("find", "percy"), "find percy", birds).action == "find"
 
 
 class FakeClient:
@@ -40,8 +57,10 @@ def test_parse_intent_accepts_sleep_action() -> None:
     assert parse_intent('{"action": "sleep", "argument": "week"}') == Intent("sleep", "week")
 
 
-def test_parse_intent_accepts_care_action() -> None:
-    assert parse_intent('{"action": "care", "argument": "diet"}') == Intent("care", "diet")
+def test_parse_intent_rejects_removed_care_action() -> None:
+    # The 'care' feature was removed, so 'care' is no longer a valid action and an
+    # intent naming it falls back to chat (where the bot defers care questions).
+    assert parse_intent('{"action": "care", "argument": "diet"}').action == "chat"
 
 
 def test_parse_intent_accepts_weather_action() -> None:
@@ -60,9 +79,11 @@ def test_system_prompt_routes_forecast_questions_to_weather() -> None:
     assert "is it too cold for them" in prompt
 
 
-def test_system_prompt_mentions_care_guide() -> None:
+def test_system_prompt_has_no_care_action() -> None:
+    # The care guide/action is gone; the prompt must not offer a "care" action.
     prompt = build_system_prompt(["percy"]).lower()
-    assert "care guide" in prompt
+    assert "care guide" not in prompt
+    assert '"care"' not in prompt
 
 
 def test_system_prompt_mentions_sleep_routing() -> None:
@@ -85,11 +106,11 @@ def test_system_prompt_lists_birds() -> None:
 
 
 def test_system_prompt_routes_care_questions_to_chat() -> None:
-    # Care/safety/how-to questions should be steered to chat (care knowledge),
-    # not the activity log, even when they name a bird.
+    # Care/safety/how-to questions are conversation (chat), not the activity log,
+    # even when they name a bird — the bot defers them.
     prompt = build_system_prompt(["percy"]).lower()
-    assert "care knowledge" in prompt
-    assert "avocado" in prompt  # the safe-vs-toxic example
+    assert "avocado" in prompt  # the safe-vs-toxic example still cues "chat"
+    assert '"chat"' in prompt
 
 
 def test_classify_intent_uses_structured_output() -> None:
@@ -101,3 +122,31 @@ def test_classify_intent_uses_structured_output() -> None:
     assert call["fmt"] == INTENT_SCHEMA
     assert call["think"] is False
     assert call["temperature"] == 0.0
+
+
+def test_build_messages_without_prior_passes_text_verbatim() -> None:
+    msgs = build_messages("what about percy?", ["percy"])
+    assert msgs[-1]["role"] == "user"
+    assert msgs[-1]["content"] == "what about percy?"
+
+
+def test_build_messages_with_prior_adds_followup_context() -> None:
+    # A short follow-up must carry the previous message + its action so the model
+    # can continue it ("did draft fly?" -> activity) rather than default to find.
+    msgs = build_messages(
+        "what about percy?", ["percy"], prior=("did draft or pizza fly today?", "activity")
+    )
+    user = msgs[-1]["content"]
+    assert "did draft or pizza fly today?" in user
+    assert "activity" in user
+    assert "what about percy?" in user  # the actual message to classify is still present
+
+
+def test_classify_intent_threads_prior_into_messages() -> None:
+    client = FakeClient('{"action": "activity", "argument": "percy"}')
+    classify_intent(
+        client, "gemma3:4b", "what about percy?", ["percy"],
+        prior=("did draft fly today?", "activity"),
+    )
+    sent_user = client.calls[0]["messages"][-1]["content"]
+    assert "did draft fly today?" in sent_user

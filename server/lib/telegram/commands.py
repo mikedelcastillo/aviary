@@ -39,7 +39,6 @@ DiscoverProvider = Callable[..., str]
 COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/activity": "Activity summary (e.g. /activity, /activity percy, /activity percy today)",
     "/sleep": "How the birds slept — sleep score + summary (e.g. /sleep, /sleep week)",
-    "/care": "Bird-care guide (e.g. /care, /care diet, /care toxic, /care cockatiel)",
     "/weather": "Weather outlook + bird-safety advice for the flock",
     "/detections": "Daily detection stats (/detections [bird] [YYYY-MM-DD])",
     "/restart": "Restart the Aviary server process",
@@ -51,6 +50,9 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/start": "Resume the cameras after a pause",
     "/status": "Show camera and detection status",
     "/machine": "Machine telemetry — CPU/GPU/network + Olla cluster health",
+    "/memory": "Day-memory stats — history size, backfill debt, photos, storage",
+    "/tokens": "LLM token usage per model (calls, in/out tokens, busy time)",
+    "/rgb": "LED status display — /rgb red 10m to set a color, /rgb auto for context mode",
     "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
     "/snapshot": "Capture a snapshot from every camera",
     "/pause": "Privacy mode: stop the cameras (alias of /stop)",
@@ -285,9 +287,11 @@ def run_command_bot(
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
     sleep_provider: Callable[[int, str], None] | None = None,
-    care_provider: Callable[[str], str] | None = None,
     weather_provider: Callable[[], str] | None = None,
     machine_frame: Callable[[float, float], str] | None = None,
+    rgb_provider: Callable[[str], str] | None = None,
+    memory_stats_provider: Callable[[], str] | None = None,
+    tokens_provider: Callable[[], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -302,7 +306,6 @@ def run_command_bot(
         for command, present in (
             ("/activity", activity_provider is not None),
             ("/sleep", sleep_provider is not None),
-            ("/care", care_provider is not None),
             ("/weather", weather_provider is not None),
             ("/detections", detection_provider is not None),
             ("/restart", restart_provider is not None),
@@ -314,6 +317,9 @@ def run_command_bot(
             ("/start", resume_provider is not None),
             ("/status", status_provider is not None),
             ("/machine", machine_frame is not None),
+            ("/memory", memory_stats_provider is not None),
+            ("/tokens", tokens_provider is not None),
+            ("/rgb", rgb_provider is not None),
             ("/find", find_provider is not None),
             ("/snapshot", snapshot_provider is not None),
             ("/pause", pause_provider is not None),
@@ -326,6 +332,9 @@ def run_command_bot(
     _register_bot_commands(base_url, available)
 
     LOGGER.info("Started Telegram command bot")
+
+    # One /memory scan at a time — it walks the whole data tree.
+    memory_stats_gate = Lock()
 
     def send(chat_id: int, text: str) -> int | None:
         """Best-effort sendMessage; a transient API failure must not kill polling.
@@ -487,11 +496,16 @@ def run_command_bot(
                     # Not a slash command: hand free text to the natural-language
                     # router (if enabled and the sender is allowed). It replies on
                     # its own background thread, so polling is never blocked.
-                    if nl_provider is not None and text_in.strip() and str(user_id) in allowed:
-                        try:
-                            nl_provider(chat_id, text_in)
-                        except Exception:
-                            LOGGER.exception("Natural-language routing failed")
+                    if text_in.strip() and str(user_id) in allowed:
+                        if nl_provider is not None:
+                            try:
+                                nl_provider(chat_id, text_in)
+                            except Exception:
+                                LOGGER.exception("Natural-language routing failed")
+                        else:
+                            # AI off entirely: say so instead of ignoring the
+                            # message — silence reads as a broken bot.
+                            send(chat_id, "🤖 AI chat is off (OLLAMA_ENABLED=0) — use a /command.")
                     continue
 
                 if command == "/discover":
@@ -649,6 +663,46 @@ def run_command_bot(
                     LOGGER.info("Handled /machine for user %s", user_id)
                     continue
 
+                if command == "/memory":
+                    if str(user_id) not in allowed or memory_stats_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    elif not memory_stats_gate.acquire(blocking=False):
+                        # A batch of queued /memory taps (e.g. sent while the bot
+                        # was down) must not launch parallel full-disk scans.
+                        send(chat_id, "🧠 Already crunching memory stats — hang on.")
+                    else:
+                        # The scan reads every day file and stats every photo — a
+                        # second or two on a long history — so it runs off the
+                        # poll loop: ack now, edit in the report when it's done.
+                        def run_memory_stats(cid: int = chat_id) -> None:
+                            try:
+                                status_id = send(cid, "🧠 Crunching memory stats…")
+                                try:
+                                    report = memory_stats_provider()
+                                except Exception:
+                                    LOGGER.exception("Memory stats failed")
+                                    report = "Couldn't compute memory stats — check the logs."
+                                edit(cid, status_id, report)
+                            finally:
+                                memory_stats_gate.release()
+
+                        Thread(target=run_memory_stats, name="memory-stats", daemon=True).start()
+                    LOGGER.info("Handled /memory for user %s", user_id)
+                    continue
+
+                if command == "/tokens":
+                    if str(user_id) not in allowed or tokens_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        # Instant: reads in-memory counters, no disk scan.
+                        try:
+                            send(chat_id, tokens_provider())
+                        except Exception:
+                            LOGGER.exception("Token usage report failed")
+                            send(chat_id, "Couldn't read token usage — check the logs.")
+                    LOGGER.info("Handled /tokens for user %s", user_id)
+                    continue
+
                 if command == "/autofind":
                     if str(user_id) not in allowed or autofind_provider is None:
                         send(chat_id, "Unauthorized.")
@@ -671,6 +725,18 @@ def run_command_bot(
                             LOGGER.exception("Quality change failed")
                             send(chat_id, f"Quality change failed: {exc}")
                     LOGGER.info("Handled /quality for user %s", user_id)
+                    continue
+
+                if command == "/rgb":
+                    if str(user_id) not in allowed or rgb_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, rgb_provider(command_argument(text_in)))
+                        except Exception as exc:
+                            LOGGER.exception("RGB command failed")
+                            send(chat_id, f"RGB command failed: {exc}")
+                    LOGGER.info("Handled /rgb for user %s", user_id)
                     continue
 
                 if command == "/snapshot":
@@ -719,19 +785,6 @@ def run_command_bot(
                             LOGGER.exception("Sleep report failed")
                             send(chat_id, f"Sleep report failed: {exc}")
                     LOGGER.info("Handled /sleep for user %s", user_id)
-                    continue
-
-                if command == "/care":
-                    # Bird-care guide from the knowledge base — fast + synchronous.
-                    if str(user_id) not in allowed or care_provider is None:
-                        send(chat_id, "Unauthorized.")
-                    else:
-                        try:
-                            send(chat_id, care_provider(command_argument(text_in)))
-                        except Exception as exc:  # never let it kill polling
-                            LOGGER.exception("Care guide failed")
-                            send(chat_id, f"Care info failed: {exc}")
-                    LOGGER.info("Handled /care for user %s", user_id)
                     continue
 
                 if command == "/find":

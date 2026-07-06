@@ -42,6 +42,7 @@ HELP_TEXT = (
     "  /discover          rescan the network for cameras\n"
     "  /home              aim pan-tilt cameras at their saved viewpoint\n"
     "  /quality <mode>    stream1, stream2, or auto\n"
+    "  /rgb <color> [time]  set LEDs (e.g. /rgb red 10m); /rgb auto for context mode\n"
     "  /snapshot          capture all cameras (photos go to Telegram)\n"
     "  /logs              show/hide live server logs\n"
     "  /help   /quit\n"
@@ -101,6 +102,7 @@ class ConsoleDispatcher:
         activity: Callable[[int, str], None] | None = None,
         home_text: Callable[[], str] | None = None,
         quality_text: Callable[[str], str] | None = None,
+        rgb_text: Callable[[str], str] | None = None,
         toggle_logs: Callable[[], str] | None = None,
         on_quit: Callable[[], None] | None = None,
     ) -> None:
@@ -118,6 +120,7 @@ class ConsoleDispatcher:
         self._activity = activity
         self._home_text = home_text
         self._quality_text = quality_text
+        self._rgb_text = rgb_text
         self._toggle_logs = toggle_logs
         self._on_quit = on_quit
 
@@ -176,6 +179,12 @@ class ConsoleDispatcher:
                 self._quality_text(argument)
                 if self._quality_text is not None
                 else "Quality control is off."
+            )
+        elif command == "/rgb":
+            self._emit(
+                self._rgb_text(argument)
+                if self._rgb_text is not None
+                else "RGB control is off (set RGB_ENABLED=1)."
             )
         elif command == "/snapshot":
             self._emit("Capturing snapshots from all cameras…")

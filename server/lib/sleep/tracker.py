@@ -7,8 +7,7 @@ moment it finalizes (:mod:`lib.sleep.score`), and fires the optional morning
 report. The detection/scoring brains are pure; this shell is deliberately thin.
 
 ``_tick(now)`` and ``on_ir`` are injectable/callable directly, so the whole thing
-unit-tests with a fake clock + fake all_ir/movement and zero real threads —
-exactly like :class:`lib.care_scheduler.CareScheduler`.
+unit-tests with a fake clock + fake all_ir/movement and zero real threads.
 """
 
 from __future__ import annotations
@@ -34,6 +33,10 @@ from lib.sleep.score import rolling_baseline, score_night
 
 LOGGER = logging.getLogger("lib.sleep.tracker")
 
+# Bound the morning-report one-liner: it's cosmetic (the deterministic template
+# is the guaranteed fallback), so it never deserves the client's generous default.
+MORNING_REPORT_TIMEOUT_SECONDS = 60.0
+
 # Prior finalized nights folded into the rolling consistency baseline.
 BASELINE_NIGHTS = 7
 
@@ -53,7 +56,6 @@ class SleepTracker:
         morning_report: bool = False,
         client=None,
         llm_model: str = "",
-        care_context: str = "",
     ) -> None:
         self._notify_all = notify_all
         self._stop = stop_event
@@ -66,7 +68,6 @@ class SleepTracker:
         self._morning_report = morning_report
         self._client = client
         self._llm_model = llm_model
-        self._care_context = care_context
 
         self._lock = threading.Lock()
         self._state = NightState()
@@ -169,7 +170,19 @@ class SleepTracker:
         self._last_finalized = night
         LOGGER.info("Sleep night finalized: score=%s dark=%smin", night.score, night.dark_minutes)
         if self._morning_report:
-            try:
-                self._notify_all(llm_summary(self._client, self._llm_model, night, care_context=self._care_context))
-            except Exception:
-                LOGGER.exception("Sleep morning report failed")
+            # Off-thread: _finalize runs with the tracker lock held, and the LLM
+            # one-liner can take tens of seconds on a busy backend — generating
+            # inline stalled IR-event processing (and /status) for that long.
+            # The night is finalized + persisted already; the report only reads it.
+            def report() -> None:
+                try:
+                    self._notify_all(
+                        llm_summary(
+                            self._client, self._llm_model, night,
+                            timeout_seconds=MORNING_REPORT_TIMEOUT_SECONDS,
+                        )
+                    )
+                except Exception:
+                    LOGGER.exception("Sleep morning report failed")
+
+            threading.Thread(target=report, name="sleep-report", daemon=True).start()

@@ -50,23 +50,14 @@ def test_system_state_night_mode() -> None:
     assert "night/IR" in state and "roosting" in state.lower()
 
 
-def test_build_chat_context_combines_state_and_care() -> None:
-    state = format_system_state(NOON, cameras_total=1, cameras_healthy=1)
-    context = build_chat_context(
-        "can the birds eat avocado?", system_state=state, member_species=MEMBER_SPECIES
-    )
-    assert context is not None
-    assert "Current aviary state" in context  # state block present
-    assert "avocado" in context.lower() and "TOXIC" in context  # care block present
-
-
-def test_build_chat_context_state_only_for_status_question() -> None:
+def test_build_chat_context_returns_the_live_state() -> None:
     state = format_system_state(NOON, cameras_total=1, cameras_healthy=1)
     context = build_chat_context("how are the cameras?", system_state=state)
     assert context is not None
-    assert "Current aviary state" in context
+    assert "Current aviary state" in context  # the live-state block is the grounding
 
 
-def test_build_chat_context_none_when_nothing_relevant() -> None:
-    # No live state and pure chit-chat -> nothing to ground.
+def test_build_chat_context_none_without_state() -> None:
+    # No live-state plumbing (e.g. the console) -> nothing to ground with.
     assert build_chat_context("hello there!", system_state=None) is None
+    assert build_chat_context("can the birds eat avocado?") is None

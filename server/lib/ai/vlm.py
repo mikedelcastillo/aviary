@@ -9,6 +9,7 @@ propagate; callers treat vision as best-effort and degrade.
 from __future__ import annotations
 
 import base64
+import json
 import re
 
 from lib.imaging import downscale_jpeg
@@ -178,3 +179,116 @@ def name_camera_view(
         client, model, image_bytes, CAMERA_NAME_PROMPT, timeout_seconds=timeout_seconds
     )
     return clean_camera_name(raw)
+
+
+# -- structured per-bird analysis (v3 memory) -------------------------------
+
+# The canonical single-primary-activity vocabulary the VLM may assign per bird.
+# Kept small and concrete so it aggregates cleanly into statistics.
+BIRD_ACTIVITIES = (
+    "feeding", "drinking", "preening", "resting", "sleeping", "playing",
+    "climbing", "exploring", "flying", "bathing", "vocalizing", "alert",
+    "interacting", "hidden", "unknown",
+)
+
+# Health concerns worth flagging from a photo (coarse — a flag prompts a closer
+# look, it is not a diagnosis). Empty/"none" means nothing visibly wrong.
+BIRD_HEALTH_FLAGS = ("fluffed", "lethargic", "labored_breathing", "plucking", "injured", "eye_closed")
+
+ANALYZE_PROMPT = (
+    "This is a still from a pet-bird camera. Each bird sits inside a colored box "
+    "LABELED with its name. Return ONE entry for EVERY labeled box — never skip a bird "
+    "and never add a bird that has no box; use the exact name printed on the box. For "
+    "each, choose the single most likely CURRENT activity from what you can see (a bird "
+    "simply sitting still is 'resting' or 'alert', not 'hidden' — only use 'hidden' if "
+    "its box is truly empty/occluded). Give a short posture phrase (e.g. 'perched', 'on "
+    "the cage floor', 'hanging on the bars') and any visible health concern, or null if "
+    "the bird looks fine. Also give a vivid 1-2 sentence 'scene' — a caretaker's note "
+    "of what the birds are doing (feeding, playing, preening, bathing, resting, "
+    "interacting or alone), where they are, and anything notable or endearing; be "
+    "concrete and specific. CRITICAL: the colored boxes and name labels are just an "
+    "overlay to help you — describe the birds directly as if watching them live, and "
+    "NEVER mention a box, its color, an outline, or that anything is labeled (write "
+    "'Percy preens on a branch', never 'the bird in the green box'). Never use a "
+    "species or breed word. Judge only from what is visible."
+)
+
+
+def _analysis_schema(labels: list[str]) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "scene": {"type": "string"},
+            "birds": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "enum": labels},
+                        "activity": {"type": "string", "enum": list(BIRD_ACTIVITIES)},
+                        "posture": {"type": "string"},
+                        # Plain string (a health flag from BIRD_HEALTH_FLAGS, or "none").
+                        # A null/enum-mixed type here made some Olla backends emit empty
+                        # JSON; analyze_frame normalises "none"/"" to "".
+                        "health": {"type": "string"},
+                    },
+                    "required": ["label", "activity", "health"],
+                },
+            },
+        },
+        "required": ["scene", "birds"],
+    }
+
+
+def analyze_frame(
+    client,
+    model: str,
+    image_bytes: bytes,
+    labels: list[str],
+    *,
+    max_dim: int | None = MAX_VLM_DIM,
+    timeout_seconds: float | None = None,
+) -> dict:
+    """Structured per-bird analysis of a LABELED-box frame for the v3 memory.
+
+    ``labels`` are the detector's labels present in the frame; the VLM is
+    grammar-constrained (Ollama ``format`` schema) to only those names and the
+    canonical activity vocabulary, so activity is attributed to the right bird and
+    the output is always valid JSON. Returns ``{"scene": str, "birds": [{label,
+    activity, posture, health}]}`` — empty birds on no labels or a bad response.
+    """
+    labels = sorted({str(label).strip().lower() for label in labels if str(label).strip()})
+    if not labels:
+        return {"scene": "", "birds": []}
+    image = downscale_jpeg(image_bytes, max_dim) if max_dim else image_bytes
+    raw = client.generate(
+        model,
+        ANALYZE_PROMPT,
+        images=[encode_image(image)],
+        fmt=_analysis_schema(labels),
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"scene": raw.strip()[:400], "birds": []}
+    if not isinstance(data, dict):
+        return {"scene": "", "birds": []}
+    allowed = set(labels)
+    birds = []
+    for bird in data.get("birds") or []:
+        if not isinstance(bird, dict):
+            continue
+        label = str(bird.get("label", "")).strip().lower()
+        if label not in allowed:
+            continue  # the model must stick to the boxes it was given
+        health = bird.get("health")
+        birds.append(
+            {
+                "label": label,
+                "activity": str(bird.get("activity", "")).strip().lower(),
+                "posture": str(bird.get("posture", "")).strip(),
+                "health": str(health).strip().lower() if health and str(health).lower() != "none" else "",
+            }
+        )
+    return {"scene": str(data.get("scene", "")).strip(), "birds": birds}

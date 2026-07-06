@@ -18,18 +18,20 @@ import numpy as np
 from dotenv import load_dotenv
 
 from lib.ai.chat import chat_reply
-from lib.ai.client import OllamaClient
+from lib.ai.client import OllamaClient, OllamaUnavailableError
 from lib.ai.context import build_chat_context, format_system_state
+from lib.ai.health import OllamaHealth
 from lib.ai.intent import Intent
+from lib.ai.usage import LlmUsageRecorder, format_usage
 from lib.ai.memory import ConversationMemory
 from lib.ai.router import NaturalLanguageRouter
-from lib.ai.vlm import MAX_VLM_DIM, build_detection_context, describe_scene
+from lib.ai.vlm import MAX_VLM_DIM, analyze_frame, build_detection_context, describe_scene
 from lib.activity_qa import ActivityResponder
 from lib.alerts import AlertDispatcher, AlertState
+from lib.backfill import LlmBackfillWorker, build_memory_backfill
+from lib.pending import PendingMessageStore
 from lib.camera import configure_ffmpeg_capture
 from lib.camera_names import CameraNamer, name_cameras
-from lib.care import care_reply, care_tip, toxic_food_in
-from lib.care_scheduler import CareScheduler
 from lib.clock import PH_TZ, now_ph
 from lib.config import AppConfig, _as_user_ids, build_config
 from lib.console import (
@@ -40,12 +42,15 @@ from lib.console import (
 )
 from lib.control import RuntimeControl, parse_duration
 from lib.memory_maker import MemoryMaker
+from lib.memory_stats import format_memory_stats, gather_memory_stats
 from lib.dashboard import Dashboard, STALE_FRAME_SECONDS
 from lib.detector import ObjectDetector
 from lib.detection_log import DetectionLogger
 from lib.durations import format_duration as _duration_text
+from lib.suntimes import sun_times
 from lib.weather import WeatherMonitor, fetch_forecast, has_location, summarize as summarize_weather
 from lib.machine import MachineFrames, MachineSampler
+from lib.rgb import build_controller as build_rgb_controller
 from lib.discovery import DISCOVER_TICK_SECONDS, DiscoveryProgress
 from lib.autofind import AutoFinder
 from lib.find import BirdFinder, currently_visible, format_visible
@@ -59,7 +64,6 @@ from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_se
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.sleep import SleepTracker, format_status_line
 from lib.stats import CameraStats
-from lib.suntimes import sun_times
 from lib.supervisor import CameraSupervisor, format_discovery_progress, format_discovery_report
 from lib.telegram.commands import build_status_message, run_command_bot
 from lib.terminal_logging import NativeStderrRedirect
@@ -133,9 +137,11 @@ def start_command_thread(
     photo_provider: Callable[[bytes], str] | None = None,
     activity_provider: Callable[[int, str], None] | None = None,
     sleep_provider: Callable[[int, str], None] | None = None,
-    care_provider: Callable[[str], str] | None = None,
     weather_provider: Callable[[], str] | None = None,
     machine_frame: Callable[[float, float], str] | None = None,
+    rgb_provider: Callable[[str], str] | None = None,
+    memory_stats_provider: Callable[[], str] | None = None,
+    tokens_provider: Callable[[], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -157,9 +163,11 @@ def start_command_thread(
             "photo_provider": photo_provider,
             "activity_provider": activity_provider,
             "sleep_provider": sleep_provider,
-            "care_provider": care_provider,
             "weather_provider": weather_provider,
             "machine_frame": machine_frame,
+            "rgb_provider": rgb_provider,
+            "memory_stats_provider": memory_stats_provider,
+            "tokens_provider": tokens_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -188,9 +196,9 @@ def build_nl_router(
     memory=None,
     chat_context=None,
     sleep_provider=None,
-    care_provider=None,
     weather_provider=None,
     machine_provider=None,
+    pending_store=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -214,12 +222,15 @@ def build_nl_router(
             app_config.ollama.base_url,
         )
 
+    # Filled with the router after construction (dispatch is built first, but
+    # needs the router's queue for the "cluster died mid-turn" case below).
+    router_ref: list[NaturalLanguageRouter] = []
+
     def send_chat_reply(chat_id: int, text: str) -> None:
         history = memory.history(chat_id) if memory is not None else None
-        # Ground the reply in live system state + relevant care knowledge so the
-        # caretaker can actually answer questions (status, time, diet, sleep,
-        # toxic foods) instead of only chit-chatting. Best-effort: a context
-        # failure must never block the reply.
+        # Ground the reply in live system state so the caretaker can answer "how are
+        # things?", "is it dark yet?", "are the cameras ok?" instead of only
+        # chit-chatting. Best-effort: a context failure must never block the reply.
         context = None
         if chat_context is not None:
             try:
@@ -231,6 +242,20 @@ def build_nl_router(
             reply = chat_reply(
                 client, app_config.ollama.llm_model, text, history=history, context=context
             )
+        except OllamaUnavailableError:
+            # During a REPLAY, propagate: the backfill worker keeps the same
+            # queued item (and its attempt count) — re-queueing a fresh copy here
+            # would reset the give-up counter and loop across cluster flaps.
+            if router_ref and router_ref[0].replaying():
+                raise
+            # Classification got through but the cluster died before the reply —
+            # save the message for replay like any other outage-hit turn.
+            if router_ref:
+                LOGGER.warning("Chat reply hit an Ollama outage; queueing message")
+                router_ref[0].queue_message(chat_id, text)
+                return
+            reply = "🤖 My language brain (Ollama) is unreachable right now."
+            failed = True
         except Exception:
             LOGGER.exception("Chat reply failed")
             reply = "🤖 My language brain (Ollama) is unreachable right now."
@@ -253,13 +278,6 @@ def build_nl_router(
                 return
             notifier.send_text(chat_id, reply)
 
-        # Safety first: a question naming a toxic food ("can percy eat avocado?")
-        # must get the grounded care answer instead of "I haven't logged that" —
-        # but ONLY when it was read as conversation/activity, never when it's a
-        # real command (a "pause" that happens to mention a food must still pause).
-        if action in ("chat", "activity") and toxic_food_in(text) is not None:
-            send_chat_reply(chat_id, text)
-            return
         if action == "pause":
             notifier.send_text(chat_id, control.pause(parse_duration(intent.argument)))
         elif action == "resume":
@@ -308,8 +326,6 @@ def build_nl_router(
             activity_responder.respond(chat_id, text, intent.argument)
         elif action == "sleep" and sleep_provider is not None:
             sleep_provider(chat_id, intent.argument)
-        elif action == "care" and care_provider is not None:
-            notifier.send_text(chat_id, care_provider(intent.argument))
         elif action == "weather" and weather_provider is not None:
             notifier.send_text(chat_id, weather_provider())
         elif action == "machine" and machine_provider is not None:
@@ -324,14 +340,17 @@ def build_nl_router(
         if hasattr(notifier, "send_chat_action")
         else None
     )
-    return NaturalLanguageRouter(
+    router = NaturalLanguageRouter(
         client,
         app_config.ollama.llm_model,
         finder.findable_labels,
         dispatch,
         notifier.send_text,
         typing=typing,
+        pending=pending_store,
     )
+    router_ref.append(router)
+    return router
 
 
 def home_report(ptz_manager, hosts) -> str:
@@ -447,6 +466,8 @@ def make_console_dispatcher(
     quality_provider,
     snapshot_text,
     stop_event: threading.Event,
+    rgb_provider=None,
+    health=None,
 ) -> ConsoleDispatcher:
     """Build the terminal-chat dispatcher: same providers, replies to the console.
 
@@ -483,12 +504,17 @@ def make_console_dispatcher(
         ActivityResponder(
             memories_dir,
             ollama_client,
-            app_config.ollama.llm_model,
+            app_config.ollama.recall_model,
             detector.known_labels,
             notify=console_notifier.send_text,
             send_album=None,
             find=lambda cid, arg: emit(console_find(cid, arg)),
             pronoun_note=pronoun_sentence(pronouns),
+            fallback_model=app_config.ollama.llm_model,
+            latitude=app_config.latitude,
+            longitude=app_config.longitude,
+            utc_offset_hours=app_config.utc_offset_hours,
+            health=health,
         )
         if ollama_client is not None
         else None
@@ -504,16 +530,18 @@ def make_console_dispatcher(
         find_provider=console_find,
         discover_provider=discover_provider,
         restart_provider=restart_provider,
-        detection_provider=detection_provider,
         status_provider=status_provider,
         snapshot_provider=snapshot_text,
         home_provider=home_provider,
         quality_provider=quality_provider,
         activity_responder=activity_responder,
         memory=ConversationMemory() if ollama_client is not None else None,
-        # The console has no live-state plumbing here, but care knowledge still
-        # grounds diet/sleep/health questions in the terminal chat.
-        chat_context=lambda text: build_chat_context(text, member_species=member_species),
+        # The console has no live-state plumbing here, so terminal chat is ungrounded.
+        chat_context=None,
+        # No pending store on purpose: a console-queued message would be replayed
+        # through the TELEGRAM router/notifier after a restart and land in the
+        # wrong place. Console outages get the plain "unreachable" notice.
+        pending_store=None,
     )
 
     def nl_handle(chat_id: int, text: str) -> None:
@@ -541,6 +569,7 @@ def make_console_dispatcher(
         ),
         home_text=home_provider,
         quality_text=quality_provider,
+        rgb_text=rgb_provider,
         toggle_logs=ConsoleLogToggle().toggle,
         on_quit=stop_event.set,
     )
@@ -588,12 +617,24 @@ def main() -> None:
     notifier = build_notifier(app_config)
 
     # One shared Ollama client for every AI feature (NL routing, chat, vision
-    # scene descriptions, camera naming). None when the AI is disabled.
+    # scene descriptions, camera naming). None when the AI is disabled. The
+    # health monitor gates every call during a known outage (instant failure →
+    # the work is queued for backfill instead of hanging on dead connects); the
+    # usage recorder accumulates per-model token/latency accounting (/tokens).
+    ollama_health = OllamaHealth(app_config.ollama.base_url) if app_config.ollama.enabled else None
+    llm_usage = (
+        LlmUsageRecorder(app_config.collect.directory.parent / "llm_usage.json")
+        if app_config.ollama.enabled
+        else None
+    )
     ollama_client = (
         OllamaClient(
             app_config.ollama.base_url,
             timeout_seconds=app_config.ollama.timeout_seconds,
             vision_concurrency=app_config.ollama.vision_concurrency,
+            health=ollama_health,
+            keep_alive=app_config.ollama.keep_alive,
+            usage=llm_usage,
         )
         if app_config.ollama.enabled
         else None
@@ -606,6 +647,16 @@ def main() -> None:
     )
     stop_event = threading.Event()
     install_signal_handlers(stop_event)
+    if ollama_health is not None:
+        ollama_health.start(stop_event)
+
+    # Messages that needed the LLM while it was down are saved here and replayed
+    # by the backfill worker after recovery — typed during an outage ≠ lost.
+    pending_store = (
+        PendingMessageStore(app_config.collect.directory.parent / "pending_llm")
+        if app_config.ollama.enabled
+        else None
+    )
 
     # Shared privacy/pause state. /pause (or "stop the cams") flips it on and
     # every camera thread releases its stream; /play flips it back. Created here
@@ -642,6 +693,18 @@ def main() -> None:
     )
     detection_logger = DetectionLogger(app_config.collect.directory.parent / "detection")
 
+    # RGB status display: drive the motherboard / header / strip LEDs to mirror
+    # aviary state — a loading-wave during discovery, each bird's signature color
+    # on detection, a single LED at night. Built before the supervisor so the
+    # per-detection hook can be threaded into the camera monitor threads. Disabled
+    # unless RGB_ENABLED=1, and never fatal if the OpenRGB server is absent.
+    rgb_controller = build_rgb_controller(stop_event, app_config, ir_state)
+    if rgb_controller is not None:
+        rgb_controller.bind_discovery(discovery_progress)
+        ir_state.add_listener(rgb_controller.on_ir)
+        rgb_controller.start()
+        LOGGER.info("RGB status display on (%s)", app_config.rgb_host)
+
     # Delivery runs off the capture threads. The prepare stage is light (collect
     # + snapshot write), and the single Telegram worker is unaffected by this
     # pool size, so a small fixed pool is plenty regardless of how many cameras
@@ -663,6 +726,7 @@ def main() -> None:
         ir_state=ir_state,
         quality=quality_controller,
         detection_logger=detection_logger,
+        rgb_reaction=rgb_controller.on_detection if rgb_controller is not None else None,
     )
 
     # /userinfo stays available, /status exposes the runtime data, and /discover
@@ -785,6 +849,29 @@ def main() -> None:
             vlm_image,
             context=context,
             max_dim=None if frame is not None else MAX_VLM_DIM,
+            timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
+        )
+
+    def detect_frame(image: bytes) -> list:
+        # The detector's raw hits (label + confidence + box) for a JPEG frame, in
+        # that frame's pixel coordinates. The memory pipeline uses these to draw
+        # labeled boxes on the saved photo and to store what was seen. Empty on a
+        # bad decode.
+        frame = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+        return detector.predict(frame) if frame is not None else []
+
+    def analyze_memory_frame(image: bytes, labels: list) -> dict:
+        # Structured per-bird analysis of an already-annotated (boxed) memory frame:
+        # the VLM sees each bird's LABELED box, so it reports activity/posture/health
+        # for the right bird instead of re-guessing identity. Returns {} when the VLM
+        # is off so the pipeline still stores YOLO identity + boxes.
+        if ollama_client is None:
+            return {}
+        return analyze_frame(
+            ollama_client,
+            app_config.ollama.vlm_model,
+            image,
+            labels,
             timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
         )
 
@@ -999,25 +1086,11 @@ def main() -> None:
     # Activity Q&A ("what did percy do today?") reads the collected-photos log;
     # conversation memory keeps ~20 turns per chat for coherent follow-ups.
     memory = ConversationMemory() if ollama_client is not None else None
-    def care_answer(text: str) -> str | None:
-        # A grounded care answer when ``text`` is actually a care question, else
-        # None — so a care Q routed to the activity path doesn't dead-end.
-        if ollama_client is None:
-            return None
-        context = build_chat_context(text, member_species=member_species)
-        if context is None:
-            return None
-        try:
-            return chat_reply(ollama_client, app_config.ollama.llm_model, text, context=context)
-        except Exception:
-            LOGGER.exception("Care answer failed")
-            return None
-
     activity_responder = (
         ActivityResponder(
             memories_dir,
             ollama_client,
-            app_config.ollama.llm_model,
+            app_config.ollama.recall_model,
             detector.known_labels,
             notify=notifier.send_text,
             send_album=notifier.send_album,
@@ -1025,7 +1098,11 @@ def main() -> None:
             # find; send its ack and let the search push its own photo + report.
             find=lambda cid, arg: notifier.send_text(cid, find_provider(cid, arg)),
             pronoun_note=pronoun_note,
-            care_answer=care_answer,
+            fallback_model=app_config.ollama.llm_model,
+            latitude=app_config.latitude,
+            longitude=app_config.longitude,
+            utc_offset_hours=app_config.utc_offset_hours,
+            health=ollama_health,
         )
         if (ollama_client is not None and notifier is not None and finder is not None)
         else None
@@ -1105,18 +1182,13 @@ def main() -> None:
 
         threading.Thread(target=work, name="sleep", daemon=True).start()
 
-    def care_provider(argument: str) -> str:
-        # The /care guide — pure + fast, so it answers inline (no thread/AI).
-        return care_reply(argument, member_species=member_species)
-
     # Natural-language routing: free-text Telegram messages ("stop the cams",
     # "where's percy?") are classified by Ollama and dispatched to the same
     # providers as the slash commands. Wired only when a notifier exists (to
     # reply) and Ollama is enabled; degrades gracefully if Ollama is unreachable.
     def chat_context_provider(text: str) -> str | None:
         # Live system state for grounded chat answers ("how are things?", "is it
-        # dark yet?", "are the cameras ok?"). Snapshots the shared stats under its
-        # lock; the care knowledge is folded in by build_chat_context.
+        # dark yet?", "are the cameras ok?"). Snapshots the shared stats under its lock.
         with stats_lock:
             snaps = [camera.snapshot() for camera in stats.values()]
         healthy = sum(
@@ -1142,7 +1214,7 @@ def main() -> None:
             daylight=daylight,
             autofind_on=auto_finder.enabled if auto_finder is not None else None,
         )
-        return build_chat_context(text, system_state=system_state, member_species=member_species)
+        return build_chat_context(text, system_state=system_state)
 
     # /weather: today's outlook + bird-safety advice, fetched on demand. Stays
     # None (command hidden) until a location is configured in .env, so we never
@@ -1153,10 +1225,18 @@ def main() -> None:
             forecast = fetch_forecast(app_config.latitude, app_config.longitude)
             if forecast is None:
                 return "Couldn't reach the weather service just now — try again shortly."
+            sunrise, sunset = sun_times(
+                now_ph().date(),
+                app_config.latitude,
+                app_config.longitude,
+                app_config.utc_offset_hours,
+            )
             return summarize_weather(
                 forecast,
                 hot_c=app_config.weather_hot_c,
                 cold_c=app_config.weather_cold_c,
+                sunrise=sunrise,
+                sunset=sunset,
             )
 
         weather_provider = _weather_summary
@@ -1193,10 +1273,33 @@ def main() -> None:
         memory=memory,
         chat_context=chat_context_provider,
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
-        care_provider=care_provider,
         weather_provider=weather_provider,
         machine_provider=machine_frames.snapshot,
+        pending_store=pending_store,
     )
+    if activity_responder is not None and nl_router is not None:
+        # An activity question that finds the whole cluster down is queued for
+        # replay too, instead of degrading to a raw journal line — except while
+        # ANSWERING a replay, where the outage must propagate so the worker keeps
+        # the original item (a re-queue would reset its give-up counter).
+        def queue_activity_question(chat_id: int, text: str) -> None:
+            if nl_router.replaying():
+                raise OllamaUnavailableError("cluster went down while replaying")
+            nl_router.queue_message(chat_id, text)
+
+        activity_responder.set_on_unavailable(queue_activity_question)
+        activity_responder.set_replaying(nl_router.replaying)
+
+    def memory_stats_provider() -> str:
+        # /memory: history size, backfill debt, photo store, disk usage. Works
+        # with the AI off too — the day files are plain disk state.
+        return format_memory_stats(
+            gather_memory_stats(
+                memories_dir,
+                pending_count=pending_store.count() if pending_store is not None else 0,
+                data_dir=app_config.collect.directory.parent,
+            )
+        )
 
     start_command_thread(
         app_config.telegram.bot_token,
@@ -1218,9 +1321,13 @@ def main() -> None:
         photo_provider=photo_provider if ollama_client is not None else None,
         activity_provider=activity_provider if activity_responder is not None else None,
         sleep_provider=sleep_provider if sleep_tracker is not None else None,
-        care_provider=care_provider,
         weather_provider=weather_provider,
         machine_frame=machine_frames.frame,
+        rgb_provider=rgb_controller.command if rgb_controller is not None else None,
+        memory_stats_provider=memory_stats_provider,
+        tokens_provider=(
+            (lambda: format_usage(llm_usage.snapshot())) if llm_usage is not None else None
+        ),
     )
     if auto_finder is not None:
         auto_finder.start()
@@ -1258,11 +1365,14 @@ def main() -> None:
             memories_dir,
             registry,
             grab_frame,
-            describe_frame,
             ollama_client,
             app_config.ollama.llm_model,
             notifier,
             stop_event,
+            detect_frame=detect_frame,
+            analyze=analyze_memory_frame,
+            detector_model=",".join(p.name for p in app_config.model.paths),
+            vlm_model=app_config.ollama.vlm_model,
             interval_seconds=app_config.memory_interval_minutes * 60.0,
             camera_display=namer.display,
             pronoun_note=pronoun_note,
@@ -1274,39 +1384,21 @@ def main() -> None:
             "on" if app_config.raw_photo_alerts else "off",
         )
 
-    # Daily/weekly care reminders (fresh food + water, produce pickup, midday
-    # enrichment, wind-down, bedtime, weekly clean + weigh) keyed to the observed
-    # light (cameras leaving/entering IR) and PH sunrise/sunset. Independent of
-    # the AI — it only needs a notifier to talk to.
-    if notifier is not None and app_config.care_reminders:
-        def last_night_sleep() -> str | None:
-            # Last night's sleep one-liner folded into the morning nudge — only
-            # when it's genuinely LAST night (its evening was yesterday) and
-            # already finalized, never a stale older night.
-            if sleep_tracker is None:
-                return None
-            night = sleep_tracker.last_finalized()
-            if night is None or night.night_of != now_ph().date() - timedelta(days=1):
-                return None
-            from lib.sleep import format_morning
-
-            return format_morning(night)
-
-        CareScheduler(
-            notifier.broadcast_text,
+    # Backfill: when the cluster recovers, replay the messages queued during the
+    # outage (answering each), then re-run the VLM on journal observations that
+    # were written without analysis — so an outage costs latency, not memories.
+    if ollama_client is not None and ollama_health is not None and pending_store is not None:
+        LlmBackfillWorker(
+            pending_store,
+            ollama_health,
             stop_event,
-            all_ir=ir_state.all_ir,
-            camera_count=lambda: len(ir_state.known()),
-            sun_times=lambda day: sun_times(
-                day, app_config.latitude, app_config.longitude, app_config.utc_offset_hours
+            replay=nl_router.replay_pending if nl_router is not None else None,
+            notify=notifier.send_text if notifier is not None else None,
+            memory_backfill=build_memory_backfill(
+                memories_dir, analyze_memory_frame, app_config.ollama.vlm_model
             ),
-            sleep_summary=last_night_sleep,
-            weekly_tip=lambda: care_tip(now_ph().isocalendar()[1]),
-            state_path=app_config.collect.directory.parent / "care_scheduler.json",
+            llm_model=app_config.ollama.llm_model,
         ).start()
-        LOGGER.info(
-            "Care reminders on (lat=%.4f lon=%.4f)", app_config.latitude, app_config.longitude
-        )
 
     # Presentation: the live dashboard by default, or the interactive terminal
     # chat with --chat. In chat mode we keep the terminal clean — Python logs go
@@ -1434,6 +1526,8 @@ def main() -> None:
                 quality_provider=quality_provider,
                 snapshot_text=snapshot_text,
                 stop_event=stop_event,
+                rgb_provider=rgb_controller.command if rgb_controller is not None else None,
+                health=ollama_health,
             )
             run_terminal_chat(console_dispatcher, stop_event)
         else:
@@ -1452,6 +1546,8 @@ def main() -> None:
                 LOGGER.exception("Server-stopping broadcast failed")
         if dashboard is not None:
             dashboard.stop()
+        if rgb_controller is not None:
+            rgb_controller.stop()  # blank the LEDs cleanly
         if stderr_redirect is not None:
             stderr_redirect.stop()
         supervisor.join()

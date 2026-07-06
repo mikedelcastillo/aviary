@@ -23,7 +23,7 @@ import time
 
 import requests
 
-from lib.ai.chat import chat_reply
+from lib.ai.chat import CHAT_FALLBACK, chat_reply
 from lib.ai.client import OllamaClient
 from lib.ai.intent import classify_intent
 from lib.ai.vlm import describe_scene, name_camera_view
@@ -68,7 +68,7 @@ INTENT_TESTS: list[tuple[str, str]] = [
     ("did pizza eat today?", "activity"),
     ("did matcha and jynx spend time together?", "activity"),
     ("when did the birds go in their cage?", "activity"),
-    ("are the birds asleep?", "activity"),
+    ("are the birds asleep?", "chat"),  # live-state question — the 'chat' path has day/night state
     ("hello there", "chat"),
     ("good morning", "chat"),
 ]
@@ -76,9 +76,25 @@ INTENT_TESTS: list[tuple[str, str]] = [
 # A representative few for --quick.
 QUICK_TESTS = INTENT_TESTS[:1] + INTENT_TESTS[4:5] + INTENT_TESTS[7:9] + INTENT_TESTS[13:14] + INTENT_TESTS[19:21]
 
+# Free-text messages that exercise the CHAT reply path (greeting, care, health,
+# feeding). A REASONING model (qwen3) returns EMPTY content on these — it spends
+# the whole token budget "thinking" and gets truncated — so they land on the
+# CHAT_FALLBACK. This smoke set surfaces that: any fallback here means the model
+# is a poor fit for chat. Intent accuracy alone would hide it (structured JSON
+# masks the problem), which is exactly how the qwen3:4b regression slipped in.
+CHAT_SMOKE = [
+    "good morning, how are the birds?",
+    "can they eat avocado?",
+    "how long should cockatiels sleep?",
+    "why is percy fluffed up?",
+    "what should I feed them?",
+]
+
 # Vision models worth trying that the user may not have pulled yet.
 SUGGESTED_VLMS = "llama3.2-vision:11b (richer scenes), moondream (fastest), minicpm-v"
-SUGGESTED_LLMS = "qwen3:1.7b (faster routing), llama3.1:8b"
+# Prefer an INSTRUCT model for the LLM role: a reasoning model (qwen3) empties out
+# on chat (see CHAT_SMOKE). gemma3:4b is the tested pick; gemma3:12b for more depth.
+SUGGESTED_LLMS = "gemma3:4b (tested default), gemma3:12b (richer), llama3.2:3b"
 
 
 def _models(client: OllamaClient) -> list[dict]:
@@ -106,6 +122,24 @@ def _sample_image() -> bytes | None:
 # -- single message pipeline ------------------------------------------------
 
 
+def _sample_chat_context(text: str) -> str | None:
+    """A representative 'Current aviary state' block, so harness chat is grounded
+    like the live server (which always passes one). Uses a fixed daytime scene."""
+    from datetime import datetime
+
+    from lib.ai.context import build_chat_context, format_system_state
+
+    state = format_system_state(
+        datetime(2026, 7, 3, 9, 30),
+        cameras_total=4,
+        cameras_healthy=4,
+        visible_text="Percy (Big Cage); Pizza (Play Gym)",
+        daylight="day",
+        autofind_on=True,
+    )
+    return build_chat_context(text, system_state=state)
+
+
 def run_pipeline(client, cfg, birds, species_members, text: str) -> None:
     print(f"\n\033[1mYOU>\033[0m {text}")
     started = time.time()
@@ -123,16 +157,22 @@ def run_pipeline(client, cfg, birds, species_members, text: str) -> None:
         print(f"  dispatch: would /find -> search for {len(targets)} label(s)")
     elif intent.action == "pause":
         print(f"  dispatch: would PAUSE (duration arg {intent.argument!r})")
-    elif intent.action in ("resume", "discover", "status", "snapshot"):
-        print(f"  dispatch: would run /{intent.action}")
-    else:  # chat
+    elif intent.action == "chat":
+        # Ground the reply in a sample live-state block, exactly as the live server
+        # does — otherwise the harness tests an ungrounded path the bot never runs
+        # and the model hallucinates bird activity that isn't there.
         t0 = time.time()
         try:
-            reply = chat_reply(client, cfg.llm_model, text)
+            reply = chat_reply(client, cfg.llm_model, text, context=_sample_chat_context(text))
         except Exception as exc:
             print(f"  chat: ERROR: {exc}")
             return
         print(f"  chat    ({time.time()-t0:.1f}s): {reply!r}")
+    else:
+        # Every other action maps to a live slash command; the server dispatches it
+        # to that provider, NOT to chat. Show that instead of faking a chat reply.
+        arg = f" {intent.argument!r}" if intent.argument else ""
+        print(f"  dispatch: would run /{intent.action}{arg}")
 
 
 def run_repl(client, cfg, birds, species_members) -> None:
@@ -150,13 +190,35 @@ def run_repl(client, cfg, birds, species_members) -> None:
 # -- benchmarks -------------------------------------------------------------
 
 
+def _chat_fallback_rate(client, name) -> tuple[int, float]:
+    """Run CHAT_SMOKE through the real reply path; count empty/fallback replies.
+
+    Returns (fallbacks, avg_latency). A non-zero fallback count means the model
+    keeps returning empty/degenerate content on plain chat — the tell-tale sign of
+    a reasoning model whose thinking eats the token budget. This is measured via
+    the SAME ``chat_reply`` the bot uses, so the harness sees what the user sees.
+    """
+    fallbacks = 0
+    total = 0.0
+    for message in CHAT_SMOKE:
+        t0 = time.time()
+        try:
+            reply = chat_reply(client, name, message)
+            if not reply or reply == CHAT_FALLBACK:
+                fallbacks += 1
+        except Exception:
+            fallbacks += 1
+        total += time.time() - t0
+    return fallbacks, total / len(CHAT_SMOKE)
+
+
 def benchmark_llms(client, models, birds, tests) -> None:
     text_models = [
         m["name"]
         for m in models
         if "completion" in _capabilities(m) and "embedding" not in _capabilities(m)
     ]
-    print(f"\n\033[1m=== LLM intent benchmark ({len(tests)} prompts) ===\033[0m")
+    print(f"\n\033[1m=== LLM benchmark: intent ({len(tests)} prompts) + chat smoke ({len(CHAT_SMOKE)}) ===\033[0m")
     print(f"models: {', '.join(text_models)}\n")
     results = []
     for name in text_models:
@@ -174,11 +236,19 @@ def benchmark_llms(client, models, birds, tests) -> None:
             total_latency += time.time() - t0
         accuracy = correct / len(tests) * 100
         avg = total_latency / len(tests)
-        results.append((name, accuracy, avg, failures))
-        print(f"  {name:18s}  acc={accuracy:5.1f}%  avg={avg:5.2f}s/req  fails={failures}")
+        chat_fallbacks, chat_avg = _chat_fallback_rate(client, name)
+        results.append((name, accuracy, avg, failures, chat_fallbacks, chat_avg))
+        warn = "  \033[31m⚠ chat empties — reasoning model?\033[0m" if chat_fallbacks else ""
+        print(
+            f"  {name:18s}  intent acc={accuracy:5.1f}% ({avg:4.2f}s)  "
+            f"chat fallbacks={chat_fallbacks}/{len(CHAT_SMOKE)} ({chat_avg:4.1f}s)  fails={failures}{warn}"
+        )
     if results:
-        best = sorted(results, key=lambda r: (-r[1], r[2]))[0]
-        print(f"\n  \033[1m→ best LLM: {best[0]}\033[0m (acc {best[1]:.0f}%, {best[2]:.2f}s/req)")
+        # Rank by usable-for-chat first (fewest fallbacks), then intent accuracy,
+        # then speed — a model that empties out on chat is disqualified however
+        # accurately it routes intents.
+        best = sorted(results, key=lambda r: (r[4], -r[1], r[2]))[0]
+        print(f"\n  \033[1m→ best LLM: {best[0]}\033[0m (intent {best[1]:.0f}%, {best[4]} chat fallbacks, {best[2]:.2f}s/req)")
         print(f"  not installed but worth trying: {SUGGESTED_LLMS}")
 
 
@@ -218,6 +288,12 @@ def main() -> None:
     parser.add_argument("--birds", help="comma-separated findable labels override")
     args = parser.parse_args()
 
+    # Load .env so the harness talks to the SAME Ollama the server does (the Olla
+    # base URL + models live there); otherwise it silently falls back to the
+    # localhost defaults and benchmarks a different backend than production runs.
+    from dotenv import load_dotenv
+
+    load_dotenv()
     cfg = _ollama_config()
     client = OllamaClient(cfg.base_url, timeout_seconds=cfg.timeout_seconds)
     birds = [b.strip() for b in args.birds.split(",")] if args.birds else DEFAULT_BIRDS

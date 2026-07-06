@@ -75,6 +75,21 @@ def test_summarize_includes_outlook_and_advice():
     assert "🔥" in text  # hot warning folded in
 
 
+def test_summarize_includes_sun_times_when_given():
+    from datetime import time
+    fc = WeatherForecast("2026-06-30", high_c=28.0, low_c=22.0, condition="clear", current_c=25.0)
+    text = summarize(fc, hot_c=32.0, cold_c=10.0, sunrise=time(5, 47), sunset=time(18, 21))
+    # "what time was sunrise?" (routes to weather) gets a real answer.
+    assert "Sunrise 5:47 AM" in text
+    assert "Sunset 6:21 PM" in text
+
+
+def test_summarize_omits_sun_line_without_times():
+    fc = WeatherForecast("2026-06-30", high_c=28.0, low_c=22.0, condition="clear")
+    text = summarize(fc, hot_c=32.0, cold_c=10.0)
+    assert "Sunrise" not in text and "Sunset" not in text
+
+
 def test_has_location():
     assert has_location(14.6, 121.0) is True
     assert has_location(0.0, 0.0) is False

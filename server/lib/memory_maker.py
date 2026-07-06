@@ -25,10 +25,12 @@ from pathlib import Path
 from typing import Callable
 
 from lib.activity import summarise_activity
+from lib.ai.client import OllamaBusyError, OllamaUnavailableError
 from lib.clock import now_ph
 from lib.find import currently_visible
 from lib.imaging import downscale_jpeg
 from lib.journal import MemoryEntry, MemoryObservation, append_entry
+from lib.memory_build import annotate, build_observation
 from lib.labels import pretty
 
 
@@ -53,12 +55,15 @@ class MemoryMaker:
         memories_dir: Path,
         registry,
         grab_frame: Callable[[str], bytes | None],
-        describe_frame: Callable[[bytes], str | None],
         client,
         llm_model: str,
         notifier,
         stop_event: threading.Event,
         *,
+        detect_frame: Callable[[bytes], list] | None = None,
+        analyze: Callable[[bytes, list], dict] | None = None,
+        detector_model: str = "",
+        vlm_model: str = "",
         interval_seconds: float = 300.0,
         poll_seconds: float = 30.0,
         fresh_seconds: float = 15.0,
@@ -75,7 +80,10 @@ class MemoryMaker:
         self._images_dir = self._memories_dir / "images"
         self._registry = registry
         self._grab_frame = grab_frame
-        self._describe_frame = describe_frame
+        self._detect_frame = detect_frame
+        self._analyze = analyze
+        self._detector_model = detector_model
+        self._vlm_model = vlm_model
         self._client = client
         self._llm_model = llm_model
         self._notifier = notifier
@@ -188,8 +196,12 @@ class MemoryMaker:
         cameras = sorted(cam_birds, key=lambda c: (-len(cam_birds[c]), c))[: self._max_cameras]
         when = self._now()
 
-        # 1) Grab + save the frames.
-        shots: list[tuple[bytes, str, list[str], str]] = []  # (image, camera, birds, saved path)
+        # 1) Grab each frame, detect birds ON it, draw labeled boxes, save the
+        #    annotated shot. Detecting the freshly-grabbed frame (rather than reusing
+        #    the tracker's `visible` state) means the boxes, the stored detections and
+        #    the saved photo all agree, and the birds we record are the ones actually
+        #    in THIS frame.
+        shots: list[tuple[bytes, str, list[str], str, list]] = []
         for camera in cameras:
             try:
                 image = self._grab_frame(camera)
@@ -199,42 +211,67 @@ class MemoryMaker:
             if not image:
                 continue
             small = downscale_jpeg(image)
+            detections: list = []
+            if self._detect_frame is not None:
+                try:
+                    detections = self._detect_frame(small) or []
+                except Exception:
+                    LOGGER.exception("Memory detect failed for %s", camera)
+            annotated = annotate(small, detections)
+            # The frame's own detections are the truth for what's in the saved photo;
+            # fall back to the trigger's labels only when detection is unavailable.
+            birds = sorted({d.label for d in detections}) or sorted(set(cam_birds[camera]))
+            # Save the RAW frame (no boxes) — the stored bboxes let boxes be redrawn
+            # any time, so the memory keeps a clean, re-annotatable original. The boxed
+            # `annotated` is used only for the VLM and the Telegram album.
             saved_path = ""
             try:
                 saved_path = str(self._save_image(small, when, camera))
             except Exception:
                 LOGGER.exception("Saving memory image failed")
-            birds = sorted(set(cam_birds[camera]))
-            shots.append((small, camera, birds, saved_path))
+            shots.append((annotated, camera, birds, saved_path, detections))
         if not shots:
             return False
 
-        # 2) Describe each frame (VLM), summarise, remember.
+        # 2) Structured VLM analysis of each ANNOTATED frame (it sees the labeled
+        #    boxes, so activity is attributed to the right bird), then build the v3
+        #    per-bird observation. YOLO stays authoritative for identity.
         raw_observations: list[str] = []
         structured_observations: list[MemoryObservation] = []
-        for image, camera, birds, saved_path in shots:
-            try:
-                note = self._describe_frame(image) if self._describe_frame else None
-            except Exception:
-                LOGGER.exception("Memory describe failed")
-                note = None
-            who = ", ".join(pretty(b) for b in birds)
+        for image, camera, birds, saved_path, detections in shots:
+            analysis: dict | None = None
+            if self._analyze is not None and detections:
+                try:
+                    analysis = self._analyze(image, birds)
+                except (OllamaUnavailableError, OllamaBusyError):
+                    # The entry is still written (identity + photo) with NO
+                    # vlm_model stamp — the backfill worker decorates it from the
+                    # saved photo once the cluster is back / has room.
+                    LOGGER.warning("Memory analyze skipped: Ollama down/busy (will backfill)")
+                except Exception:
+                    LOGGER.exception("Memory analyze failed")
             display_camera = self._camera_display(camera)
-            note = note or "seen"
-            raw_observations.append(f"{who} on {display_camera}: {note}")
-            structured_observations.append(
-                MemoryObservation(
-                    camera=display_camera,
-                    birds=birds,
-                    note=note,
-                    photo=saved_path,
-                )
+            obs = build_observation(
+                detections,
+                camera=display_camera,
+                photo=saved_path,
+                analysis=analysis,
+                detector_model=self._detector_model,
+                vlm_model=self._vlm_model,
             )
+            if not obs.detections:  # no detector hits — keep the trigger birds + a stub
+                obs.birds = birds
+            who = ", ".join(pretty(b) for b in (obs.birds or birds))
+            raw_observations.append(f"{who} on {display_camera}: {obs.note or 'seen'}")
+            structured_observations.append(obs)
         try:
             summary = summarise_activity(
                 self._client, self._llm_model, raw_observations,
                 pronoun_note=self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
             )
+        except OllamaUnavailableError:
+            LOGGER.warning("Memory summary skipped: Ollama down")
+            summary = "; ".join(raw_observations)
         except Exception:
             LOGGER.exception("Memory summary failed")
             summary = "; ".join(raw_observations)
@@ -242,9 +279,9 @@ class MemoryMaker:
         # Only the birds we actually captured a frame for — a bird that was
         # visible on a camera that couldn't produce a frame is NOT reported (so
         # it stays "new" and is retried), nor claimed in the memory entry.
-        captured = {bird for _, _, birds, _ in shots for bird in birds}
+        captured = {bird for shot in shots for bird in shot[2]}
         all_birds = sorted(captured)
-        saved_paths = [path for _, _, _, path in shots if path]
+        saved_paths = [shot[3] for shot in shots if shot[3]]
         journal_note = (
             raw_observations[0]
             if len(raw_observations) == 1
@@ -271,7 +308,7 @@ class MemoryMaker:
         self._reported_set = frozenset(captured)
         header = f"🐦 {when.strftime('%H:%M')} — " + ", ".join(pretty(b) for b in all_birds)
         caption = _clip_caption(f"{header}\n{summary}".strip())
-        items = [(img, caption if i == 0 else None) for i, (img, _, _, _) in enumerate(shots)]
+        items = [(shot[0], caption if i == 0 else None) for i, shot in enumerate(shots)]
         self._activity_msgs = self._notifier.broadcast_album_tracked(items)
         self._last_is_caption = True
         if not self._activity_msgs:

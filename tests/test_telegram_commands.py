@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from lib.detector import Detection
 from lib.dashboard import _format_frame_age
@@ -1017,41 +1018,6 @@ def test_sleep_command_passes_argument_to_provider(monkeypatch) -> None:
     assert seen == [(123, "week")]
 
 
-def test_care_command_sends_provider_reply(monkeypatch) -> None:
-    from lib.telegram.commands import COMMAND_DESCRIPTIONS
-
-    assert "/care" in COMMAND_DESCRIPTIONS
-
-    stop_event = threading.Event()
-    sent: list[str] = []
-    seen_args: list[str] = []
-
-    def post(_url, json, timeout):
-        if "text" not in json:
-            return Response()
-        sent.append(json["text"])
-        stop_event.set()
-        return Response()
-
-    def care_provider(argument: str) -> str:
-        seen_args.append(argument)
-        return f"🐦 care: {argument or 'overview'}"
-
-    monkeypatch.setattr("lib.telegram.commands.requests.get", _single_update("/care diet"))
-    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
-
-    run_command_bot(
-        "token",
-        allowed_user_ids=["111"],
-        stop_event=stop_event,
-        poll_timeout_seconds=0,
-        care_provider=care_provider,
-    )
-
-    assert seen_args == ["diet"]
-    assert sent == ["🐦 care: diet"]
-
-
 def test_command_bot_survives_a_handler_exception(monkeypatch) -> None:
     """A handler raising must not kill the poll thread; the bot keeps serving.
 
@@ -1151,6 +1117,86 @@ def test_captioned_photo_command_keeps_its_argument(monkeypatch) -> None:
     assert seen_targets == ["percy"]
 
 
+def test_free_text_with_ai_off_tells_allowed_user_instead_of_silence(monkeypatch) -> None:
+    """Free text from an allowed user with nl_provider=None gets an "AI off" reply.
+
+    Regression: with OLLAMA_ENABLED=0 the bot silently dropped non-command
+    messages, which reads as a broken bot; it must say the AI chat is off.
+    """
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+
+    def post(_url, json, timeout):
+        # Skip the startup setMyCommands registration; record only replies.
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    monkeypatch.setattr(
+        "lib.telegram.commands.requests.get", _single_update("how are the birds?")
+    )
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+    )
+
+    assert sent_messages == ["🤖 AI chat is off (OLLAMA_ENABLED=0) — use a /command."]
+
+
+def test_free_text_from_unauthorized_user_gets_no_reply(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    polls = {"n": 0}
+
+    def get(_url, params, timeout):
+        # Serve the stranger's message once, then stop after a second poll so
+        # the loop has fully handled the update before we assert on silence.
+        polls["n"] += 1
+        if polls["n"] == 1:
+            return Response(
+                {
+                    "result": [
+                        {
+                            "update_id": 1,
+                            "message": {
+                                "text": "hello there",
+                                "from": {"id": 999},
+                                "chat": {"id": 123},
+                            },
+                        }
+                    ]
+                }
+            )
+        stop_event.set()
+        return Response({"result": []})
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+    )
+
+    # A stranger's free text is ignored entirely — no "AI off" hint, no
+    # "Unauthorized." — so the bot never reveals itself to unknown senders.
+    assert sent_messages == []
+
+
 def test_find_command_registers_ack_message_for_progress_edits(monkeypatch) -> None:
     stop_event = threading.Event()
     attached: list[int | None] = []
@@ -1190,3 +1236,209 @@ def test_find_command_registers_ack_message_for_progress_edits(monkeypatch) -> N
     )
 
     assert attached == [88]
+
+
+def test_tokens_command_replies_with_usage_report(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/tokens",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        tokens_provider=lambda: "🔤 LLM usage since Jul 04",
+    )
+
+    assert sent_messages == ["🔤 LLM usage since Jul 04"]
+
+
+def test_memory_command_acks_then_edits_in_report(monkeypatch) -> None:
+    # /memory scans disk off the poll loop: an immediate ack message, then the
+    # report edited in when the scan finishes.
+    stop_event = threading.Event()
+    calls: list[tuple[str, str]] = []  # (api_method, text)
+    done = threading.Event()
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/memory",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" not in json:
+            return Response()
+        method = url.rsplit("/", 1)[-1]
+        calls.append((method, json["text"]))
+        stop_event.set()
+        if method == "editMessageText":
+            done.set()
+        return Response({"result": {"message_id": 55}})
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        memory_stats_provider=lambda: "🧠 Memory\nDays: 9",
+    )
+    assert done.wait(5.0), "report edit never happened"
+
+    assert calls[0][0] == "sendMessage" and "Crunching" in calls[0][1]
+    assert calls[-1][0] == "editMessageText" and "Days: 9" in calls[-1][1]
+
+
+def test_memory_and_tokens_commands_require_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen = []
+
+    def get(_url, params, timeout):
+        if seen:
+            stop_event.set()
+            return Response({"result": []})
+        seen.append(True)
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {"text": "/memory", "from": {"id": 999}, "chat": {"id": 123}},
+                    },
+                    {
+                        "update_id": 2,
+                        "message": {"text": "/tokens", "from": {"id": 999}, "chat": {"id": 123}},
+                    },
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        memory_stats_provider=lambda: "stats",
+        tokens_provider=lambda: "tokens",
+    )
+
+    assert sent_messages == ["Unauthorized.", "Unauthorized."]
+
+
+def test_memory_command_scans_one_at_a_time(monkeypatch) -> None:
+    # A batch of queued /memory taps must not launch parallel full-disk scans:
+    # the second tap gets a "hang on" while the first scan is still running.
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    release_scan = threading.Event()
+    done = threading.Event()
+    seen = []
+
+    def get(_url, params, timeout):
+        if seen:
+            stop_event.set()
+            return Response({"result": []})
+        seen.append(True)
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {"text": "/memory", "from": {"id": 111}, "chat": {"id": 123}},
+                    },
+                    {
+                        "update_id": 2,
+                        "message": {"text": "/memory", "from": {"id": 111}, "chat": {"id": 123}},
+                    },
+                ]
+            }
+        )
+
+    def post(url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        if url.endswith("/editMessageText"):
+            done.set()
+        return Response({"result": {"message_id": 9}})
+
+    def slow_provider() -> str:
+        release_scan.wait(5.0)
+        return "🧠 Memory report"
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    bot = threading.Thread(
+        target=lambda: run_command_bot(
+            "token",
+            allowed_user_ids=["111"],
+            stop_event=stop_event,
+            poll_timeout_seconds=0,
+            memory_stats_provider=slow_provider,
+        ),
+        daemon=True,
+    )
+    bot.start()
+    # Both taps handled: one scan started, the other turned away immediately.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if any("hang on" in m for m in sent_messages):
+            break
+        time.sleep(0.02)
+    release_scan.set()
+    assert done.wait(5.0), "the running scan never delivered its report"
+    bot.join(timeout=5.0)
+
+    assert sum(1 for m in sent_messages if "Crunching" in m) == 1
+    assert sum(1 for m in sent_messages if "hang on" in m) == 1
+    assert any("Memory report" in m for m in sent_messages)

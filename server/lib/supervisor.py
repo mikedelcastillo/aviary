@@ -207,6 +207,7 @@ class CameraSupervisor:
         ir_state: IRState | None = None,
         quality: StreamQualityController | None = None,
         detection_logger: DetectionLogger | None = None,
+        rgb_reaction: Callable[[str, list, bool], None] | None = None,
     ) -> None:
         self._app_config = app_config
         self._detector = detector
@@ -219,6 +220,8 @@ class CameraSupervisor:
         self._ir_state = ir_state
         self._quality = quality
         self._detection_logger = detection_logger
+        # Optional RGB status-display hook, threaded down to every monitor thread.
+        self._rgb_reaction = rgb_reaction
         # Shared privacy/pause state. Passed to every monitor thread so a pause
         # stops all cameras consuming their streams at once.
         self._control = control
@@ -284,6 +287,7 @@ class CameraSupervisor:
                     self._ir_state,
                     self._quality,
                     self._detection_logger,
+                    self._rgb_reaction,
                 ),
                 name=f"camera-{host}",
                 daemon=True,

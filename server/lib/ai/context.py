@@ -1,24 +1,17 @@
-"""Assemble grounding context for the chat/Q&A path so it can answer anything.
+"""Assemble grounding context for the chat/Q&A path.
 
-The free-text "chat" reply used to be state-blind and knowledge-free, so it
-could only chit-chat. This module gives it two kinds of grounding:
-
-  * the live SYSTEM state (time, day/night, camera health, who's visible,
-    privacy/auto-find) — so "how are things?", "is it dark yet?", "are the
-    cameras ok?" get real answers, and
-  * the relevant CARE knowledge (:mod:`lib.care`) — so "can they eat avocado?",
-    "how long should they sleep?" are answered accurately.
+The free-text "chat" reply is grounded in the live SYSTEM state (time, day/night,
+camera health, who's visible, privacy/auto-find) so "how are things?", "is it
+dark yet?", "are the cameras ok?" get real answers instead of blind chit-chat.
 
 ``format_system_state`` is pure (takes already-resolved values) so it is unit
-testable; the live wiring in ``main`` gathers the values and joins the two
-blocks via :func:`build_chat_context`.
+testable; the live wiring in ``main`` gathers the values and passes the block via
+:func:`build_chat_context`.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-
-from lib.care import care_context
 
 
 def format_system_state(
@@ -75,22 +68,11 @@ def format_system_state(
     return header + "\n" + "\n".join(lines)
 
 
-def build_chat_context(
-    text: str,
-    *,
-    system_state: str | None = None,
-    member_species: dict[str, str] | None = None,
-) -> str | None:
-    """Join the live system-state block with the care-knowledge block, or None.
+def build_chat_context(text: str = "", *, system_state: str | None = None) -> str | None:
+    """The grounding block for the chat path — the live system state, or None.
 
-    Either block may be absent: ``system_state`` is None for callers without
-    live state (e.g. the console), and the care block is None for non-care
-    messages. Returns None only when both are absent.
+    ``text`` is accepted (callers pass the message) but unused: grounding is now
+    purely the live state. ``system_state`` is None for callers without live-state
+    plumbing (e.g. the console), which then get no grounding block.
     """
-    parts = []
-    if system_state:
-        parts.append(system_state)
-    care = care_context(text, member_species=member_species)
-    if care:
-        parts.append(care)
-    return "\n\n".join(parts) if parts else None
+    return system_state or None
