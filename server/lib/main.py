@@ -57,14 +57,17 @@ from lib.find import BirdFinder, currently_visible, format_visible
 from lib.imaging import downscale_array_to_jpeg
 from lib.ir import IRState
 from lib.labels import pretty_labels
+from lib.privacy import PersonScreen
 from lib.ptz import PtzManager
 from lib.quality import StreamQualityController
 from lib.objects import ObjectRegistry
 from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_sentence
+from lib.netid import format_mac
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
 from lib.sleep import SleepTracker, format_status_line
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_progress, format_discovery_report
+from lib.watchlist import CameraRegistry
 from lib.telegram.commands import build_status_message, run_command_bot
 from lib.terminal_logging import NativeStderrRedirect
 from lib.telegram.notifier import TelegramNotifier
@@ -99,7 +102,20 @@ def parse_args() -> argparse.Namespace:
 def build_notifier(app_config: AppConfig) -> TelegramNotifier | None:
     if not app_config.telegram.enabled:
         return None
-    return TelegramNotifier(app_config.telegram.bot_token, app_config.telegram.user_ids)
+    person_screen = None
+    if app_config.privacy.enabled:
+        # Fail fast at boot (like ObjectDetector) rather than fail-closed on
+        # every send: a missing screen model would silently withhold ALL photos.
+        person_screen = PersonScreen(app_config.privacy)
+        LOGGER.info(
+            "Privacy screen on: Telegram photos showing a person are withheld (model=%s)",
+            app_config.privacy.model_path,
+        )
+    return TelegramNotifier(
+        app_config.telegram.bot_token,
+        app_config.telegram.user_ids,
+        person_screen=person_screen,
+    )
 
 
 def install_signal_handlers(stop_event: threading.Event) -> None:
@@ -142,6 +158,7 @@ def start_command_thread(
     rgb_provider: Callable[[str], str] | None = None,
     memory_stats_provider: Callable[[], str] | None = None,
     tokens_provider: Callable[[], str] | None = None,
+    watchlist_provider: Callable[[str], str] | None = None,
 ) -> threading.Thread:
     """Run the Telegram command responder in a background daemon thread."""
     thread = threading.Thread(
@@ -168,6 +185,7 @@ def start_command_thread(
             "rgb_provider": rgb_provider,
             "memory_stats_provider": memory_stats_provider,
             "tokens_provider": tokens_provider,
+            "watchlist_provider": watchlist_provider,
         },
         name="telegram-commands",
         daemon=True,
@@ -712,6 +730,12 @@ def main() -> None:
     dispatcher = AlertDispatcher(app_config, notifier, stop_event, workers=4)
     restart_requested = threading.Event()
 
+    # MAC-keyed camera registry: caches every credential-confirmed camera the
+    # sweeps see and holds the /watchlist allowlist deciding which ones stream.
+    watch_registry = CameraRegistry(
+        cache_path=app_config.collect.directory.parent / "camera_registry.json"
+    )
+
     supervisor = CameraSupervisor(
         app_config,
         detector,
@@ -727,7 +751,24 @@ def main() -> None:
         quality=quality_controller,
         detection_logger=detection_logger,
         rgb_reaction=rgb_controller.on_detection if rgb_controller is not None else None,
+        watchlist=watch_registry,
     )
+
+    def watchlist_provider(argument: str) -> str:
+        """The /watchlist command: list cameras, or allow/remove one by MAC."""
+        arg = (argument or "").strip()
+        if not arg or arg.lower() in ("list", "status"):
+            return supervisor.watchlist_text(namer.display)
+        tokens = arg.split()
+        head = tokens[0].lower()
+        if head in ("allow", "add") and len(tokens) == 2:
+            return supervisor.allow_camera(tokens[1])
+        if head in ("remove", "deny", "rm") and len(tokens) == 2:
+            return supervisor.remove_camera(tokens[1])
+        return (
+            "Usage: /watchlist — list cameras · /watchlist allow <MAC> · "
+            "/watchlist remove <MAC>"
+        )
 
     # /userinfo stays available, /status exposes the runtime data, and /discover
     # re-runs the LAN sweep and starts any new cameras. The status provider must
@@ -760,6 +801,11 @@ def main() -> None:
             known_birds=sorted(pronouns),
             ir_cameras=ir_state.ir_cameras(),
             logged_last_seen=logged_last_seen,
+            camera_mac=lambda name: (
+                format_mac(mac)
+                if (mac := watch_registry.mac_for_host(name.removeprefix("camera-")))
+                else None
+            ),
         )
         # Lead with the privacy banner when paused so /status makes it obvious
         # why every camera reads "paused" and nothing is being recorded.
@@ -1328,6 +1374,7 @@ def main() -> None:
         tokens_provider=(
             (lambda: format_usage(llm_usage.snapshot())) if llm_usage is not None else None
         ),
+        watchlist_provider=watchlist_provider,
     )
     if auto_finder is not None:
         auto_finder.start()

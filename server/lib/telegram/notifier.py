@@ -9,6 +9,7 @@ import time
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import requests
 
@@ -16,6 +17,9 @@ from lib.detector import Detection
 from lib.imaging import downscale_jpeg
 from lib.labels import pretty_labels
 from lib.textfmt import render_telegram_html, to_plain
+
+if TYPE_CHECKING:
+    from lib.privacy import PersonScreen
 
 
 def _error_description(response) -> str:
@@ -58,6 +62,16 @@ RETRY_AFTER_BUFFER_SECONDS = 1.0
 # Fallback pause when a 429 arrives without any retry_after hint.
 RETRY_AFTER_FALLBACK_SECONDS = 1.0
 
+# Sent in place of (or alongside) a delivery whenever the privacy screen keeps
+# a photo off Telegram, so the recipient knows the photo exists but was held.
+PHOTO_WITHHELD_NOTE = "🚫 Photo withheld — a person is in the frame."
+
+
+def _withheld_note(count: int) -> str:
+    if count <= 1:
+        return PHOTO_WITHHELD_NOTE
+    return f"🚫 {count} photos withheld — a person is in the frame."
+
 
 def _chunked(
     items: list[tuple[bytes, str | None]], size: int
@@ -76,10 +90,14 @@ class TelegramNotifier:
         photo_timeout_seconds: int = 120,
         min_send_interval_seconds: float = DEFAULT_MIN_SEND_INTERVAL_SECONDS,
         max_send_retries: int = DEFAULT_MAX_SEND_RETRIES,
+        person_screen: PersonScreen | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.user_ids = user_ids
         self.timeout_seconds = timeout_seconds
+        # Privacy: every outbound photo is screened for people before upload;
+        # a flagged photo is withheld and its message notes why. None = off.
+        self._person_screen = person_screen
         # Photo uploads are far heavier than text and slow uplinks need headroom.
         self.photo_timeout_seconds = photo_timeout_seconds
         self.min_send_interval_seconds = min_send_interval_seconds
@@ -119,6 +137,12 @@ class TelegramNotifier:
         # of re-uploading the bytes, so N recipients cost one upload plus N-1
         # cheap references.
         image_bytes = snapshot_path.read_bytes()
+        if self._photo_blocked(image_bytes):
+            # The alert still goes out — just as text, with the reason the
+            # photo is missing.
+            text = f"{text}\n{PHOTO_WITHHELD_NOTE}"
+            self._broadcast(self.user_ids, lambda user_id: self._send_message(user_id, text))
+            return
         file_id: str | None = None
         uploaded: set[str] = set()
         for user_id in self.user_ids:
@@ -205,8 +229,18 @@ class TelegramNotifier:
         Used where reliability matters more than grouping (find proof, Q&A):
         individual uploads are small and each is retried by the rate gate, so a
         single slow upload can't sink a whole media-group album the way it did
-        before. Returns True on success.
+        before. Returns True on success — including when the privacy screen
+        withholds the photo and the caption+note text is delivered instead
+        (the MESSAGE reached the user; only the image was held back).
         """
+        if self._photo_blocked(image_bytes):
+            note = f"{caption}\n{PHOTO_WITHHELD_NOTE}" if caption else PHOTO_WITHHELD_NOTE
+            try:
+                self._send_message(str(chat_id), note)
+                return True
+            except requests.RequestException as exc:
+                LOGGER.warning("Withheld-photo note to %s failed: %s", chat_id, exc)
+                return False
         try:
             self._send_photo_to_chat(chat_id, image_bytes, caption)
             return True
@@ -248,10 +282,15 @@ class TelegramNotifier:
         """Send an album to EVERY recipient (used by the daycare digest)."""
         if not self.bot_token or not self.user_ids or not items:
             return
-        # Downscale each image ONCE here, not once per recipient inside each send.
-        prepared = [(downscale_jpeg(image), caption) for image, caption in items]
+        # Screen and downscale each image ONCE here, not once per recipient
+        # inside each send.
+        kept, withheld = self._screen_album(list(items))
+        prepared = [(downscale_jpeg(image), caption) for image, caption in kept]
         for user_id in self.user_ids:
-            self.send_album(user_id, prepared, prescaled=True)
+            if prepared:
+                self.send_album(user_id, prepared, prescaled=True, screened=True)
+            if withheld:
+                self.send_text(user_id, _withheld_note(withheld))
 
     def send_album(
         self,
@@ -259,6 +298,7 @@ class TelegramNotifier:
         items: Sequence[tuple[bytes, str | None]],
         *,
         prescaled: bool = False,
+        screened: bool = False,
     ) -> None:
         """Send images to a SINGLE chat as album(s) (used by ``/snapshot``).
 
@@ -272,9 +312,16 @@ class TelegramNotifier:
 
         ``prescaled=True`` means ``items`` are already downscaled (the broadcast
         helpers do it once for all recipients), so the per-image downscale is
-        skipped here.
+        skipped here. ``screened=True`` likewise means the broadcast helper
+        already ran the privacy screen (and sends its own note), so it isn't
+        re-run per recipient.
         """
-        for chunk in _chunked(list(items), MEDIA_GROUP_LIMIT):
+        items = list(items)
+        if not screened:
+            items, withheld = self._screen_album(items)
+            if withheld:
+                self.send_text(chat_id, _withheld_note(withheld))
+        for chunk in _chunked(items, MEDIA_GROUP_LIMIT):
             try:
                 if len(chunk) == 1:
                     image_bytes, caption = chunk[0]
@@ -283,6 +330,46 @@ class TelegramNotifier:
                     self._send_media_group(chat_id, chunk, prescaled=prescaled)
             except requests.RequestException as exc:
                 LOGGER.warning("Album send to %s failed: %s", chat_id, exc)
+
+    # -- privacy screening ---------------------------------------------------
+
+    def _photo_blocked(self, image_bytes: bytes) -> bool:
+        """True when the privacy screen says this image must not leave the
+        machine. FAIL-CLOSED: an unexpected screen error withholds the photo —
+        a leaked face costs more than a missing bird picture."""
+        if self._person_screen is None:
+            return False
+        try:
+            return self._person_screen.has_person(image_bytes)
+        except Exception:
+            LOGGER.exception("Privacy screen errored; withholding photo")
+            return True
+
+    def _screen_album(
+        self, items: list[tuple[bytes, str | None]]
+    ) -> tuple[list[tuple[bytes, str | None]], int]:
+        """Drop items the privacy screen flags; returns (kept, withheld count).
+
+        When the album carries a single LEADING caption (only item 0 captioned —
+        the caretaker/activity pattern, where the caption is the report summary)
+        and that first photo is withheld, the caption moves to the first kept
+        photo so the summary isn't lost with the photo. Per-photo captions
+        (``/snapshot``'s camera names) are never moved between photos.
+        """
+        if self._person_screen is None:
+            return items, 0
+        kept = [(image, caption) for image, caption in items if not self._photo_blocked(image)]
+        withheld = len(items) - len(kept)
+        if (
+            withheld
+            and kept
+            and items
+            and items[0][1]
+            and all(caption is None for _, caption in kept)
+            and sum(1 for _, caption in items if caption) == 1
+        ):
+            kept[0] = (kept[0][0], items[0][1])
+        return kept, withheld
 
     # -- delivery primitives ----------------------------------------------
 
@@ -364,10 +451,18 @@ class TelegramNotifier:
         The caretaker uses this so a report is a single grouped album (photos +
         the summary as the first item's caption) instead of N photos plus a
         separate text — and it can later EDIT that first item's caption in place.
+
+        Photos the privacy screen withholds are dropped from the album (a note
+        goes out instead); when EVERY photo is withheld this returns ``{}`` so
+        the caller's existing text fallback still delivers the report.
         """
         if not self.bot_token or not self.user_ids or not items:
             return {}
-        chunk = list(items)[:MEDIA_GROUP_LIMIT]
+        chunk, withheld = self._screen_album(list(items)[:MEDIA_GROUP_LIMIT])
+        if withheld:
+            self.broadcast_text(_withheld_note(withheld))
+        if not chunk:
+            return {}
         # Downscale once up front; every recipient reuses the same bytes.
         chunk = [(downscale_jpeg(image), caption) for image, caption in chunk]
         sent: dict[str, int] = {}

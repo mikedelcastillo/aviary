@@ -3,6 +3,12 @@
 The server reads Tapo RTSP streams, samples frames, runs the trained YOLO model,
 and sends Telegram alerts with snapshots.
 
+Outbound Telegram photos pass a privacy screen first: a stock COCO model checks
+each image for people, and any frame showing a person is withheld — the alert or
+report text still arrives, with a note that the photo was held back. Only
+Telegram uploads are screened; local snapshots, collection and memory photos are
+untouched. `PRIVACY_FILTER=0` disables it (see `.env.example` for the knobs).
+
 ## Setup
 
 Copy and edit environment variables:
@@ -78,6 +84,24 @@ starts consuming any newly found cameras and replies with a summary (hosts
 scanned, cameras added, auth failures). Cameras are de-duplicated by host, so
 rerunning `/discover` only starts streams for cameras that are not already
 active.
+
+### `/watchlist` — choose which cameras stream (by MAC)
+
+Every camera the sweep confirms with working credentials is cached by its MAC
+address (read from the kernel ARP table, which the probe itself refreshes) in
+`data/server/camera_registry.json`, together with its last-known IP. `/status`
+and the `/discover` report show each camera's MAC next to its IP-derived name.
+
+- `/watchlist` — lists every cached camera, grouped into *on the watchlist* and
+  *discovered, not on the watchlist*, each with IP + MAC and live state.
+- `/watchlist allow <MAC>` — adds a camera to the watchlist and starts its
+  stream immediately (if it's offline, the monitor thread waits and connects
+  the moment it appears).
+- `/watchlist remove <MAC>` — removes it and stops the stream immediately.
+
+An **empty** watchlist means no filtering — every discovered camera streams
+(the out-of-the-box behavior). Once any MAC is listed, only listed cameras are
+streamed; the rest are still cached and shown so they can be allowed later.
 
 ### `/restart` Telegram command
 

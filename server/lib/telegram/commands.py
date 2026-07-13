@@ -53,6 +53,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/memory": "Day-memory stats — history size, backfill debt, photos, storage",
     "/tokens": "LLM token usage per model (calls, in/out tokens, busy time)",
     "/rgb": "LED status display — /rgb red 10m to set a color, /rgb auto for context mode",
+    "/watchlist": "Choose which cameras stream (/watchlist allow <MAC> | remove <MAC>)",
     "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
     "/snapshot": "Capture a snapshot from every camera",
     "/pause": "Privacy mode: stop the cameras (alias of /stop)",
@@ -146,13 +147,15 @@ def build_status_message(
     known_birds: list[str] | None = None,
     ir_cameras: set[str] | None = None,
     logged_last_seen: dict[str, tuple[float, str]] | None = None,
+    camera_mac: Callable[[str], str | None] | None = None,
 ) -> str:
     """A compact, scannable status: which birds were last seen when, and each
     camera's health (with an IR/night marker).
 
     ``known_birds`` is the roster of individuals to always list (so a bird that
     has gone missing shows up as "not seen"); ``ir_cameras`` are camera ids
-    currently in night/IR mode.
+    currently in night/IR mode. ``camera_mac`` maps a camera id to its display
+    MAC (from the watchlist registry) so /status shows hardware identity.
     """
     # Copy the mapping up front: the live ``stats`` dict is shared with the
     # camera supervisor, which adds entries from another thread.
@@ -204,7 +207,11 @@ def build_status_message(
         else:
             dot, word = "🔴", str(snap["status"])
         ir = " · 🌙 IR" if snap["name"] in ir_cameras else ""
-        lines.append(f"  {dot} {camera_display(snap['name'])} — {word}{ir} · {snap['fps']:.1f} fps")
+        mac = camera_mac(snap["name"]) if camera_mac is not None else None
+        mac_note = f" · `{mac}`" if mac else ""
+        lines.append(
+            f"  {dot} {camera_display(snap['name'])} — {word}{ir} · {snap['fps']:.1f} fps{mac_note}"
+        )
 
     return "\n".join(lines)
 
@@ -292,6 +299,7 @@ def run_command_bot(
     rgb_provider: Callable[[str], str] | None = None,
     memory_stats_provider: Callable[[], str] | None = None,
     tokens_provider: Callable[[], str] | None = None,
+    watchlist_provider: Callable[[str], str] | None = None,
 ) -> None:
     """Long-poll Telegram and reply to supported bot commands."""
     base_url = f"https://api.telegram.org/bot{bot_token}"
@@ -320,6 +328,7 @@ def run_command_bot(
             ("/memory", memory_stats_provider is not None),
             ("/tokens", tokens_provider is not None),
             ("/rgb", rgb_provider is not None),
+            ("/watchlist", watchlist_provider is not None),
             ("/find", find_provider is not None),
             ("/snapshot", snapshot_provider is not None),
             ("/pause", pause_provider is not None),
@@ -737,6 +746,18 @@ def run_command_bot(
                             LOGGER.exception("RGB command failed")
                             send(chat_id, f"RGB command failed: {exc}")
                     LOGGER.info("Handled /rgb for user %s", user_id)
+                    continue
+
+                if command == "/watchlist":
+                    if str(user_id) not in allowed or watchlist_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        try:
+                            send(chat_id, watchlist_provider(command_argument(text_in)))
+                        except Exception as exc:
+                            LOGGER.exception("Watchlist command failed")
+                            send(chat_id, f"Watchlist command failed: {exc}")
+                    LOGGER.info("Handled /watchlist for user %s", user_id)
                     continue
 
                 if command == "/snapshot":

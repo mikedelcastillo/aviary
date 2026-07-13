@@ -104,6 +104,27 @@ class OllamaConfig:
 
 
 @dataclass(frozen=True)
+class PrivacyConfig:
+    # Withhold any outbound TELEGRAM photo that shows a person, so the owners
+    # never broadcast themselves walking through the aviary frame. The screen
+    # runs only on the Telegram upload path — local snapshots, collection and
+    # memory photos are untouched — and the alert/report text still goes out,
+    # with a note explaining the missing photo.
+    enabled: bool = True
+    # Must be a model that knows a 'person' class. The trained bird models
+    # don't, so this is a stock COCO model; nano is plenty — a person in frame
+    # is large, and the screen is recall-biased anyway.
+    model_path: Path = Path("./yolo11n.pt")
+    # LOW on purpose: a missed person leaks a photo of us to Telegram, while a
+    # false positive merely withholds one bird photo. Recall over precision.
+    confidence: float = 0.25
+    image_size: int = 640
+    # CPU so the screen never competes for the GPU's headroom (YOLO + VLM + LLM
+    # already share it); one nano pass per outbound photo is cheap.
+    device: str = "cpu"
+
+
+@dataclass(frozen=True)
 class CollectConfig:
     objects: frozenset[str]
     directory: Path = Path("./data/server/collect")
@@ -170,6 +191,7 @@ class AppConfig:
     # Defaulted (and last) so existing constructions that predate the AI features
     # — and tests — don't have to pass them. ``build_config`` always sets them.
     ollama: OllamaConfig = OllamaConfig(enabled=False)
+    privacy: PrivacyConfig = PrivacyConfig()
     # The caretaker's report beat in minutes (0 disables). It checks far more
     # often than this, reporting new birds immediately and only editing the last
     # message in place on this beat when nothing changed. When reports are on, raw
@@ -333,6 +355,21 @@ def _ollama_config() -> OllamaConfig:
     )
 
 
+def _privacy_config() -> PrivacyConfig:
+    """Build the Telegram privacy screen config from the environment.
+
+    On by default — photos of people should never leave the machine unless the
+    owner explicitly opts out with ``PRIVACY_FILTER=0``. Blank envs fall back to
+    the dataclass defaults, the single source of truth.
+    """
+    model_path = os.environ.get("PRIVACY_MODEL_PATH", "").strip()
+    return PrivacyConfig(
+        enabled=_as_bool("PRIVACY_FILTER", PrivacyConfig.enabled),
+        model_path=Path(model_path) if model_path else PrivacyConfig.model_path,
+        confidence=_as_float("PRIVACY_CONFIDENCE", PrivacyConfig.confidence),
+    )
+
+
 def build_config() -> AppConfig:
     model = ModelConfig(
         paths=_model_paths(),
@@ -373,6 +410,7 @@ def build_config() -> AppConfig:
         credentials=credentials,
         discovery=discovery,
         ollama=ollama,
+        privacy=_privacy_config(),
         memory_interval_minutes=memory_minutes,
         raw_photo_alerts=raw_photo_alerts,
         ptz_scan_cols=max(1, int(_as_float("PTZ_SCAN_COLS", 4))),
