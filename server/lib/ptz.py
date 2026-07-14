@@ -59,6 +59,13 @@ _NONCE_ENCODING = (
 DEFAULT_SCAN_COLS = 4
 DEFAULT_SCAN_ROWS = 3
 
+# Hold each grid cell STATIONARY this long before moving on, so the ~1fps
+# detector gets clean frames instead of mid-pan blur.
+DEFAULT_DWELL_SECONDS = 2.0
+# AbsoluteMove returns before the camera physically arrives; allow this much
+# travel time on top of the dwell before the next move is issued.
+PATROL_SETTLE_SECONDS = 2.0
+
 
 def grid_cells(cols: int, rows: int) -> list[tuple[float, float]]:
     """Cell-centre (pan, tilt) positions covering the normalised -1..1 range.
@@ -453,7 +460,9 @@ class OnvifPatrol:
     :class:`lib.find.BirdFinder` drives. ``start`` records each camera's saved
     "home" preset (the user's first Tapo preset) and its current facing. ``step``
     moves every camera to the NEXT grid cell (an AbsoluteMove), so over a sweep it
-    covers the full pan AND tilt range — not just left-right. ``stop`` halts and
+    covers the full pan AND tilt range — not just left-right; each cell is then
+    HELD (travel settle + a stationary dwell) so the detector gets clean frames,
+    and step() calls inside that hold window are no-ops. ``stop`` halts and
     returns every camera HOME — preferring the user's saved preset (so it lands
     exactly where they parked it, never on a wall), falling back to the captured
     position then the ONVIF home command.
@@ -465,10 +474,18 @@ class OnvifPatrol:
         *,
         cols: int = DEFAULT_SCAN_COLS,
         rows: int = DEFAULT_SCAN_ROWS,
+        dwell_seconds: float = DEFAULT_DWELL_SECONDS,
+        settle_seconds: float = PATROL_SETTLE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._cameras = cameras
         self._cells = grid_cells(cols, rows)
         self._steps = 0
+        self._dwell_seconds = dwell_seconds
+        self._settle_seconds = settle_seconds
+        self._clock = clock
+        # When the last AbsoluteMove was issued; None = no move yet this patrol.
+        self._last_move_at: float | None = None
         # camera.host -> (pan, tilt) captured at start(), for fallback restore.
         self._home: dict[str, tuple[float, float]] = {}
         # camera.host -> the user's saved "home" preset token (preferred restore).
@@ -487,6 +504,7 @@ class OnvifPatrol:
         # (fallback) so stop() can put each camera back. Resetting the counter
         # makes a fresh patrol always start the same way.
         self._steps = 0
+        self._last_move_at = None
         self._home = {}
         self._home_preset = {}
         for camera in self._cameras:
@@ -506,9 +524,15 @@ class OnvifPatrol:
                 self._home[camera.host] = position
 
     def step(self) -> None:
-        # Move every camera to the next grid cell (absolute pan+tilt). The search
-        # loop calls step() roughly every couple of seconds, so each cell gets a
-        # dwell for the detector to catch the bird before moving on.
+        # Move every camera to the next grid cell (absolute pan+tilt) — but only
+        # once the previous cell has had its full stop: settle (travel time for
+        # the move to physically finish) + dwell (stationary, so the detector
+        # sees clean frames, not mid-pan blur). The search loop calls step()
+        # every poll (~2s); calls that land inside the hold window do nothing.
+        if self._last_move_at is not None:
+            held = self._clock() - self._last_move_at
+            if held < self._settle_seconds + self._dwell_seconds:
+                return
         pan, tilt = self._cells[self._steps % len(self._cells)]
         for camera in self._cameras:
             try:
@@ -516,6 +540,7 @@ class OnvifPatrol:
             except Exception:
                 LOGGER.exception("PTZ move failed on %s", camera.host)
         self._steps += 1
+        self._last_move_at = self._clock()
 
     def stop(self) -> None:
         for camera in self._cameras:

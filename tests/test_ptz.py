@@ -138,17 +138,58 @@ def test_grid_cells_cover_pan_and_tilt() -> None:
     assert cells[4] == (0.75, 0.0)
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def test_patrol_scans_grid_cells_in_order() -> None:
     camera = FakeCamera("192.168.1.8", preset="1")
-    patrol = OnvifPatrol([camera], cols=4, rows=3)
+    clock = FakeClock()
+    patrol = OnvifPatrol([camera], cols=4, rows=3, clock=clock)
     patrol.start()
     for _ in range(len(patrol.cells)):
         patrol.step()
+        clock.advance(5.0)  # past the settle+dwell hold
     # Every step issued an AbsoluteMove to the next grid cell, covering tilt too.
     assert camera.restored == patrol.cells
     # Wraps back to the first cell after a full sweep.
     patrol.step()
     assert camera.restored[-1] == patrol.cells[0]
+
+
+def test_patrol_dwells_on_each_cell_before_moving_on() -> None:
+    camera = FakeCamera("192.168.1.8", preset="1")
+    clock = FakeClock()
+    patrol = OnvifPatrol(
+        [camera], dwell_seconds=2.0, settle_seconds=2.0, clock=clock
+    )
+    patrol.start()
+    patrol.step()  # first call moves immediately
+    assert len(camera.restored) == 1
+    # Calls inside the hold window (settle 2s + dwell 2s) are no-ops — the
+    # camera stays put on its current cell.
+    clock.advance(2.0)
+    patrol.step()
+    assert len(camera.restored) == 1
+    clock.advance(1.9)
+    patrol.step()
+    assert len(camera.restored) == 1
+    # Once the hold has elapsed the next step() moves to the next cell.
+    clock.advance(0.1)
+    patrol.step()
+    assert len(camera.restored) == 2
+    assert camera.restored == patrol.cells[:2]
+    # start() resets the hold so a fresh patrol moves on its first step again.
+    patrol.start()
+    patrol.step()
+    assert len(camera.restored) == 3
 
 
 def test_patrol_prefers_saved_home_preset_on_stop() -> None:
