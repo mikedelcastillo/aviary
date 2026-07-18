@@ -18,11 +18,14 @@ dependencies = [
     # camera reboot, which Tapo's ONVIF can't do. Imported lazily; dormant
     # until TAPO_CLOUD_PASSWORD is set.
     "pytapo>=3.4",
-    # torch/torchvision are pinned to the CUDA 12.8 (cu128) index below — the
-    # build with Blackwell/sm_120 support for the RTX 5060. uv resolves the wheel
-    # itself; `uv sync` installs the right GPU torch with no post-step.
-    "torch",
-    "torchvision",
+    # torch/torchvision come from the CUDA 11.8 (cu118) index below — the last
+    # build line that supports the GTX 1060 (Pascal, sm_61): cu128's cuDNN 9
+    # refuses SM < 7.5 and its kernels start at sm_75, so a cu128 torch crashes
+    # every inference with "GET was unable to find an engine". torch 2.7.1 is
+    # the final cu118 release; `uv sync` installs the right GPU torch with no
+    # post-step.
+    "torch==2.7.1",
+    "torchvision==0.22.1",
 ]
 
 # Every operational script is a console command: `uv run <name>`. Names are
@@ -84,17 +87,19 @@ packages = [
 "training/scripts/annotation_app.py" = "annotation_app.py"
 "training/scripts/doctor_fsdb.py" = "doctor_fsdb.py"
 
-# Pin torch/torchvision to the CUDA 12.8 (cu128) wheels — the build with
-# Blackwell/sm_120 support for the RTX 5060. The machine is Linux + RTX 5060 only,
-# so `uv sync` resolves a recent cu128 torch compatible with ultralytics directly.
+# Pin torch/torchvision to the CUDA 11.8 (cu118) wheels — the last build line
+# that supports the GTX 1060 (Pascal, sm_61) the server runs on. The machine is
+# Linux + GTX 1060 only, so `uv sync` resolves the cu118 torch compatible with
+# ultralytics directly. Note Pascal runs fp16 at ~1/64 fp32 throughput, so
+# nothing here should force half precision.
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
 
 [dependency-groups]
 dev = ["pytest>=8.0.0"]

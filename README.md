@@ -15,9 +15,11 @@ confidently identifiable.
 
 ## Platform assumption
 
-This project runs on a single **Linux machine with an NVIDIA RTX 5060** (Blackwell,
-CUDA **cu128**). `torch`/`torchvision` are pinned to the cu128 wheel index in
-`pyproject.toml`, so `uv sync` installs the right GPU build with no post-step — there
+This project runs on a single **Linux machine with an NVIDIA GTX 1060** (Pascal,
+CUDA **cu118**). `torch`/`torchvision` are pinned to the cu118 wheel index in
+`pyproject.toml` — torch 2.7.1 is the last release with Pascal (sm_61) kernels;
+newer cu12x builds ship cuDNN 9, which refuses SM < 7.5 and crashes every
+inference — so `uv sync` installs the right GPU build with no post-step. There
 is no install-gpu script and no Windows/ROCm/multi-GPU/Docker tooling.
 
 ## Tooling
