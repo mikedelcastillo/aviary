@@ -64,6 +64,7 @@ from lib.objects import ObjectRegistry
 from lib.roster import load_sexes, load_species_members, pronoun_map, pronoun_sentence
 from lib.netid import format_mac
 from lib.snapshot import capture_snapshots, latest_frame_jpeg, snapshot_caption
+from lib.tapo import FindFlash, RebootGuard, TapoControl, match_camera_hosts
 from lib.sleep import SleepTracker, format_status_line
 from lib.stats import CameraStats
 from lib.supervisor import CameraSupervisor, format_discovery_progress, format_discovery_report
@@ -156,6 +157,7 @@ def start_command_thread(
     weather_provider: Callable[[], str] | None = None,
     machine_frame: Callable[[float, float], str] | None = None,
     rgb_provider: Callable[[str], str] | None = None,
+    flash_provider: Callable[[str], str] | None = None,
     memory_stats_provider: Callable[[], str] | None = None,
     tokens_provider: Callable[[], str] | None = None,
     watchlist_provider: Callable[[str], str] | None = None,
@@ -183,6 +185,7 @@ def start_command_thread(
             "weather_provider": weather_provider,
             "machine_frame": machine_frame,
             "rgb_provider": rgb_provider,
+            "flash_provider": flash_provider,
             "memory_stats_provider": memory_stats_provider,
             "tokens_provider": tokens_provider,
             "watchlist_provider": watchlist_provider,
@@ -486,6 +489,7 @@ def make_console_dispatcher(
     stop_event: threading.Event,
     rgb_provider=None,
     health=None,
+    make_lights=None,
 ) -> ConsoleDispatcher:
     """Build the terminal-chat dispatcher: same providers, replies to the console.
 
@@ -507,6 +511,7 @@ def make_console_dispatcher(
         send_photo=None,  # no images in the terminal
         describe_frame=describe_frame if ollama_client is not None else None,
         make_patrol=lambda: ptz_manager.build_patrol(supervisor.active_hosts()),
+        make_lights=make_lights,
         camera_display=namer.display,
         species_members=species_members,
     )
@@ -736,6 +741,35 @@ def main() -> None:
         cache_path=app_config.collect.directory.parent / "camera_registry.json"
     )
 
+    # Proprietary Tapo control (spotlight flash + reboot-on-wedge). Dormant —
+    # every call a no-op — until TAPO_CLOUD_PASSWORD is set; the camera-account
+    # creds can't authenticate this API. The IR hold/release freeze a flashed
+    # camera's night flag so a forced lamp can't fake a day transition to the
+    # sleep tracker / auto-find / caretaker night mode.
+    tapo_control = TapoControl(
+        app_config.tapo_cloud_password,
+        ir_hold=ir_state.hold,
+        ir_release=ir_state.release,
+    )
+    wedge_guard = None
+    if tapo_control.enabled:
+        def _announce_reboot(host: str, downtime: float) -> None:
+            if notifier is None:
+                return
+            minutes = max(1, int(round(downtime / 60)))
+            notifier.broadcast_text(
+                f"♻️ {namer.display(f'camera-{host}')} ({host}) was stuck for "
+                f"~{minutes} min — rebooted the camera; it should be back in ~30s."
+            )
+
+        wedge_guard = RebootGuard(tapo_control.reboot, notify=_announce_reboot)
+        LOGGER.info("Tapo cloud control on: /flash, night-find spotlights, reboot-on-wedge")
+    else:
+        LOGGER.info(
+            "Tapo cloud control off — set TAPO_CLOUD_PASSWORD to enable "
+            "/flash, night-find spotlights and reboot-on-wedge"
+        )
+
     supervisor = CameraSupervisor(
         app_config,
         detector,
@@ -752,6 +786,7 @@ def main() -> None:
         detection_logger=detection_logger,
         rgb_reaction=rgb_controller.on_detection if rgb_controller is not None else None,
         watchlist=watch_registry,
+        wedge_guard=wedge_guard,
     )
 
     def watchlist_provider(argument: str) -> str:
@@ -921,6 +956,18 @@ def main() -> None:
             timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
         )
 
+    def make_find_lights() -> FindFlash | None:
+        # Fresh per search, like the patrol: which cameras are dark is decided
+        # the moment the search starts.
+        if not tapo_control.enabled:
+            return None
+        return FindFlash(
+            tapo_control,
+            ir_state.ir_cameras,
+            lambda: ready_camera_hosts(stats, stats_lock),
+            display=namer.display,
+        )
+
     finder = (
         BirdFinder(
             registry,
@@ -933,6 +980,7 @@ def main() -> None:
             make_patrol=lambda: ptz_manager.build_patrol(
                 ready_camera_hosts(stats, stats_lock)
             ),
+            make_lights=make_find_lights,
             wait_until_ready=lambda stop, cancel: _wait_for_find_cameras(stop, cancel),
             camera_display=namer.display,
             species_members=species_members,
@@ -981,6 +1029,63 @@ def main() -> None:
         if control.is_paused():
             return f"{control.status()} Can't search while paused — /play first."
         return finder.start(chat_id, target, stop_event)
+
+    def flash_provider(argument: str) -> str:
+        """The /flash command: spotlight on/off/toggle, per camera or all."""
+        if not tapo_control.enabled:
+            return (
+                "💡 Flash control is off — it needs the Tapo CLOUD account "
+                "password (the camera account can't drive the lamps). Add "
+                "TAPO_CLOUD_PASSWORD to .env and /restart."
+            )
+        tokens = (argument or "").split()
+        action = tokens[0].lower() if tokens else "status"
+        target = " ".join(tokens[1:]).strip()
+        hosts = sorted(supervisor.active_hosts())
+        if not hosts:
+            return "No cameras are streaming right now — /discover first."
+        if action in ("status", "list"):
+            ir_now = ir_state.ir_cameras()
+            lines = ["💡 **Camera flash**"]
+            for host in hosts:
+                name = f"camera-{host}"
+                # Device truth, not the tracked guess — a restart forgets a
+                # lamp that is physically still burning.
+                state = "ON" if tapo_control.lamp_state(host) else "off"
+                night = " · 🌙 IR" if name in ir_now else ""
+                lines.append(f"  • {namer.display(name)} — {state}{night}")
+            lines.append("")
+            lines.append(
+                "/flash on | off | toggle [camera] — a night /find lights up "
+                "IR cameras automatically."
+            )
+            return "\n".join(lines)
+        if action not in ("on", "off", "toggle"):
+            return "Usage: /flash on | off | toggle [camera] · /flash — status"
+        if target:
+            matched = match_camera_hosts(target, hosts, display=namer.display)
+            if not matched:
+                return f'No streaming camera matches "{target}" — /flash lists them.'
+            hosts = matched
+        switched: list[str] = []
+        failed: list[str] = []
+        for host in hosts:
+            # Toggle from device truth so "/flash toggle" turns OFF a lamp left
+            # burning across a server restart (tracked state starts at off).
+            on = not tapo_control.lamp_state(host) if action == "toggle" else action == "on"
+            if tapo_control.manual_set(host, on):
+                switched.append(f"{namer.display(f'camera-{host}')} {'ON' if on else 'off'}")
+            else:
+                failed.append(namer.display(f"camera-{host}"))
+        lines = []
+        if switched:
+            lines.append("💡 Flash: " + ", ".join(switched))
+        if failed:
+            lines.append(
+                "⚠️ No luck with: " + ", ".join(failed)
+                + " (no lamp, or the camera rejected the cloud password — check the logs)"
+            )
+        return "\n".join(lines)
 
     def trigger_camera_naming(force: bool = False) -> None:
         # Name cameras from a live frame, on a background thread (the VLM is
@@ -1370,6 +1475,7 @@ def main() -> None:
         weather_provider=weather_provider,
         machine_frame=machine_frames.frame,
         rgb_provider=rgb_controller.command if rgb_controller is not None else None,
+        flash_provider=flash_provider,
         memory_stats_provider=memory_stats_provider,
         tokens_provider=(
             (lambda: format_usage(llm_usage.snapshot())) if llm_usage is not None else None
@@ -1575,6 +1681,7 @@ def main() -> None:
                 stop_event=stop_event,
                 rgb_provider=rgb_controller.command if rgb_controller is not None else None,
                 health=ollama_health,
+                make_lights=make_find_lights,
             )
             run_terminal_chat(console_dispatcher, stop_event)
         else:

@@ -14,6 +14,10 @@ dependencies = [
     # OpenRGB SDK client for the LED status display (lib.rgb). Pure-python, tiny;
     # the engine no-ops gracefully if the OpenRGB server isn't running.
     "openrgb-python>=0.3.2",
+    # Tapo proprietary local-API client (lib.tapo): spotlight flash + remote
+    # camera reboot, which Tapo's ONVIF can't do. Imported lazily; dormant
+    # until TAPO_CLOUD_PASSWORD is set.
+    "pytapo>=3.4",
     # torch/torchvision are pinned to the CUDA 12.8 (cu128) index below — the
     # build with Blackwell/sm_120 support for the RTX 5060. uv resolves the wheel
     # itself; `uv sync` installs the right GPU torch with no post-step.

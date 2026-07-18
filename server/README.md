@@ -127,6 +127,29 @@ stream, and `auto` starts conservatively on `stream2`, promotes stable cameras t
 `stream1`, and falls back to `stream2` when FPS drops, frames stall, or
 reconnects begin.
 
+### `/flash`, night-find spotlights, and reboot-on-wedge (Tapo cloud control)
+
+Tapo's ONVIF surface can't drive the cameras' built-in spotlights or reboot
+them, so these features use the cameras' proprietary local HTTPS API (via
+`pytapo`), which authenticates with the Tapo **cloud** account password — set
+`TAPO_CLOUD_PASSWORD` in `.env`. Without it the features stay dormant (`/flash`
+explains what's missing). See `server/lib/tapo.py`.
+
+- `/flash` — per-camera spotlight status (device truth, with an IR marker).
+- `/flash on | off | toggle [camera]` — force the spotlight; the camera can be
+  an IP, a last-octet shorthand (`.19`), or a name fragment (`cockatiel`).
+  Omitting the camera addresses every streaming camera.
+- **Night finds light themselves**: a `/find` that starts while cameras sit in
+  night/IR turns those spotlights on for the duration of the search and
+  restores them after — a lamp the user forced via `/flash` is never touched.
+  While a lamp is forced, that camera's IR flag is frozen so the lit,
+  full-colour frames can't fake a "daylight" transition to the sleep tracker,
+  auto-find, or the caretaker's night mode.
+- **Reboot-on-wedge**: a camera whose stream stays unhealthy for ~3 minutes
+  despite reconnects is power-cycled once via the API (at most once per
+  10 minutes per camera), with a Telegram note. Cameras often wedge with RTSP
+  dead but HTTPS alive, which is exactly what this repairs.
+
 ## Sleep tracking
 
 The server watches the cameras' IR (night) signal to track the flock's sleep.

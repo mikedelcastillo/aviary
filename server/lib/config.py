@@ -223,6 +223,12 @@ class AppConfig:
     # /sleep command and the /status night-in-progress line work regardless;
     # SLEEP_MORNING_REPORT=1 also pushes a summary each morning when they wake.
     sleep_morning_report: bool = False
+    # The Tapo CLOUD account password (what the Tapo app logs in with). Unlocks
+    # the cameras' proprietary local API (lib.tapo) for what ONVIF can't reach:
+    # the /flash spotlight command, automatic spotlights during a night /find,
+    # and rebooting a camera whose stream has wedged. The camera-account
+    # credentials above CANNOT authenticate that API. Empty = features dormant.
+    tapo_cloud_password: str = ""
     # RGB status display (lib.rgb): drive the motherboard / header / strip LEDs to
     # mirror aviary state — a loading-wave during discovery, each bird's color on
     # detection, a single LED at night. Off by default; needs a running OpenRGB
@@ -422,6 +428,7 @@ def build_config() -> AppConfig:
         weather_hot_c=_as_float("WEATHER_HOT_C", 32.0),
         weather_cold_c=_as_float("WEATHER_COLD_C", 10.0),
         sleep_morning_report=_as_bool("SLEEP_MORNING_REPORT", False),
+        tapo_cloud_password=os.environ.get("TAPO_CLOUD_PASSWORD", "").strip(),
         rgb_enabled=_as_bool("RGB_ENABLED", False),
         rgb_host=os.environ.get("RGB_HOST", "127.0.0.1").strip() or "127.0.0.1",
         rgb_port=int(_as_float("RGB_PORT", 6742)),

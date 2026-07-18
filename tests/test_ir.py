@@ -33,3 +33,29 @@ def test_forget_drops_camera() -> None:
     assert ir.all_ir() is True
     ir.forget("b")
     assert ir.known() == {"a"} and ir.all_ir() is True
+
+
+def test_hold_freezes_flag_and_release_resumes() -> None:
+    # A forced spotlight (lib.tapo) holds the flag so a lit night frame can't
+    # fake a day transition; release lets the next frame re-stamp it.
+    ir = IRState()
+    events: list[tuple[str, bool]] = []
+    ir.add_listener(lambda cam, on: events.append((cam, on)))
+    ir.update("a", True)
+    ir.hold("a")
+    ir.update("a", False)  # the lamp lit the scene — dropped
+    assert ir.is_ir("a") is True
+    assert ir.all_ir() is True
+    assert events == [("a", True)]  # no fake day transition fired
+    ir.release("a")
+    ir.update("a", False)
+    assert ir.is_ir("a") is False
+    assert events == [("a", True), ("a", False)]
+
+
+def test_hold_of_unknown_camera_is_harmless() -> None:
+    ir = IRState()
+    ir.hold("ghost")
+    ir.release("ghost")
+    ir.update("ghost", True)
+    assert ir.is_ir("ghost") is True

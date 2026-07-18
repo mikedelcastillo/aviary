@@ -22,6 +22,11 @@ class IRState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._ir: dict[str, bool] = {}
+        # Cameras whose flag is FROZEN: updates are dropped while held. Used
+        # while a spotlight is forced on (lib.tapo) — the lamp makes night
+        # frames full-colour, and without the freeze that would fake a day
+        # transition to every consumer (sleep tracker, auto-find, caretaker).
+        self._held: set[str] = set()
         self._listeners: list[Listener] = []
 
     def add_listener(self, listener: Listener) -> None:
@@ -29,9 +34,21 @@ class IRState:
         with self._lock:
             self._listeners.append(listener)
 
+    def hold(self, camera: str) -> None:
+        """Freeze ``camera``'s flag at its current value; updates are dropped."""
+        with self._lock:
+            self._held.add(camera)
+
+    def release(self, camera: str) -> None:
+        """Unfreeze ``camera``; the next decoded frame re-stamps its flag."""
+        with self._lock:
+            self._held.discard(camera)
+
     def update(self, camera: str, is_ir: bool) -> None:
         """Record a camera's current IR flag; fire listeners on a change."""
         with self._lock:
+            if camera in self._held:
+                return
             previous = self._ir.get(camera)
             self._ir[camera] = is_ir
             if previous == is_ir:

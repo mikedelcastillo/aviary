@@ -53,6 +53,7 @@ COMMAND_DESCRIPTIONS: dict[str, str] = {
     "/memory": "Day-memory stats — history size, backfill debt, photos, storage",
     "/tokens": "LLM token usage per model (calls, in/out tokens, busy time)",
     "/rgb": "LED status display — /rgb red 10m to set a color, /rgb auto for context mode",
+    "/flash": "Camera spotlight — /flash on | off | toggle [camera] (auto during a night /find)",
     "/watchlist": "Choose which cameras stream (/watchlist allow <MAC> | remove <MAC>)",
     "/find": "Find bird(s) across all cameras (e.g. /find percy, /find cockatiels, /find stop)",
     "/snapshot": "Capture a snapshot from every camera",
@@ -297,6 +298,7 @@ def run_command_bot(
     weather_provider: Callable[[], str] | None = None,
     machine_frame: Callable[[float, float], str] | None = None,
     rgb_provider: Callable[[str], str] | None = None,
+    flash_provider: Callable[[str], str] | None = None,
     memory_stats_provider: Callable[[], str] | None = None,
     tokens_provider: Callable[[], str] | None = None,
     watchlist_provider: Callable[[str], str] | None = None,
@@ -328,6 +330,7 @@ def run_command_bot(
             ("/memory", memory_stats_provider is not None),
             ("/tokens", tokens_provider is not None),
             ("/rgb", rgb_provider is not None),
+            ("/flash", flash_provider is not None),
             ("/watchlist", watchlist_provider is not None),
             ("/find", find_provider is not None),
             ("/snapshot", snapshot_provider is not None),
@@ -746,6 +749,24 @@ def run_command_bot(
                             LOGGER.exception("RGB command failed")
                             send(chat_id, f"RGB command failed: {exc}")
                     LOGGER.info("Handled /rgb for user %s", user_id)
+                    continue
+
+                if command == "/flash":
+                    if str(user_id) not in allowed or flash_provider is None:
+                        send(chat_id, "Unauthorized.")
+                    else:
+                        # Each lamp toggle is an HTTPS round-trip to a camera (and
+                        # /flash on with no target walks every active camera), so
+                        # run it off the poll loop like /home.
+                        def run_flash(cid: int = chat_id, arg: str = command_argument(text_in)) -> None:
+                            try:
+                                send(cid, flash_provider(arg))
+                            except Exception as exc:  # never let a lamp error kill polling
+                                LOGGER.exception("Flash command failed")
+                                send(cid, f"Flash command failed: {exc}")
+
+                        Thread(target=run_flash, name="telegram-flash", daemon=True).start()
+                    LOGGER.info("Handled /flash for user %s", user_id)
                     continue
 
                 if command == "/watchlist":

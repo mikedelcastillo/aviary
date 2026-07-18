@@ -1442,3 +1442,93 @@ def test_memory_command_scans_one_at_a_time(monkeypatch) -> None:
     assert sum(1 for m in sent_messages if "Crunching" in m) == 1
     assert sum(1 for m in sent_messages if "hang on" in m) == 1
     assert any("Memory report" in m for m in sent_messages)
+
+
+def test_flash_command_passes_argument_to_provider(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    seen_args: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/flash on cockatiel tower",
+                            "from": {"id": 111},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    def flash_provider(argument: str) -> str:
+        seen_args.append(argument)
+        return "💡 Flash: Cockatiel Tower ON"
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        flash_provider=flash_provider,
+    )
+
+    assert seen_args == ["on cockatiel tower"]
+    assert sent_messages == ["💡 Flash: Cockatiel Tower ON"]
+
+
+def test_flash_command_requires_allowed_user(monkeypatch) -> None:
+    stop_event = threading.Event()
+    sent_messages: list[str] = []
+    calls: list[str] = []
+
+    def get(_url, params, timeout):
+        return Response(
+            {
+                "result": [
+                    {
+                        "update_id": 1,
+                        "message": {
+                            "text": "/flash on",
+                            "from": {"id": 999},
+                            "chat": {"id": 123},
+                        },
+                    }
+                ]
+            }
+        )
+
+    def post(_url, json, timeout):
+        if "text" not in json:
+            return Response()
+        sent_messages.append(json["text"])
+        stop_event.set()
+        return Response()
+
+    monkeypatch.setattr("lib.telegram.commands.requests.get", get)
+    monkeypatch.setattr("lib.telegram.commands.requests.post", post)
+
+    run_command_bot(
+        "token",
+        allowed_user_ids=["111"],
+        stop_event=stop_event,
+        poll_timeout_seconds=0,
+        flash_provider=lambda argument: calls.append(argument) or "on",
+    )
+
+    assert sent_messages == ["Unauthorized."]
+    assert calls == []

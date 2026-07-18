@@ -247,3 +247,56 @@ def test_bird_last_seen_picks_most_recent_camera() -> None:
     seen = bird_last_seen(rows)
     assert seen["percy"] == (12.0, "cam-b")
     assert seen["draft"] == (50.0, "cam-a")
+
+
+# -- find lights (night spotlight) -------------------------------------------
+
+
+class FakeLights:
+    def __init__(self, note: str | None = "spotlight on") -> None:
+        self.note = note
+        self.started = 0
+        self.stopped = 0
+
+    def start(self) -> str | None:
+        self.started += 1
+        return self.note
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+
+def test_run_lights_on_for_search_and_off_after() -> None:
+    sent: list = []
+    lights = FakeLights()
+    registry = FakeRegistry([row("camera-192.168.1.8", "percy", 1.0)])
+    finder = _finder(registry, sent, timeout_seconds=300.0, make_lights=lambda: lights)
+    outcome = finder._run(7, "percy", ["percy"], threading.Event(), threading.Event())
+    assert outcome.found is True
+    assert lights.started == 1
+    assert lights.stopped == 1
+    assert any("spotlight on" in text for _, text in sent)
+
+
+def test_run_lights_off_even_when_nothing_found() -> None:
+    lights = FakeLights(note=None)  # nothing was dark: no note sent
+    sent: list = []
+    finder = _finder(FakeRegistry([]), sent, timeout_seconds=0.0, make_lights=lambda: lights)
+    finder._run(7, "percy", ["percy"], threading.Event(), threading.Event())
+    assert lights.stopped == 1
+    assert not any("spotlight" in text for _, text in sent)
+
+
+def test_run_survives_broken_lights() -> None:
+    class BrokenLights:
+        def start(self) -> str | None:
+            raise RuntimeError("lamp fell off")
+
+        def stop(self) -> None:
+            raise RuntimeError("still broken")
+
+    sent: list = []
+    registry = FakeRegistry([row("camera-192.168.1.8", "percy", 1.0)])
+    finder = _finder(registry, sent, timeout_seconds=300.0, make_lights=BrokenLights)
+    outcome = finder._run(7, "percy", ["percy"], threading.Event(), threading.Event())
+    assert outcome.found is True  # the search itself is unaffected

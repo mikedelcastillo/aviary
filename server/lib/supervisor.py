@@ -230,6 +230,7 @@ class CameraSupervisor:
         rgb_reaction: Callable[[str, list, bool], None] | None = None,
         watchlist: CameraRegistry | None = None,
         mac_resolver: Callable[[str], str | None] = mac_for_ip,
+        wedge_guard=None,
     ) -> None:
         self._app_config = app_config
         self._detector = detector
@@ -244,6 +245,9 @@ class CameraSupervisor:
         self._detection_logger = detection_logger
         # Optional RGB status-display hook, threaded down to every monitor thread.
         self._rgb_reaction = rgb_reaction
+        # Optional reboot-on-wedge guard (lib.tapo.RebootGuard), threaded down to
+        # every monitor thread so a wedged stream can power-cycle its camera.
+        self._wedge_guard = wedge_guard
         # Shared privacy/pause state. Passed to every monitor thread so a pause
         # stops all cameras consuming their streams at once.
         self._control = control
@@ -316,6 +320,7 @@ class CameraSupervisor:
                     self._quality,
                     self._detection_logger,
                     self._rgb_reaction,
+                    self._wedge_guard,
                 ),
                 name=f"camera-{host}",
                 daemon=True,
@@ -340,6 +345,14 @@ class CameraSupervisor:
         # (lib.camera). A lingering stale vote would otherwise wedge all_ir().
         if self._ir_state is not None:
             self._ir_state.forget(name)
+        # And its wedge window: a stale unhealthy stamp would count the hours a
+        # camera spent deliberately retired as downtime and reboot it the
+        # moment it is re-added.
+        if self._wedge_guard is not None:
+            try:
+                self._wedge_guard.forget(host)
+            except Exception:
+                LOGGER.exception("Wedge guard forget failed for %s", host)
         LOGGER.info("Stopped camera %s", name)
         return name
 

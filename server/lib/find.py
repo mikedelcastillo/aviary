@@ -148,6 +148,7 @@ class BirdFinder:
         send_photo: "Callable[[int, bytes, str | None], object] | None" = None,
         describe_frame: "Callable[[bytes], str | None] | None" = None,
         make_patrol: "Callable[[], PtzPatrol | None] | None" = None,
+        make_lights: "Callable[[], FindLights | None] | None" = None,
         wait_until_ready: "Callable[[threading.Event, threading.Event], tuple[bool, str]] | None" = None,
         camera_display: Callable[[str], str] = short_camera,
         species_members: dict[str, tuple[str, ...]] | None = None,
@@ -170,6 +171,9 @@ class BirdFinder:
         # description ("Percy is on the perch with Matcha"). Best-effort.
         self._describe_frame = describe_frame
         self._make_patrol = make_patrol
+        # Optional camera spotlights (lib.tapo.FindFlash): lit for the duration
+        # of a search on cameras sitting in night/IR, restored after.
+        self._make_lights = make_lights
         self._wait_until_ready = wait_until_ready
         self._camera_display = camera_display
         self._species_members = species_members or DEFAULT_SPECIES_MEMBERS
@@ -313,6 +317,22 @@ class BirdFinder:
                 patrol = self._make_patrol()
             except Exception:
                 LOGGER.exception("Building PTZ patrol failed; searching without it")
+        lights = None
+        if self._make_lights is not None:
+            try:
+                lights = self._make_lights()
+            except Exception:
+                LOGGER.exception("Building find lights failed; searching without them")
+        if lights is not None:
+            try:
+                # Flash the cameras currently in night/IR so the detector sees a
+                # lit, full-colour scene. The note tells the user why a light
+                # just came on in the aviary.
+                note = lights.start()
+                if note:
+                    self._notify(chat_id, note)
+            except Exception:
+                LOGGER.exception("Find lights on failed; searching without them")
         try:
             return self._search(chat_id, requested, targets, stop_event, cancel, patrol, progress)
         finally:
@@ -321,6 +341,11 @@ class BirdFinder:
                     patrol.stop()
                 except Exception:
                     LOGGER.exception("PTZ patrol stop failed")
+            if lights is not None:
+                try:
+                    lights.stop()
+                except Exception:
+                    LOGGER.exception("Find lights off failed")
 
     def _search(self, chat_id, requested, targets, stop_event, cancel, patrol, progress=None) -> FindOutcome:
         start = self._clock()
@@ -479,4 +504,15 @@ class PtzPatrol(Protocol):
 
     def start(self) -> None: ...
     def step(self) -> None: ...
+    def stop(self) -> None: ...
+
+
+class FindLights(Protocol):
+    """Best-effort camera-spotlight driver used while a search runs.
+
+    ``start`` may return a short user-facing note ("spotlight on …") which the
+    finder relays to the chat; ``stop`` restores whatever ``start`` changed.
+    """
+
+    def start(self) -> str | None: ...
     def stop(self) -> None: ...

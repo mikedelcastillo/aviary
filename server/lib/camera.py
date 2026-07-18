@@ -104,7 +104,19 @@ def monitor_camera(
     quality: StreamQualityController | None = None,
     detection_logger: DetectionLogger | None = None,
     rgb_reaction: Callable[[str, list, bool], None] | None = None,
+    wedge_guard=None,
 ) -> None:
+    # ``wedge_guard`` (lib.tapo.RebootGuard, duck-typed) turns this loop's
+    # health into an automatic camera reboot when a stream stays wedged. The
+    # loop only reports healthy/unhealthy; all reboot policy lives in the guard.
+    def signal_wedge(is_healthy: bool) -> None:
+        if wedge_guard is None or not camera.host:
+            return
+        try:
+            (wedge_guard.healthy if is_healthy else wedge_guard.unhealthy)(camera.host)
+        except Exception:
+            LOGGER.exception("Wedge guard failed for %s", camera.name)
+
     # Log the exact URL (password masked) so a camera stuck on "connecting" can
     # be diagnosed: if this line appears but "Stream opened" never follows, the
     # ffmpeg open is blocking on this URL — compare it to a known-good one.
@@ -126,6 +138,9 @@ def monitor_camera(
             # decoded frame.
             if ir_state is not None:
                 ir_state.forget(camera.name)
+            # Deliberately idle, not wedged: clear any unhealthy window so a
+            # pre-pause outage can't count pause time toward a reboot.
+            signal_wedge(True)
             stop_event.wait(PAUSE_POLL_SECONDS)
             continue
 
@@ -152,6 +167,7 @@ def monitor_camera(
             LOGGER.warning("Could not open stream for %s; retrying in %.1fs", camera.name, backoff)
             stats.set_status("reconnecting", backoff)
             stats.record_reconnect()
+            signal_wedge(False)
             if quality is not None and camera.host:
                 quality.observe(camera.host, stats.snapshot(), target_fps=camera.sample_fps)
             stop_event.wait(backoff)
@@ -206,6 +222,7 @@ def monitor_camera(
                 # A real frame arrived: the stream is healthy, so drop back to
                 # the base reconnect delay for the next outage.
                 backoff = camera.reconnect_seconds
+                signal_wedge(True)
 
                 # Publish the freshest frame for on-demand snapshots regardless of
                 # the inference throttle below, so /snapshot returns a near-live
@@ -285,6 +302,7 @@ def monitor_camera(
         if not stop_event.is_set():
             stats.set_status("reconnecting", backoff)
             stats.record_reconnect()
+            signal_wedge(False)
             stop_event.wait(backoff)
             backoff = min(backoff * 2, camera.max_reconnect_seconds)
 
