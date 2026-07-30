@@ -109,11 +109,15 @@ def describe_image(
     context: str | None = None,
     max_dim: int = MAX_VLM_DIM,
     timeout_seconds: float | None = None,
+    num_predict: int | None = 150,
 ) -> str:
     """Run a single image + prompt through the vision model; return its text.
 
     ``context`` (e.g. :func:`build_detection_context`) is prepended to the prompt
     to ground the model; the image is downscaled to ``max_dim`` for speed.
+    ``num_predict`` bounds the generation — every prompt here asks for a
+    sentence or two, so a runaway caption otherwise burns the 150s timeout on
+    a backend where each token is CPU-priced.
     """
     full_prompt = f"{context}\n\n{prompt}" if context else prompt
     image = downscale_jpeg(image_bytes, max_dim) if max_dim else image_bytes
@@ -122,6 +126,7 @@ def describe_image(
         full_prompt,
         images=[encode_image(image)],
         timeout_seconds=timeout_seconds,
+        num_predict=num_predict,
     ).strip()
 
 
@@ -176,7 +181,8 @@ def name_camera_view(
 ) -> str:
     """Ask the vision model for a 1-2 word name for a camera's view."""
     raw = describe_image(
-        client, model, image_bytes, CAMERA_NAME_PROMPT, timeout_seconds=timeout_seconds
+        client, model, image_bytes, CAMERA_NAME_PROMPT,
+        timeout_seconds=timeout_seconds, num_predict=30,
     )
     return clean_camera_name(raw)
 
@@ -267,6 +273,9 @@ def analyze_frame(
         images=[encode_image(image)],
         fmt=_analysis_schema(labels),
         timeout_seconds=timeout_seconds,
+        # Schema-constrained JSON for at most a handful of birds; a cap merely
+        # bounds a degenerate decode loop without touching normal output.
+        num_predict=500,
     )
     try:
         data = json.loads(raw)

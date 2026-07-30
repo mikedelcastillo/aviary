@@ -4,8 +4,10 @@ from dataclasses import dataclass
 
 from lib.ai.vlm import (
     SCENE_PROMPT,
+    analyze_frame,
     build_detection_context,
     clean_camera_name,
+    describe_image,
     describe_scene,
     encode_image,
     name_camera_view,
@@ -25,7 +27,9 @@ class FakeClient:
         self.calls: list[dict] = []
 
     def generate(self, model, prompt, *, images=None, timeout_seconds=None, **kwargs):
-        self.calls.append({"model": model, "prompt": prompt, "images": images})
+        self.calls.append(
+            {"model": model, "prompt": prompt, "images": images, **kwargs}
+        )
         return self.response
 
 
@@ -107,3 +111,21 @@ def test_scene_prompt_is_terse() -> None:
 def test_name_camera_view_cleans_model_output() -> None:
     client = FakeClient("Sure! The label is: Window Perch.")
     assert name_camera_view(client, "qwen2.5vl:7b", b"jpeg") == "Sure The"
+
+
+def test_describe_image_caps_generation() -> None:
+    client = FakeClient("a bird preens")
+    describe_image(client, "vlm", b"jpeg", "prompt")
+    assert client.calls[0]["num_predict"] == 150
+
+
+def test_name_camera_view_uses_tight_generation_cap() -> None:
+    client = FakeClient("Window Perch")
+    name_camera_view(client, "vlm", b"jpeg")
+    assert client.calls[0]["num_predict"] == 30
+
+
+def test_analyze_frame_caps_generation() -> None:
+    client = FakeClient('{"scene": "calm", "birds": []}')
+    analyze_frame(client, "vlm", b"jpeg", ["percy"])
+    assert client.calls[0]["num_predict"] == 500

@@ -1609,6 +1609,16 @@ def main() -> None:
     # AUTO_DISCOVER_SECONDS so IP changes are picked up without the user running
     # /discover. Reconciliation happens only after each scan returns, so
     # unchanged cameras keep running with no drop while discovery is in flight.
+    #
+    # Forced RE-naming (as opposed to naming newly added cameras) re-confirms
+    # every movable camera through the VLM — each name costs 1-4 vision calls
+    # at tens of CPU-bound seconds apiece, and the sweep re-homes PTZ cameras
+    # right before asking, so the view is nearly always the one already named.
+    # Re-confirm at most hourly instead of every 10-minute sweep; the boot-time
+    # force above already covered "it moved while the server was down".
+    forced_naming_interval = 6 * AUTO_DISCOVER_SECONDS
+    last_forced_naming = [time.monotonic()]
+
     def _rediscover(force: bool = False) -> None:
         try:
             applied = supervisor.discover_and_apply()
@@ -1617,12 +1627,13 @@ def main() -> None:
             return
         if applied.added:
             LOGGER.info("Auto-discovery started %d more camera(s)", len(applied.added))
-        # On the periodic sweep, re-home then re-name every camera (force) since
-        # pan-tilt cameras may have moved; the quick post-boot retries just name
-        # new ones.
         if applied.added or force:
             ptz_manager.go_home(supervisor.active_hosts())
-            trigger_camera_naming(force=force)
+            force_naming = False
+            if force and time.monotonic() - last_forced_naming[0] >= forced_naming_interval:
+                force_naming = True
+                last_forced_naming[0] = time.monotonic()
+            trigger_camera_naming(force=force_naming)
 
     def _discovery_background() -> None:
         # Two quick post-boot retries catch a camera whose RTSP socket is still
