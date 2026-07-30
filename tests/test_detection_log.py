@@ -72,3 +72,67 @@ def test_detection_logger_query_filters_day_label_and_camera(tmp_path) -> None:
     assert rows[0].total_seconds == 2.0
     assert rows[0].observations == 1
     assert rows[0].last_seen_at == day
+
+
+def test_buffered_mode_serves_memory_and_flushes_on_demand(tmp_path) -> None:
+    logger = DetectionLogger(tmp_path, flush_interval_seconds=3600.0)
+    day = datetime(2026, 6, 27, 10, 0, 0, tzinfo=timezone.utc)
+    logger.record(
+        camera_name="camera-1",
+        detections=[detection()],
+        frame_size=(1920, 1080),
+        sample_interval_seconds=1.0,
+        observed_at=day,
+    )
+
+    # Nothing on disk yet, but queries see the buffered state.
+    assert list(tmp_path.glob("*.json")) == []
+    rows = logger.activity_for_day(day)
+    assert len(rows) == 1 and rows[0].observations == 1
+
+    logger.flush()
+    path = tmp_path / "2026-06-27.json"
+    assert path.exists()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["cameras"]["camera-1"]["labels"]["percy"]["observations"] == 1
+
+
+def test_buffered_mode_day_rollover_persists_previous_day(tmp_path) -> None:
+    logger = DetectionLogger(tmp_path, flush_interval_seconds=3600.0)
+    first_day = datetime(2026, 6, 27, 10, 0, 0, tzinfo=timezone.utc)
+    next_day = datetime(2026, 6, 28, 10, 0, 0, tzinfo=timezone.utc)
+    logger.record(
+        camera_name="camera-1",
+        detections=[detection()],
+        frame_size=(1920, 1080),
+        sample_interval_seconds=1.0,
+        observed_at=first_day,
+    )
+    logger.record(
+        camera_name="camera-1",
+        detections=[detection()],
+        frame_size=(1920, 1080),
+        sample_interval_seconds=1.0,
+        observed_at=next_day,
+    )
+
+    # Moving to a new day flushed the outgoing one; both days answer queries.
+    assert (tmp_path / "2026-06-27.json").exists()
+    assert len(logger.activity_for_day(first_day)) == 1
+    assert len(logger.activity_for_day(next_day)) == 1
+
+
+def test_activity_rows_do_not_alias_buffered_state(tmp_path) -> None:
+    logger = DetectionLogger(tmp_path, flush_interval_seconds=3600.0)
+    day = datetime(2026, 6, 27, 10, 0, 0, tzinfo=timezone.utc)
+    logger.record(
+        camera_name="camera-1",
+        detections=[detection()],
+        frame_size=(1920, 1080),
+        sample_interval_seconds=1.0,
+        observed_at=day,
+    )
+    rows = logger.activity_for_day(day)
+    rows[0].intervals[0]["end_at"] = "tampered"
+    fresh = logger.activity_for_day(day)
+    assert fresh[0].intervals[0]["end_at"] != "tampered"

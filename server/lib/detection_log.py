@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,10 +55,21 @@ class DetectionLogger:
         directory: Path = Path("./data/server/detection"),
         *,
         merge_gap_seconds: float = 3.0,
+        flush_interval_seconds: float = 0.0,
     ) -> None:
         self._directory = directory
         self._merge_gap_seconds = merge_gap_seconds
         self._lock = threading.Lock()
+        # The active day's state lives in memory; the file is a periodic
+        # snapshot. At 0 (the default) every record() still writes through
+        # immediately — the server passes a real interval so busy hours don't
+        # re-serialize a ~1MB day file on every detection-positive frame from
+        # every camera thread. Call flush() at shutdown to persist the tail.
+        self._flush_interval_seconds = flush_interval_seconds
+        self._cache_path: Path | None = None
+        self._cache: dict | None = None
+        self._dirty = False
+        self._last_flush = 0.0
 
     def record(
         self,
@@ -76,7 +88,7 @@ class DetectionLogger:
 
         with self._lock:
             path = _day_path(self._directory, observed_at)
-            data = self._read_day(path, observed_at)
+            data = self._load_day_locked(path, observed_at)
             camera = data["cameras"].setdefault(camera_name, {"labels": {}})
             labels = camera.setdefault("labels", {})
             width, height = frame_size
@@ -112,7 +124,33 @@ class DetectionLogger:
                 )
 
             data["updated_at"] = _iso(datetime.now(timezone.utc))
-            self._write_day(path, data)
+            self._dirty = True
+            if (
+                self._flush_interval_seconds <= 0
+                or time.monotonic() - self._last_flush >= self._flush_interval_seconds
+            ):
+                self._flush_locked()
+
+    def flush(self) -> None:
+        """Persist any buffered day state now (shutdown / rollover hook)."""
+        with self._lock:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        if self._dirty and self._cache is not None and self._cache_path is not None:
+            self._write_day(self._cache_path, self._cache)
+        self._dirty = False
+        self._last_flush = time.monotonic()
+
+    def _load_day_locked(self, path: Path, observed_at: datetime) -> dict:
+        if self._cache_path == path and self._cache is not None:
+            return self._cache
+        # Day rolled over (or first use): persist the outgoing day before the
+        # cache moves on, so its tail is never lost to the new day's buffer.
+        self._flush_locked()
+        self._cache_path = path
+        self._cache = self._read_day(path, observed_at)
+        return self._cache
 
     def activity_for_day(
         self,
@@ -122,31 +160,38 @@ class DetectionLogger:
         camera_name: str | None = None,
     ) -> list[DetectionActivity]:
         path = _day_path(self._directory, day)
-        with self._lock:
-            data = self._read_day(path, day) if path.exists() else None
-        if data is None:
-            return []
         rows: list[DetectionActivity] = []
-        for camera, camera_data in data.get("cameras", {}).items():
-            if camera_name is not None and camera != camera_name:
-                continue
-            for item_label, entry in camera_data.get("labels", {}).items():
-                if label is not None and item_label != label:
+        with self._lock:
+            # The active day answers straight from memory (fresher than disk
+            # between flushes, and skips a ~1MB parse per query); other days
+            # come from their files. Rows copy the interval dicts so callers
+            # never alias state that record() keeps mutating.
+            if self._cache_path == path and self._cache is not None:
+                data = self._cache
+            else:
+                data = self._read_day(path, day) if path.exists() else None
+            if data is None:
+                return []
+            for camera, camera_data in data.get("cameras", {}).items():
+                if camera_name is not None and camera != camera_name:
                     continue
-                rows.append(
-                    DetectionActivity(
-                        camera=camera,
-                        label=item_label,
-                        total_seconds=float(entry.get("total_detected_seconds") or 0.0),
-                        observations=int(entry.get("observations") or 0),
-                        intervals=list(entry.get("intervals") or []),
-                        last_seen_at=(
-                            _parse_iso(entry["last_seen_at"])
-                            if entry.get("last_seen_at")
-                            else None
-                        ),
+                for item_label, entry in camera_data.get("labels", {}).items():
+                    if label is not None and item_label != label:
+                        continue
+                    rows.append(
+                        DetectionActivity(
+                            camera=camera,
+                            label=item_label,
+                            total_seconds=float(entry.get("total_detected_seconds") or 0.0),
+                            observations=int(entry.get("observations") or 0),
+                            intervals=[dict(item) for item in entry.get("intervals") or []],
+                            last_seen_at=(
+                                _parse_iso(entry["last_seen_at"])
+                                if entry.get("last_seen_at")
+                                else None
+                            ),
+                        )
                     )
-                )
         rows.sort(key=lambda row: (row.label, row.camera))
         return rows
 

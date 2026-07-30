@@ -714,7 +714,13 @@ def main() -> None:
         port=app_config.discovery.rtsp_port,
         mode="stream1",
     )
-    detection_logger = DetectionLogger(app_config.collect.directory.parent / "detection")
+    detection_logger = DetectionLogger(
+        app_config.collect.directory.parent / "detection",
+        # Buffer the day state in memory and snapshot every 30s instead of
+        # re-serializing the ~1MB day file on every detection-positive frame
+        # from every camera thread; the finally block flushes the tail.
+        flush_interval_seconds=30.0,
+    )
 
     # RGB status display: drive the motherboard / header / strip LEDs to mirror
     # aviary state — a loading-wave during discovery, each bird's signature color
@@ -1706,6 +1712,10 @@ def main() -> None:
             stderr_redirect.stop()
         supervisor.join()
         dispatcher.shutdown()
+        try:
+            detection_logger.flush()  # persist the buffered day-log tail
+        except Exception:
+            LOGGER.exception("Detection log flush on shutdown failed")
         if restart_requested.is_set():
             os.execv(sys.executable, [sys.executable, *sys.argv])
 
