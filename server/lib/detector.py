@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,6 +68,24 @@ class ObjectDetector:
         self.models = [YOLO(str(path)) for path in config.paths]
         self._lock = threading.Lock()
 
+    def warmup(self) -> None:
+        """Run one throwaway predict per model so the first real frame is fast.
+
+        The first CUDA inference pays context init + cuDNN autotune (seconds);
+        paying it at boot keeps the first camera frame's latency flat. Separate
+        from ``__init__`` so construction stays side-effect-free for tests.
+        """
+        import numpy as np
+
+        dummy = np.zeros((self.config.image_size, self.config.image_size, 3), dtype=np.uint8)
+        started = time.perf_counter()
+        try:
+            self.predict(dummy)
+        except Exception:  # warmup must never block startup
+            LOGGER.exception("Detector warmup failed")
+            return
+        LOGGER.info("Detector warmed up in %.1fs", time.perf_counter() - started)
+
     def known_labels(self) -> list[str]:
         """Every class label across all loaded models, sorted and de-duplicated.
 
@@ -89,6 +108,9 @@ class ObjectDetector:
             "iou": self.config.iou,
             "imgsz": self.config.image_size,
             "verbose": False,
+            # Pascal (sm_61) runs fp16 at ~1/64 fp32 throughput — pin full
+            # precision explicitly rather than trusting the upstream default.
+            "half": False,
         }
         if self.device:
             predict_args["device"] = self.device
@@ -98,7 +120,7 @@ class ObjectDetector:
         # for the GPU; each model adds its detections to the merged list.
         with self._lock:
             for model in self.models:
-                results = model.predict(**predict_args)
+                results = self._predict_resilient(model, predict_args)
                 if not results:
                     continue
 
@@ -123,6 +145,34 @@ class ObjectDetector:
                     )
 
         return detections
+
+    def _predict_resilient(self, model, predict_args: dict):
+        """One model predict; on CUDA OOM, re-pick the freest GPU and retry once.
+
+        The detector shares its GPU with Ollama, whose residency changes under
+        a running server (models load/unload on demand). A single OOM therefore
+        means "my startup pick went stale", not "give up": free the cache,
+        re-probe, and retry on whatever card now has the most room. A second
+        failure propagates — the camera loop already logs and survives it.
+        """
+        try:
+            return model.predict(**predict_args)
+        except Exception as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            LOGGER.warning("Detector CUDA OOM on %s; re-picking device", self.device)
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            repicked = _resolve_auto_device()
+            if repicked:
+                self.device = repicked
+                predict_args = {**predict_args, "device": repicked}
+                LOGGER.info("Detector device re-picked: %s", repicked)
+            return model.predict(**predict_args)
 
 
 def draw_detections(frame, detections: list[Detection]):

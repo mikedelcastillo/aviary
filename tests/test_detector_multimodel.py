@@ -106,3 +106,43 @@ def test_missing_model_file_raises(monkeypatch) -> None:
 
     with pytest.raises(FileNotFoundError):
         ObjectDetector(ModelConfig(paths=(Path("/missing.pt"),)))
+
+
+class _OomThenOkModel:
+    """predict raises CUDA OOM once, then behaves like an empty model."""
+
+    def __init__(self) -> None:
+        self.names = {}
+        self.calls = 0
+
+    def predict(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 158.00 MiB")
+        return [_FakeResult([])]
+
+
+def test_predict_survives_one_cuda_oom(monkeypatch) -> None:
+    oom_model = _OomThenOkModel()
+    _install_fake_yolo(monkeypatch, [oom_model])
+
+    detector = ObjectDetector(ModelConfig(paths=(Path("/a.pt"),)))
+    assert detector.predict(frame=object()) == []
+    assert oom_model.calls == 2  # first call OOMed, retry succeeded
+
+
+def test_predict_propagates_non_oom_errors(monkeypatch) -> None:
+    class _Broken:
+        names = {}
+
+        def predict(self, **_kwargs):
+            raise RuntimeError("something unrelated")
+
+    _install_fake_yolo(monkeypatch, [_Broken()])
+
+    detector = ObjectDetector(ModelConfig(paths=(Path("/a.pt"),)))
+    try:
+        detector.predict(frame=object())
+        raise AssertionError("expected the error to propagate")
+    except RuntimeError as exc:
+        assert "unrelated" in str(exc)

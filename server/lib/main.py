@@ -637,6 +637,8 @@ def main() -> None:
     # Load the model before the live dashboard takes over the screen; YOLO's
     # import/load chatter scrolls normally here instead of fighting the render.
     detector = ObjectDetector(app_config.model)
+    # Pay CUDA context init + cuDNN autotune now, not on the first real frame.
+    detector.warmup()
     notifier = build_notifier(app_config)
 
     # One shared Ollama client for every AI feature (NL routing, chat, vision
