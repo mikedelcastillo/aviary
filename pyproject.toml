@@ -18,6 +18,10 @@ dependencies = [
     # camera reboot, which Tapo's ONVIF can't do. Imported lazily; dormant
     # until TAPO_CLOUD_PASSWORD is set.
     "pytapo>=3.4",
+    # Official NVML binding (imports as `pynvml`) for /machine GPU telemetry —
+    # a persistent handle instead of forking nvidia-smi once per second.
+    # lib.machine falls back to nvidia-smi if NVML is unavailable.
+    "nvidia-ml-py>=12.535",
     # torch/torchvision come from the CUDA 11.8 (cu118) index below — the last
     # build line that supports the GTX 1060 (Pascal, sm_61): cu128's cuDNN 9
     # refuses SM < 7.5 and its kernels start at sm_75, so a cu128 torch crashes

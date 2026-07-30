@@ -314,6 +314,63 @@ def parse_nvidia_smi(text: str) -> list[GpuStat]:
     return gpus
 
 
+# NVML module handle: None = not tried yet, False = unavailable (stay on the
+# nvidia-smi fallback), otherwise the initialized pynvml module. The sampler
+# polls every second forever — a persistent NVML session costs microseconds
+# per read where forking nvidia-smi cost a subprocess each time.
+_NVML = None
+
+
+def _read_gpus_nvml() -> list[GpuStat] | None:
+    global _NVML
+    if _NVML is False:
+        return None
+    try:
+        if _NVML is None:
+            import pynvml
+
+            pynvml.nvmlInit()
+            _NVML = pynvml
+        gpus: list[GpuStat] = []
+        for index in range(_NVML.nvmlDeviceGetCount()):
+            handle = _NVML.nvmlDeviceGetHandleByIndex(index)
+            name = _NVML.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", "replace")
+            try:
+                util = float(_NVML.nvmlDeviceGetUtilizationRates(handle).gpu)
+            except Exception:
+                util = None
+            try:
+                temp = float(
+                    _NVML.nvmlDeviceGetTemperature(handle, _NVML.NVML_TEMPERATURE_GPU)
+                )
+            except Exception:
+                temp = None
+            mem_used = mem_total = None
+            try:
+                memory = _NVML.nvmlDeviceGetMemoryInfo(handle)
+                mem_used = round(memory.used / 1048576.0, 1)
+                mem_total = round(memory.total / 1048576.0, 1)
+            except Exception:
+                pass
+            gpus.append(
+                GpuStat(
+                    index=index,
+                    name=str(name) or "GPU",
+                    util_percent=util,
+                    temp_c=temp,
+                    mem_used_mb=mem_used,
+                    mem_total_mb=mem_total,
+                )
+            )
+        return gpus
+    except Exception:
+        # Driver/library missing or NVML died: don't retry every second.
+        _NVML = False
+        return None
+
+
 def _run_nvidia_smi(timeout: float = 5.0) -> str | None:
     try:
         result = subprocess.run(
@@ -331,7 +388,16 @@ def _run_nvidia_smi(timeout: float = 5.0) -> str | None:
 
 
 def read_gpus(query: Callable[[], str | None] = _run_nvidia_smi) -> list[GpuStat]:
-    """Read every NVIDIA GPU's usage/temp/VRAM; empty list if none/unavailable."""
+    """Read every NVIDIA GPU's usage/temp/VRAM; empty list if none/unavailable.
+
+    The default path asks NVML directly (persistent handle, no fork); the
+    nvidia-smi subprocess remains both the fallback and the injection seam —
+    a caller-supplied ``query`` always wins, so tests can feed raw CSV.
+    """
+    if query is _run_nvidia_smi:
+        stats = _read_gpus_nvml()
+        if stats is not None:
+            return stats
     output = query()
     if not output:
         return []
