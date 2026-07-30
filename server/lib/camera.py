@@ -34,6 +34,12 @@ READ_FAILURE_LIMIT = 3
 # a /play or a lapsed timed pause brings the stream back within ~a second.
 PAUSE_POLL_SECONDS = 1.0
 
+# How stale the published /snapshot frame may get on cameras whose inference
+# sampling is slower than this. Decoding is throttled to the inference tick (see
+# the grab/retrieve split in monitor_camera); this floor keeps snapshots fresh
+# even at very low sample_fps without paying full-stream decode.
+SNAPSHOT_REFRESH_SECONDS = 1.0
+
 
 def configure_ffmpeg_capture(cameras: list[CameraConfig] | None = None) -> None:
     """Pin OpenCV's FFmpeg backend to TCP with a socket timeout.
@@ -180,6 +186,7 @@ def monitor_camera(
             LOGGER.info("Stream opened for %s", camera.name)
         stats.set_status("connected")
         next_inference_at = 0.0
+        last_publish_at = 0.0
         consecutive_failures = 0
         paused_out = False
         quality_changed = False
@@ -199,8 +206,15 @@ def monitor_camera(
                         quality_changed = True
                         break
 
-                ok, frame = capture.read()
-                if not ok or frame is None:
+                # grab() pulls the frame off the socket WITHOUT decoding it.
+                # The stream arrives at its native rate (~15fps of up to
+                # 2304x1296 H264) but inference samples at ~1fps, so decoding
+                # every frame burned most of a CPU core per camera for frames
+                # nobody looked at. Decode (retrieve) only when the frame is
+                # actually used: at the inference tick, or to keep the
+                # published /snapshot frame no staler than
+                # SNAPSHOT_REFRESH_SECONDS.
+                if not capture.grab():
                     consecutive_failures += 1
                     stats.record_read_failure()
                     if consecutive_failures >= READ_FAILURE_LIMIT:
@@ -224,14 +238,27 @@ def monitor_camera(
                 backoff = camera.reconnect_seconds
                 signal_wedge(True)
 
-                # Publish the freshest frame for on-demand snapshots regardless of
-                # the inference throttle below, so /snapshot returns a near-live
-                # image even on cameras sampled at a low FPS. A reference swap
-                # under a dedicated lock, so it costs nothing on the hot path.
-                stats.set_latest_frame(frame)
-
                 now = time.monotonic()
-                if now < next_inference_at:
+                inference_due = now >= next_inference_at
+                snapshot_due = now - last_publish_at >= SNAPSHOT_REFRESH_SECONDS
+                if not (inference_due or snapshot_due):
+                    continue
+
+                ok, frame = capture.retrieve()
+                if not ok or frame is None:
+                    # Grabbed but undecodable (corrupt slice mid-stream). Count
+                    # it like a read failure; the next grab usually recovers.
+                    consecutive_failures += 1
+                    stats.record_read_failure()
+                    continue
+
+                # Publish the freshest decoded frame for on-demand snapshots so
+                # /snapshot returns a near-live image even on cameras sampled at
+                # a low FPS. A reference swap under a dedicated lock.
+                stats.set_latest_frame(frame)
+                last_publish_at = now
+
+                if not inference_due:
                     continue
                 next_inference_at = now + min_frame_interval
 

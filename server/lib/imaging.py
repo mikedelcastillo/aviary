@@ -108,6 +108,12 @@ def is_ir_array(frame, threshold: float = IR_SATURATION_THRESHOLD) -> bool:
     """
     if frame is None:
         return False
+    # A mean over ~100k pixels answers "is this grayscale" just as well as one
+    # over the full 2304x1296 frame, at a fraction of the HSV-convert cost on
+    # the per-inference hot path. Stride keeps small frames untouched.
+    stride = max(1, min(frame.shape[0], frame.shape[1]) // 320)
+    if stride > 1:
+        frame = np.ascontiguousarray(frame[::stride, ::stride])
     saturation = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)[:, :, 1]
     return float(saturation.mean()) < threshold
 

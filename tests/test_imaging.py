@@ -49,3 +49,15 @@ def test_downscale_array_to_jpeg_caps_long_edge() -> None:
     out = downscale_array_to_jpeg(frame, max_dim=1024)
     h, w = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR).shape[:2]
     assert max(h, w) == 1024 and (h, w) == (576, 1024)
+
+
+def test_is_ir_frame_large_frame_strided_paths_agree() -> None:
+    from lib.imaging import is_ir_array
+
+    # Camera-native sizes take the subsampled path; verdicts must match the
+    # small-frame path for both IR-ish and colour frames.
+    gray = np.full((1296, 2304, 3), 90, np.uint8)
+    assert is_ir_array(gray) is True
+    color = np.zeros((1296, 2304, 3), np.uint8)
+    color[:, :, 2] = 200
+    assert is_ir_array(color) is False
