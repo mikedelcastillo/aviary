@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
 import sys
 from collections.abc import Callable
@@ -40,8 +41,14 @@ def configure_dashboard_logging(
         root.removeHandler(handler)
 
     # Always tee everything to the logfile so h264/timeout detail and full
-    # tracebacks survive for post-mortem, regardless of render mode.
-    file_handler = logging.FileHandler(logfile)
+    # tracebacks survive for post-mortem, regardless of render mode. Rotated so
+    # a long-lived server can't grow the file without bound (it once reached
+    # 208MB); ~3 generations of 50MB is plenty of post-mortem window. The raw
+    # fd-2 redirect (NativeStderrRedirect) holds its own handle, so its ffmpeg
+    # noise follows a rotated-out file until the next restart — acceptable.
+    file_handler = logging.handlers.RotatingFileHandler(
+        logfile, maxBytes=50_000_000, backupCount=2
+    )
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root.addHandler(file_handler)
 

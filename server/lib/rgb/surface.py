@@ -119,6 +119,7 @@ class OpenRGBSurface(Surface):
         self._devices: list = []          # openrgb Device objects
         self._spans: list[tuple[int, int, int]] = []  # (device_idx_in_list, start, end)
         self._RGBColor = None
+        self._offline_logged = False
         self.reconnect()
 
     @property
@@ -142,10 +143,15 @@ class OpenRGBSurface(Surface):
             )
             self._build()
             log.info("OpenRGB connected: %d LEDs across %d device(s).", self.size, len(self._devices))
+            self._offline_logged = False
             return True
         except Exception as e:  # noqa: BLE001 - server down / refused
-            log.info("OpenRGB server not reachable at %s:%s (%s); will retry.",
-                     self.config.host, self.config.port, e)
+            # First miss at INFO; the retries drop to DEBUG so a box without an
+            # OpenRGB server doesn't fill the log with an identical line forever.
+            level = logging.DEBUG if self._offline_logged else logging.INFO
+            log.log(level, "OpenRGB server not reachable at %s:%s (%s); will retry.",
+                    self.config.host, self.config.port, e)
+            self._offline_logged = True
             self._client = None
             return False
 

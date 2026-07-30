@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import subprocess
 import threading
+import time
 from collections import deque
 
 from lib.clock import now_ph
@@ -22,6 +25,26 @@ from lib.terminal_logging import NativeStderrRedirect, configure_dashboard_loggi
 
 
 LOGGER = logging.getLogger("lib.dashboard")
+
+
+def _has_attached_client() -> bool:
+    """Is anyone actually looking at this terminal?
+
+    Inside tmux (the production server pane) ``tmux list-clients`` says whether
+    a client is attached to our session; outside tmux the process is running in
+    someone's own terminal, so assume watched. Any tmux hiccup also defaults to
+    watched — rendering for nobody is waste, but not rendering for somebody is
+    a bug.
+    """
+    if "TMUX" not in os.environ:
+        return True
+    try:
+        result = subprocess.run(
+            ["tmux", "list-clients"], capture_output=True, text=True, timeout=2.0
+        )
+        return bool(result.stdout.strip()) or result.returncode != 0
+    except Exception:
+        return True
 
 # Glyph + colour per lifecycle state. Keys are the only valid status strings.
 STATUS_STYLE = {
@@ -278,11 +301,28 @@ class Dashboard:
             console=self.console,
             refresh_per_second=self._refresh,
             screen=True,
+            # We drive every repaint ourselves below; Rich's refresh thread
+            # would otherwise re-paint the last frame 4x/s even with no viewer.
+            auto_refresh=False,
         ) as live:
+            # The dashboard usually renders into a detached tmux pane with no
+            # client attached — rebuilding every table 4x/s for nobody is pure
+            # CPU burn, 24/7. Poll for an attached client every few seconds and
+            # only render while someone is actually looking; an attach picks
+            # the render back up within the poll interval.
+            has_client = True
+            last_client_check = 0.0
             while not self._stop.is_set():
-                live.update(self._render())
-                self._stop.wait(1.0 / self._refresh)
-            live.update(self._render())
+                now = time.monotonic()
+                if now - last_client_check >= 3.0:
+                    has_client = _has_attached_client()
+                    last_client_check = now
+                if has_client:
+                    live.update(self._render(), refresh=True)
+                    self._stop.wait(1.0 / self._refresh)
+                else:
+                    self._stop.wait(0.5)
+            live.update(self._render(), refresh=True)
 
     def _run_plain(self) -> None:
         while not self._stop.is_set():

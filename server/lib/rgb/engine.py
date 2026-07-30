@@ -28,7 +28,11 @@ log = logging.getLogger("aviary.rgb.engine")
 
 BOOT_SECONDS = 4.0
 DEFAULT_MANUAL_SECONDS = 600.0  # /rgb red  -> 10 minutes, then back to auto
+# Reconnect probing backs off exponentially from the base to the cap while the
+# OpenRGB server stays away, so a box that simply has no LED rig doesn't retry
+# (and log) every 5s forever — that alone once wrote 200k+ log lines.
 RECONNECT_EVERY = 5.0
+RECONNECT_MAX = 600.0
 
 # Named colors accepted by /rgb (plus any bird name and #hex / hex).
 NAMED_COLORS: dict[str, Color] = {
@@ -120,6 +124,7 @@ class RGBController:
         self._boot_start = 0.0
         self._thread: threading.Thread | None = None
         self._last_reconnect = 0.0
+        self._reconnect_delay = RECONNECT_EVERY
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -296,6 +301,15 @@ class RGBController:
         lines.append(f"  brightness: {int(self._brightness * 100)}%")
         return "\n".join(lines)
 
+    def _maybe_reconnect(self, t: float) -> None:
+        if (t - self._last_reconnect) <= self._reconnect_delay:
+            return
+        self._last_reconnect = t
+        if self._surface.reconnect():
+            self._reconnect_delay = RECONNECT_EVERY
+        else:
+            self._reconnect_delay = min(self._reconnect_delay * 2, RECONNECT_MAX)
+
     # -- render loop ----------------------------------------------------------
     def _run(self) -> None:
         period = 1.0 / self._fps
@@ -303,13 +317,16 @@ class RGBController:
             t = time.monotonic()
             try:
                 self._poll_discovery()
-                frame = self._render(t)
-                if self._brightness < 1.0:
-                    frame = [c.scale(self._brightness) for c in frame]
-                ok = self._surface.write(frame)
-                if not ok and (t - self._last_reconnect) > RECONNECT_EVERY:
-                    self._last_reconnect = t
-                    self._surface.reconnect()
+                if not self._surface.connected:
+                    # No hardware to drive: skip the render entirely and probe
+                    # for the server on the backoff schedule.
+                    self._maybe_reconnect(t)
+                else:
+                    frame = self._render(t)
+                    if self._brightness < 1.0:
+                        frame = [c.scale(self._brightness) for c in frame]
+                    if not self._surface.write(frame):
+                        self._maybe_reconnect(t)
             except Exception:  # noqa: BLE001
                 log.exception("RGB render tick failed")
             if self._own_stop.wait(period) or self._stop.wait(0):
