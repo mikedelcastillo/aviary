@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,12 +12,39 @@ import cv2
 from lib.config import ModelConfig
 from lib.labels import format_confidence, pretty
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class Detection:
     label: str
     confidence: float
     bbox_xyxy: tuple[int, int, int, int]
+
+
+def pick_freest_device(free_bytes_by_index: list[int]) -> str | None:
+    """The ``cuda:N`` with the most free VRAM, or None when the default is fine.
+
+    On a single-GPU (or no-GPU) box ultralytics' own default is already right;
+    only a multi-GPU box needs steering, so detection lands on the idle card
+    instead of piling onto cuda:0 with the Ollama models.
+    """
+    if len(free_bytes_by_index) < 2:
+        return None
+    return f"cuda:{max(range(len(free_bytes_by_index)), key=free_bytes_by_index.__getitem__)}"
+
+
+def _resolve_auto_device() -> str | None:
+    """Probe CUDA for the freest GPU; None leaves the choice to ultralytics."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        free = [torch.cuda.mem_get_info(i)[0] for i in range(torch.cuda.device_count())]
+    except Exception:  # CUDA probing must never break detector startup
+        return None
+    return pick_freest_device(free)
 
 
 class ObjectDetector:
@@ -28,6 +56,13 @@ class ObjectDetector:
         from ultralytics import YOLO
 
         self.config = config
+        # "auto" on a multi-GPU box: pin to the GPU with the most free VRAM,
+        # measured once at startup. ponytail: no mid-run rebalancing — the pick
+        # only goes stale if Ollama's placement changes under a running server,
+        # and a restart re-picks.
+        self.device = config.device if config.device != "auto" else _resolve_auto_device()
+        if self.device:
+            LOGGER.info("Detector device: %s", self.device)
         # Each model runs its own pass per frame; detections are concatenated.
         self.models = [YOLO(str(path)) for path in config.paths]
         self._lock = threading.Lock()
@@ -55,8 +90,8 @@ class ObjectDetector:
             "imgsz": self.config.image_size,
             "verbose": False,
         }
-        if self.config.device != "auto":
-            predict_args["device"] = self.config.device
+        if self.device:
+            predict_args["device"] = self.device
 
         detections: list[Detection] = []
         # One lock still serializes all inference so the models never contend

@@ -376,11 +376,20 @@ def _privacy_config() -> PrivacyConfig:
     )
 
 
+def _model_device() -> str:
+    """Detector device; the env overrides the ModelConfig default ("auto").
+
+    "auto" picks the GPU with the most free VRAM on multi-GPU boxes (see
+    detector.py); set e.g. MODEL_DEVICE=cuda:1 or cpu to pin it by hand.
+    """
+    return os.environ.get("MODEL_DEVICE", "").strip() or ModelConfig.device
+
 def build_config() -> AppConfig:
     model = ModelConfig(
         paths=_model_paths(),
         confidence=_model_confidence(),
         image_size=_model_image_size(),
+        device=_model_device(),
     )
 
     telegram = TelegramConfig(

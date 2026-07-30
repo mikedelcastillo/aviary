@@ -753,8 +753,12 @@ def _number_lines(telemetry: MachineTelemetry) -> list[str]:
     else:
         lines.append(_metric_line("RAM", "n/a"))
     if telemetry.gpus:
+        # With one GPU keep the plain "GPU" label; with several, index each row
+        # (its VRAM row follows directly underneath, so VRAM stays unlabeled).
+        multi_gpu = len(telemetry.gpus) > 1
         for gpu in telemetry.gpus:
-            lines.append(_metric_line("GPU", _fmt_pct(gpu.util_percent), _fmt_temp(gpu.temp_c)))
+            label = f"GPU{gpu.index}" if multi_gpu else "GPU"
+            lines.append(_metric_line(label, _fmt_pct(gpu.util_percent), _fmt_temp(gpu.temp_c)))
             if gpu.mem_total_mb is not None:
                 lines.append(
                     _metric_line(
@@ -778,9 +782,11 @@ def _spec_lines(telemetry: MachineTelemetry) -> list[str]:
         specs.append(f"CPU: {telemetry.cpu_name}{threads}")
     if telemetry.mem_total_mb is not None:
         specs.append(f"RAM: {_fmt_gb(telemetry.mem_total_mb)} GB")
+    multi_gpu = len(telemetry.gpus) > 1
     for gpu in telemetry.gpus:
         vram = f" · {_fmt_gb(gpu.mem_total_mb)} GB" if gpu.mem_total_mb is not None else ""
-        specs.append(f"GPU: {gpu.name}{vram}")
+        label = f"GPU{gpu.index}" if multi_gpu else "GPU"
+        specs.append(f"{label}: {gpu.name}{vram}")
     return specs
 
 
