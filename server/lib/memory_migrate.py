@@ -38,7 +38,7 @@ from lib.ai.vlm import analyze_frame
 from lib.config import _ollama_config, build_config
 from lib.detector import ObjectDetector
 from lib.journal import MemoryDetection, MemoryObservation, observation_record
-from lib.memory_build import annotate, build_observation
+from lib.memory_build import annotate_for_vlm, build_observation
 
 
 def _iter_day_files(memories_dir: Path, days: int | None, skip_today: bool) -> list[Path]:
@@ -88,11 +88,14 @@ class Migrator:
         detections = self._detect(image_bytes)
         analysis = None
         if detections:
-            boxed = annotate(image_bytes, detections)
+            # Boxes rendered directly at the VLM input size, one JPEG cycle;
+            # max_dim=None below so analyze_frame doesn't re-encode it again.
+            boxed = annotate_for_vlm(image_bytes, detections)
             try:
                 analysis = analyze_frame(
                     self._client, self._vlm_model, boxed,
-                    [d.label for d in detections], timeout_seconds=self._timeout,
+                    [d.label for d in detections], max_dim=None,
+                    timeout_seconds=self._timeout,
                 )
             except Exception as exc:  # keep identity even if the VLM is down
                 print(f"    VLM failed for {path.name}: {str(exc)[:60]}", flush=True)

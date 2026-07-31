@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from lib.imaging import draw_boxes
+from lib.imaging import draw_boxes, draw_boxes_downscaled
 from lib.journal import MemoryDetection, MemoryObservation
 from lib.labels import pretty
 from lib.rgb.birds import color_bgr
@@ -47,6 +47,21 @@ def annotate(image_bytes: bytes, detections) -> bytes:
     return draw_boxes(
         image_bytes,
         [(pretty(d.label), tuple(d.bbox_xyxy), color_bgr(d.label)) for d in detections],
+    )
+
+
+def annotate_for_vlm(image_bytes: bytes, detections, max_dim: int = 1024) -> bytes:
+    """Labeled boxes rendered directly at the VLM's input size, one JPEG cycle.
+
+    The drain paths (backfill, memory-migrate) have no Telegram album sharing
+    the annotated frame, so unlike :func:`annotate` there is no reason to draw
+    at full resolution and downscale afterwards. Callers pass the result to
+    ``analyze_frame(..., max_dim=None)`` so it isn't re-encoded again.
+    """
+    return draw_boxes_downscaled(
+        image_bytes,
+        [(pretty(d.label), tuple(d.bbox_xyxy), color_bgr(d.label)) for d in detections],
+        max_dim=max_dim,
     )
 
 

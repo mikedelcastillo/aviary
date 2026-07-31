@@ -61,3 +61,37 @@ def test_is_ir_frame_large_frame_strided_paths_agree() -> None:
     color = np.zeros((1296, 2304, 3), np.uint8)
     color[:, :, 2] = 200
     assert is_ir_array(color) is False
+
+
+def test_draw_boxes_downscaled_resizes_and_scales_boxes() -> None:
+    from lib.imaging import draw_boxes_downscaled
+
+    # 2048-wide black frame, box in the bottom-right quadrant. After the 0.5x
+    # resize the drawn pixels must land in the OUTPUT's bottom-right quadrant —
+    # proof the bbox was scaled along with the image.
+    base = np.zeros((1024, 2048, 3), np.uint8)
+    out = draw_boxes_downscaled(
+        _jpeg(base), [("Percy", (1500, 700, 1900, 950))], max_dim=1024
+    )
+    decoded = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded is not None
+    assert max(decoded.shape[:2]) == 1024
+    height, width = decoded.shape[:2]
+    assert decoded[height // 2 :, width // 2 :].max() > 0
+    assert decoded[: height // 2, : width // 2].max() == 0
+
+
+def test_draw_boxes_downscaled_small_frame_untouched_size() -> None:
+    from lib.imaging import draw_boxes_downscaled
+
+    base = np.zeros((200, 300, 3), np.uint8)
+    out = draw_boxes_downscaled(_jpeg(base), [("Percy", (10, 20, 100, 150))], max_dim=1024)
+    decoded = cv2.imdecode(np.frombuffer(out, np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape == (200, 300, 3)
+    assert decoded.max() > 0
+
+
+def test_draw_boxes_downscaled_survives_undecodable_input() -> None:
+    from lib.imaging import draw_boxes_downscaled
+
+    assert draw_boxes_downscaled(b"not a jpeg", [("Percy", (0, 0, 5, 5))]) == b"not a jpeg"

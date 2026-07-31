@@ -36,7 +36,7 @@ import requests
 
 from lib.clock import now_ph
 from lib.journal import load_day_records, observation_record, update_day_observations
-from lib.memory_build import analysis_has_content, annotate, build_observation
+from lib.memory_build import analysis_has_content, annotate_for_vlm, build_observation
 
 
 LOGGER = logging.getLogger("lib.backfill")
@@ -253,7 +253,9 @@ def build_memory_backfill(
         if not stored:
             attempts[photo] = PHOTO_MAX_ATTEMPTS
             return None
-        boxed = annotate(path.read_bytes(), stored)
+        # Boxes rendered directly at the VLM input size — the analyze callable
+        # must not downscale again (main wires the drain to max_dim=None).
+        boxed = annotate_for_vlm(path.read_bytes(), stored)
         analysis = analyze(boxed, [d.label for d in stored])
         if not analysis_has_content(analysis):
             # The VLM ran but said nothing usable — a contentless result must not

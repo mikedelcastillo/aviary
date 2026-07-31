@@ -964,6 +964,21 @@ def main() -> None:
             timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
         )
 
+    def analyze_presized_memory_frame(image: bytes, labels: list) -> dict:
+        # Drain-path variant: the backfill renders its boxed frame directly at
+        # the VLM input size (annotate_for_vlm), so the internal downscale
+        # re-encode is skipped.
+        if ollama_client is None:
+            return {}
+        return analyze_frame(
+            ollama_client,
+            app_config.ollama.vlm_model,
+            image,
+            labels,
+            max_dim=None,
+            timeout_seconds=VLM_DESCRIBE_TIMEOUT_SECONDS,
+        )
+
     def make_find_lights() -> FindFlash | None:
         # Fresh per search, like the patrol: which cameras are dark is decided
         # the moment the search starts.
@@ -1556,7 +1571,7 @@ def main() -> None:
             replay=nl_router.replay_pending if nl_router is not None else None,
             notify=notifier.send_text if notifier is not None else None,
             memory_backfill=build_memory_backfill(
-                memories_dir, analyze_memory_frame, app_config.ollama.vlm_model
+                memories_dir, analyze_presized_memory_frame, app_config.ollama.vlm_model
             ),
             llm_model=app_config.ollama.llm_model,
         ).start()

@@ -40,6 +40,13 @@ def draw_boxes(
     array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     if array is None:
         return image_bytes
+    draw_boxes_on_array(array, boxes)
+    ok, buffer = cv2.imencode(".jpg", array, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    return buffer.tobytes() if ok else image_bytes
+
+
+def draw_boxes_on_array(array, boxes: list[tuple]) -> None:
+    """Draw labeled detection rectangles in place on a decoded BGR frame."""
     height, width = array.shape[:2]
     thickness = max(2, round(min(height, width) / 300))
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -56,6 +63,39 @@ def draw_boxes(
                 array, label, (x1 + 2, top - 2), font, font_scale,
                 (255, 255, 255), max(1, thickness - 1), cv2.LINE_AA,
             )
+
+
+def draw_boxes_downscaled(
+    image_bytes: bytes,
+    boxes: list[tuple],
+    *,
+    max_dim: int = 1280,
+    quality: int = 80,
+) -> bytes:
+    """Resize to ``max_dim`` and draw boxes in ONE decode/encode cycle.
+
+    For VLM-bound frames with no other consumer: drawing at the target size
+    (with the box coordinates scaled to match) replaces the draw-then-downscale
+    chain — two fewer full JPEG cycles per frame, and the label text is
+    rendered at final resolution instead of being resampled. Falls back to the
+    input unchanged when the image can't be decoded.
+    """
+    array = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if array is None:
+        return image_bytes
+    height, width = array.shape[:2]
+    scale = max_dim / max(height, width)
+    if scale < 1.0:
+        array = cv2.resize(array, (max(1, int(width * scale)), max(1, int(height * scale))))
+        boxes = [
+            (
+                box[0],
+                tuple(int(round(value * scale)) for value in box[1]),
+                *box[2:],
+            )
+            for box in boxes
+        ]
+    draw_boxes_on_array(array, boxes)
     ok, buffer = cv2.imencode(".jpg", array, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     return buffer.tobytes() if ok else image_bytes
 
