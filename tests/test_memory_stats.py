@@ -111,10 +111,28 @@ def test_gather_empty_store(tmp_path) -> None:
     assert "Days: 0" in format_memory_stats(stats)
 
 
-def test_undecorated_older_than_backfill_window_counts_as_migrate_work(tmp_path) -> None:
-    # The auto backfill worker only scans the last MEMORY_BACKFILL_DAYS — an
-    # undecorated observation older than that would sit "awaiting (auto)"
-    # forever if we labeled it that way. It belongs to memory-migrate.
+def test_old_undecorated_is_auto_backfill_work_with_unbounded_scan(tmp_path) -> None:
+    # The backfill worker scans the whole history by default
+    # (MEMORY_BACKFILL_DAYS=None), so even a month-old undecorated observation
+    # is "awaiting (auto)" — nothing is left to a manual memory-migrate run.
+    memories = tmp_path / "memories"
+    memories.mkdir()
+    photo = memories / "old.jpg"
+    photo.write_bytes(b"x")
+    append_entry(memories, MemoryEntry(
+        datetime(2026, 6, 25, 9, 0), ["percy"], "note",
+        photos=[str(photo)],
+        observations=[_obs(str(photo), vlm="", activity="")],
+    ))
+    stats = gather_memory_stats(memories, now=NOW)
+    assert stats.undecorated == 1
+    assert stats.undecorated_stale == 0
+
+
+def test_bounded_backfill_window_still_splits_stale_work(tmp_path, monkeypatch) -> None:
+    # With a bounded window the old split survives: older-than-window
+    # undecorated work is labeled for memory-migrate, not "(auto)".
+    monkeypatch.setattr("lib.memory_stats.MEMORY_BACKFILL_DAYS", 3)
     memories = tmp_path / "memories"
     memories.mkdir()
     photo = memories / "old.jpg"

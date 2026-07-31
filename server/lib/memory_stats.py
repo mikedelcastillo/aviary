@@ -67,10 +67,14 @@ def gather_memory_stats(
 ) -> MemoryStatsReport:
     memories_dir = Path(memories_dir)
     report = MemoryStatsReport(pending_messages=pending_count)
-    # The auto backfill worker only scans this far back — an undecorated
-    # observation OLDER than that is memory-migrate's job, and calling it
-    # "(auto)" in the report would overstate forever.
-    backfill_floor = now().date().toordinal() - (MEMORY_BACKFILL_DAYS - 1)
+    # The auto backfill worker scans the WHOLE history when MEMORY_BACKFILL_DAYS
+    # is None (the default) — then every undecorated observation is its job and
+    # nothing counts as stale. A bounded window keeps the old split: older than
+    # the window means a manual memory-migrate run.
+    if MEMORY_BACKFILL_DAYS is None:
+        backfill_floor = date.min.toordinal()
+    else:
+        backfill_floor = now().date().toordinal() - (MEMORY_BACKFILL_DAYS - 1)
 
     day_files = sorted(f for f in memories_dir.glob("*.jsonl"))
     days: list[str] = []
