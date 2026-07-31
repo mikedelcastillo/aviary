@@ -15,12 +15,21 @@ confidently identifiable.
 
 ## Platform assumption
 
-This project runs on a single **Linux machine with an NVIDIA GTX 1060** (Pascal,
-CUDA **cu118**). `torch`/`torchvision` are pinned to the cu118 wheel index in
-`pyproject.toml` — torch 2.7.1 is the last release with Pascal (sm_61) kernels;
-newer cu12x builds ship cuDNN 9, which refuses SM < 7.5 and crashes every
-inference — so `uv sync` installs the right GPU build with no post-step. There
-is no install-gpu script and no Windows/ROCm/multi-GPU/Docker tooling.
+This project runs on a single Linux machine with **two Pascal GPUs: a GTX
+1060 6GB and a GTX 1050 Ti 4GB** (both sm_61, CUDA **cu118**).
+`torch`/`torchvision` are pinned to the cu118 wheel index in `pyproject.toml`
+— torch 2.7.1 is the last release with Pascal (sm_61) kernels; newer cu12x
+builds ship cuDNN 9, which refuses SM < 7.5 and crashes every inference — so
+`uv sync` installs the right GPU build with no post-step. There is no
+install-gpu script and no Windows/ROCm/Docker tooling.
+
+Both cards are mostly occupied by the root-owned Ollama models (the VLM on
+the 1060, the chat LLM on the 1050 Ti); the detector's `MODEL_DEVICE=auto`
+picks whichever card has the most free VRAM at startup and re-picks on a CUDA
+OOM. Two traps worth knowing: **torch orders CUDA devices fastest-first**
+(torch `cuda:0` = the GTX 1060, which is nvidia-smi GPU **1**), and **Pascal
+runs fp16 at ~1/64 of fp32 throughput** — never enable half precision or AMP
+on this machine.
 
 ## Tooling
 
@@ -28,7 +37,7 @@ The whole repo is one [uv](https://docs.astral.sh/uv/) project. Install uv once
 (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then from the repo root:
 
 ```bash
-uv sync                  # create .venv, install every subsystem's deps + cu128 torch
+uv sync                  # create .venv, install every subsystem's deps + cu118 torch
 ```
 
 Run any subsystem with a short named command (think `npm run`):
@@ -122,9 +131,9 @@ important for validation because they match the deployment view.
 
 ## Runtime Notes
 
-`uv run server` runs the server natively in the uv venv on the Linux/RTX 5060
-host. `uv sync` already installs the cu128 torch build (pinned in
-`pyproject.toml`), so there is no separate GPU-install step.
+`uv run server` runs the server natively in the uv venv on the Linux host.
+`uv sync` already installs the cu118 torch build (pinned in `pyproject.toml`),
+so there is no separate GPU-install step.
 
 ## External References
 

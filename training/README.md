@@ -26,7 +26,8 @@ uv run train-archive   # -> data/models/archive-NNN.pt
 
 Each command prepares `data/training/datasets/<model>/` from
 `data/annotation/raw`, then trains and exports to the next sequence number.
-(`uv sync` already installed the cu128 torch build for the RTX 5060.) Extra flags
+(`uv sync` already installed the cu118 torch build for the Pascal GPUs; keep
+AMP off when training here — Pascal fp16 runs at ~1/64 fp32.) Extra flags
 pass through to `train`, e.g.:
 
 ```bash
@@ -75,7 +76,8 @@ uv run train \
   --export-to training/models/live.pt
 ```
 
-Use `--device cuda:0` to pin the RTX 5060, or omit `--device` to let Ultralytics
+Use `--device cuda:N` to pin a GPU (torch orders devices fastest-first: cuda:0
+is the GTX 1060, cuda:1 the 1050 Ti), or omit `--device` to let Ultralytics
 decide. `--name live`/`archive` keeps each model's runs separate under
 `data/training/runs/`.
 

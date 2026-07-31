@@ -49,3 +49,9 @@ def test_explicit_device_included() -> None:
     mod = _load_module()
     ta = mod.build_train_args(mod.parse_args(["--data", "d.yaml", "--device", "cuda:0"]))
     assert ta["device"] == "cuda:0"
+
+
+def test_amp_off_by_default_on_pascal_and_opt_in() -> None:
+    mod = _load_module()
+    assert mod.build_train_args(mod.parse_args(["--data", "d.yaml"]))["amp"] is False
+    assert mod.build_train_args(mod.parse_args(["--data", "d.yaml", "--amp"]))["amp"] is True

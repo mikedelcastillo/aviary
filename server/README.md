@@ -36,8 +36,8 @@ From the repo root (see the top-level README for installing uv):
 uv run server
 ```
 
-This runs the server natively in the uv venv on the Linux/RTX 5060 host (`uv sync`
-already installed the cu128 torch build).
+This runs the server natively in the uv venv on the Linux host (`uv sync`
+already installed the cu118 torch build for the Pascal GPUs).
 
 To run it in the background with boot autostart instead, use `uv run server-up`
 (a systemd user service runs the dashboard inside a dedicated tmux session). Re-run

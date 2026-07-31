@@ -68,6 +68,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="RNG seed (Ultralytics seed). Vary across otherwise-identical runs to "
         "measure run-to-run variance — essential when a metric's test slice is tiny.",
     )
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable mixed precision (Ultralytics amp). OFF by default: this "
+        "machine's Pascal GPUs (sm_61) run fp16 at ~1/64 fp32 throughput, so "
+        "autocast makes training slower, not faster. Only enable on Volta+.",
+    )
     return parser.parse_args(argv)
 
 
@@ -90,6 +97,9 @@ def build_train_args(args: argparse.Namespace) -> dict:
         "exist_ok": True,
         "patience": args.patience,
         "seed": args.seed,
+        # Ultralytics defaults amp=True; past runs paid the Pascal fp16 trap
+        # (args.yaml shows amp: true). Explicit False unless --amp is passed.
+        "amp": args.amp,
     }
     if args.time is not None:
         train_args["time"] = args.time
