@@ -219,7 +219,6 @@ def main() -> None:
                 new_lines.append(json.dumps(raw))
                 continue
             new_obs: list[MemoryObservation] = []
-            any_upgraded = False
             truncated = False
             for ro in _raw_observations(raw):
                 photo = str(ro.get("photo", ""))
@@ -235,7 +234,6 @@ def main() -> None:
                     processed += 1
                 if upgraded is not None and upgraded.detections:
                     new_obs.append(upgraded)
-                    any_upgraded = True
                     acts = ",".join(f"{d.label}:{d.activity or '?'}" for d in upgraded.detections)
                     print(f"  [{processed}] {Path(photo).name}: {acts}", flush=True)
                 else:
@@ -245,13 +243,18 @@ def main() -> None:
                     new_obs.append(_raw_to_observation(ro))
                     if photo and upgraded is None:
                         failed += 1
-            if truncated or not any_upgraded:
-                # Truncated by --limit, or nothing re-detected: leave the entry
-                # exactly as it was.
+            if truncated:
+                # Truncated by --limit: leave the entry exactly as it was so a
+                # later run migrates it whole.
                 new_lines.append(json.dumps(raw))
                 if stop:
                     break
                 continue
+            # When nothing was re-detected the observations in new_obs are the
+            # ORIGINALS, preserved verbatim (_raw_to_observation) — stamping
+            # the record v3 loses no history, it just stops the entry counting
+            # as forever-unfinished migration work. --force re-processes it if
+            # a better detector pass is ever wanted.
             # Swap ONLY the observations; the entry-level time/birds/note/photos
             # stay byte-identical — they form the key load_entries uses to merge
             # the JSONL with the Markdown day file, so rewriting them would
