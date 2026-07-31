@@ -221,6 +221,13 @@ def main() -> None:
             new_obs: list[MemoryObservation] = []
             truncated = False
             for ro in _raw_observations(raw):
+                # A mixed entry (some observations decorated, some not) only
+                # needs work on the undecorated ones — re-running the detector
+                # and a ~30s VLM call on an observation that already has its
+                # decoration would re-buy what we own. --force re-does all.
+                if not args.force and ro.get("vlm_model") and ro.get("detections"):
+                    new_obs.append(_raw_to_observation(ro))
+                    continue
                 photo = str(ro.get("photo", ""))
                 if args.limit and processed >= args.limit:
                     # Limit hit MID-entry: writing the partial new_obs would
