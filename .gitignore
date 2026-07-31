@@ -13,8 +13,10 @@
 # runtime output only — large and machine-specific.
 /models/
 
-# Server logfile (native FFmpeg/h264 noise + full log; AVIARY_LOG_FILE).
+# Server logfile (native FFmpeg/h264 noise + full log; AVIARY_LOG_FILE),
+# plus the RotatingFileHandler generations (aviary.log.1, .2).
 aviary.log
+aviary.log.*
 
 __pycache__/
 *.py[cod]

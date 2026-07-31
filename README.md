@@ -50,6 +50,7 @@ Run any subsystem with a short named command (think `npm run`):
 | `uv run train-archive` | build the archive catalog detector end-to-end -> `data/models/archive-NNN.pt` |
 | `uv run evaluate` | evaluate a trained model |
 | `uv run benchmark` | score every `data/models/*.pt` (held-out `test` split by default) |
+| `uv run bench-speed` | measure detector inference latency/throughput at the live config |
 | `uv run suggest` | propose boxes + roster labels for annotation images |
 | `uv run import-collect-birds` | import server-collected frames into the annotation tree |
 | `uv run import-immich-albums` | download Immich "Birds" album photos into the annotation tree |
