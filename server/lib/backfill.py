@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -43,8 +44,15 @@ LOGGER = logging.getLogger("lib.backfill")
 POLL_SECONDS = 30.0
 # Replay attempts per queued message before giving up (with a notice).
 MESSAGE_MAX_ATTEMPTS = 3
-# How far back the memory scan looks. Anything older is memory-migrate's job.
-MEMORY_BACKFILL_DAYS = 3
+# How far back the memory scan looks. None = the whole journal history: the
+# scan walks newest-first and remembers days it found clean, so old fully
+# decorated days cost nothing per cycle, while any undecorated backlog keeps
+# the otherwise-idle VLM busy until the history is fully tagged. (This used to
+# stop at 3 days and leave anything older to a manual memory-migrate run.)
+MEMORY_BACKFILL_DAYS: int | None = None
+# A day scanned clean stays skipped this long before it's re-checked — belt
+# and braces for out-of-band edits (memory-migrate, hand fixes).
+EXHAUSTED_DAY_RESCAN_SECONDS = 6 * 3600.0
 # VLM re-analyses per cycle — bounds how long one pass can occupy the cluster.
 MEMORY_BATCH_PER_CYCLE = 12
 # Re-analysis attempts per photo (per process run) before it's parked.
@@ -114,6 +122,12 @@ class LlmBackfillWorker:
             done = self._memory_backfill()
             if done:
                 LOGGER.info("Backfilled VLM analysis for %d memory observation(s)", done)
+                # A non-empty pass means there is probably more backlog behind
+                # it — go straight into the next cycle instead of sleeping out
+                # the poll, so an idle machine drains the history back-to-back.
+                # An empty pass (or an outage pause) falls back to the normal
+                # poll cadence.
+                self._poke.set()
 
     def _drain_messages(self) -> None:
         if self._llm_model and not self._health.has_model(self._llm_model):
@@ -187,16 +201,31 @@ def _stored_detections(obs: dict) -> list[_StoredDetection]:
     return out
 
 
+def _journal_days(memories_dir: Path) -> list[date]:
+    """Every day with a journal file, newest first (from the filenames)."""
+    days: list[date] = []
+    try:
+        for path in memories_dir.glob("*.jsonl"):
+            try:
+                days.append(date.fromisoformat(path.stem))
+            except ValueError:
+                continue
+    except OSError:
+        return []
+    return sorted(days, reverse=True)
+
+
 def build_memory_backfill(
     memories_dir: Path,
     analyze: Callable[[bytes, list[str]], dict],
     vlm_model: str,
     *,
-    days_back: int = MEMORY_BACKFILL_DAYS,
+    days_back: int | None = MEMORY_BACKFILL_DAYS,
     batch: int = MEMORY_BATCH_PER_CYCLE,
     now=now_ph,
+    exhausted_rescan_seconds: float = EXHAUSTED_DAY_RESCAN_SECONDS,
 ) -> Callable[[], int]:
-    """One bounded memory-backfill pass over the recent day files.
+    """One bounded memory-backfill pass over the journal day files.
 
     Scans v3 entries for observations missing ``vlm_model`` (the durable "the
     VLM never ran" marker) that still have their photo + stored detections,
@@ -204,8 +233,15 @@ def build_memory_backfill(
     observation into the day file. Returns how many were upgraded. Photos that
     keep failing are parked for this process run; pre-v3 records are left to
     ``memory-migrate`` (they need YOLO re-detection, not just decoration).
+
+    ``days_back=None`` walks the WHOLE history newest-first. Days that scan
+    clean are remembered and skipped for ``exhausted_rescan_seconds`` (today
+    and yesterday are always scanned — live writes land there), so a fully
+    tagged history costs almost nothing per cycle while any backlog keeps the
+    otherwise-idle VLM working through it.
     """
     attempts: dict[str, int] = {}
+    exhausted: dict[date, float] = {}
 
     def _reprocess(obs: dict) -> dict | None:
         photo = str(obs.get("photo", ""))
@@ -237,9 +273,19 @@ def build_memory_backfill(
     def run() -> int:
         done = 0
         today = now().date()
-        for offset in range(days_back):
-            day = today - timedelta(days=offset)
+        yesterday = today - timedelta(days=1)
+        if days_back is None:
+            days = _journal_days(memories_dir)
+        else:
+            days = [today - timedelta(days=offset) for offset in range(days_back)]
+        for day in days:
+            if day not in (today, yesterday):
+                stamp = exhausted.get(day)
+                if stamp is not None and time.monotonic() - stamp < exhausted_rescan_seconds:
+                    continue
             updates: dict[str, dict[str, dict]] = {}
+            candidates = 0
+            scanned_whole_day = False
             try:
                 for record in load_day_records(memories_dir, day):
                     if record.get("version") != 3:
@@ -252,6 +298,7 @@ def build_memory_backfill(
                         photo = str(obs.get("photo", ""))
                         if not photo or attempts.get(photo, 0) >= PHOTO_MAX_ATTEMPTS:
                             continue
+                        candidates += 1
                         try:
                             upgraded = _reprocess(obs)
                         except requests.exceptions.ConnectionError as exc:
@@ -270,10 +317,16 @@ def build_memory_backfill(
                             done += 1
                     if done >= batch:
                         break
+                else:
+                    scanned_whole_day = True
             finally:
                 replaced = update_day_observations(memories_dir, day, updates)
                 if replaced:
                     LOGGER.info("Backfilled %d observation(s) into %s", replaced, day.isoformat())
+            # Only a full, candidate-free scan proves the day needs no work;
+            # a batch-limited pass says nothing about what's left in it.
+            if scanned_whole_day and candidates == 0:
+                exhausted[day] = time.monotonic()
             if done >= batch:
                 break
         return done

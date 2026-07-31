@@ -372,3 +372,72 @@ def test_drain_waits_until_classify_model_is_served(tmp_path) -> None:
     worker._health.served = {"gemma3:4b", "someother:7b"}
     worker._drain_messages()
     assert [t for _, t, _ in replay.calls] == ["waiting"] and store.count() == 0
+
+
+def test_backfill_reaches_days_older_than_any_window(tmp_path) -> None:
+    # days_back=None (the default) walks the whole history — an undecorated
+    # observation from a month ago gets decorated, not left to memory-migrate.
+    memories = tmp_path / "memories"
+    photo = _write_photo(tmp_path, "old.jpg")
+    old_day = NOW - timedelta(days=30)
+    _append_outage_entry(memories, old_day, photo)
+
+    run = build_memory_backfill(memories, RecordingAnalyze(), "qwen2.5vl:7b", now=lambda: NOW)
+    assert run() == 1
+    records = load_day_records(memories, old_day.date())
+    assert records[0]["observations"][0]["vlm_model"] == "qwen2.5vl:7b"
+
+
+def test_backfill_skips_days_that_scanned_clean(tmp_path) -> None:
+    memories = tmp_path / "memories"
+    photo = _write_photo(tmp_path, "done.jpg")
+    old_day = NOW - timedelta(days=30)
+    _append_outage_entry(memories, old_day, photo)
+    analyze = RecordingAnalyze()
+    run = build_memory_backfill(memories, analyze, "qwen2.5vl:7b", now=lambda: NOW)
+
+    assert run() == 1      # decorates the only candidate
+    assert run() == 0      # scans clean -> day remembered as exhausted
+    calls_after_clean_scan = len(analyze.calls)
+
+    # Sneak a NEW undecorated observation into the exhausted old day; a cached
+    # day must not be rescanned within the window...
+    photo2 = _write_photo(tmp_path, "sneaked.jpg")
+    _append_outage_entry(memories, old_day.replace(hour=11), photo2)
+    assert run() == 0
+    assert len(analyze.calls) == calls_after_clean_scan
+
+    # ...but with the cache disabled the same state is picked up immediately.
+    eager = build_memory_backfill(
+        memories, analyze, "qwen2.5vl:7b", now=lambda: NOW, exhausted_rescan_seconds=0.0
+    )
+    assert eager() == 1
+
+
+def test_backfill_always_rescans_today(tmp_path) -> None:
+    # Today is where live writes land — it must never be cached as exhausted.
+    memories = tmp_path / "memories"
+    analyze = RecordingAnalyze()
+    run = build_memory_backfill(memories, analyze, "qwen2.5vl:7b", now=lambda: NOW)
+    assert run() == 0  # empty today scans clean
+
+    photo = _write_photo(tmp_path, "fresh.jpg")
+    _append_outage_entry(memories, NOW.replace(hour=12), photo)
+    assert run() == 1
+
+
+def test_worker_repokes_after_productive_memory_pass(tmp_path) -> None:
+    # A non-empty backfill pass sets the poke so the next cycle runs
+    # immediately (continuous drain); an empty pass leaves it unset.
+    remaining = [3, 0]
+    worker = LlmBackfillWorker(
+        None,
+        FakeHealth(),
+        threading.Event(),
+        memory_backfill=lambda: remaining.pop(0),
+    )
+    worker._cycle()
+    assert worker._poke.is_set()
+    worker._poke.clear()
+    worker._cycle()
+    assert not worker._poke.is_set()
