@@ -75,6 +75,55 @@ def looks_degenerate(text: str) -> bool:
     return False
 
 
+def clean_partial(text: str) -> str:
+    """Sanitize a PARTIAL reply for display while it is still streaming.
+
+    Cheaper and more conservative than :func:`clean_reply`: an unclosed
+    ``<think>`` block hides everything from its opening tag (the closing tag
+    hasn't streamed yet), and a degenerate partial returns ``""`` so garbage
+    never hits the screen mid-flight. Table flattening waits for the final
+    pass — a half-streamed table isn't recognizable yet.
+    """
+    open_think = text.find("<think>")
+    if open_think != -1 and "</think>" not in text:
+        text = text[:open_think]
+    cleaned = strip_thinking(text)
+    if looks_degenerate(cleaned):
+        return ""
+    return cleaned.strip()
+
+
+def collect_stream(stream, *, on_partial=None, cancelled=None) -> tuple[str, bool]:
+    """Drain a ``chat_stream`` iterator into text, surfacing partials.
+
+    ``on_partial`` (if given) receives the display-safe partial after each
+    chunk; ``cancelled`` (if given) is polled between chunks and stops the
+    stream — closing the iterator, which aborts the generation server-side.
+    A mid-stream transport error is swallowed after logging: the tokens that
+    already arrived are worth more than a clean exception, and the caller
+    treats an empty result as the failure signal.
+
+    Returns ``(raw_text, was_cancelled)``.
+    """
+    parts: list[str] = []
+    try:
+        for chunk in stream:
+            parts.append(chunk)
+            if cancelled is not None and cancelled():
+                return "".join(parts), True
+            if on_partial is not None:
+                partial = clean_partial("".join(parts))
+                if partial:
+                    on_partial(partial)
+    except Exception:
+        LOGGER.warning("Chat stream broke mid-generation; keeping partial", exc_info=True)
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
+    return "".join(parts), False
+
+
 def clean_reply(text: str) -> str:
     """Post-process raw model text into something safe to send, or ``""``.
 
@@ -175,3 +224,44 @@ def chat_reply(
         if reply:
             return reply
     return CHAT_FALLBACK
+
+
+def stream_chat_reply(
+    client: OllamaClient,
+    model: str,
+    text: str,
+    history: list[dict[str, str]] | None = None,
+    *,
+    context: str | None = None,
+    on_partial,
+    cancelled=None,
+) -> tuple[str, bool]:
+    """Streaming :func:`chat_reply`: partials via ``on_partial`` as they arrive.
+
+    Returns ``(reply, superseded)``. ``superseded`` is True when ``cancelled``
+    fired mid-generation — the reply is then the cleaned partial that was
+    already on screen (possibly ``""``), and the caller should leave it as the
+    final message rather than keep generating for a stale turn.
+
+    Same quality contract as :func:`chat_reply`: the finished text goes through
+    :func:`clean_reply`, a degenerate/empty result is retried once, and only
+    then does the friendly :data:`CHAT_FALLBACK` go out. Transport errors while
+    CONNECTING propagate (the caller queues the message for replay, exactly as
+    in the non-streaming path); a stream that breaks after tokens arrived keeps
+    the partial instead.
+    """
+    messages = build_chat_messages(text, history, context=context)
+    for _ in range(2):
+        if cancelled is not None and cancelled():
+            return "", True
+        stream = client.chat_stream(
+            model, messages, think=False, num_predict=384,
+            timeout_seconds=CHAT_TIMEOUT_SECONDS,
+        )
+        raw, was_cancelled = collect_stream(stream, on_partial=on_partial, cancelled=cancelled)
+        if was_cancelled:
+            return clean_reply(raw), True
+        reply = clean_reply(raw)
+        if reply:
+            return reply, False
+    return CHAT_FALLBACK, False

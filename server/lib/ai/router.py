@@ -67,6 +67,7 @@ class NaturalLanguageRouter:
         typing: Callable[[int], None] | None = None,
         debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS,
         pending=None,
+        on_supersede: Callable[[int], None] | None = None,
     ) -> None:
         self._client = client
         self._model = model
@@ -79,6 +80,10 @@ class NaturalLanguageRouter:
         # unreachable LLM are SAVED here (and replayed after recovery by the
         # backfill worker) instead of dropped with an apology.
         self._pending = pending
+        # Optional hook fired on EVERY incoming message: anything still
+        # streaming a reply to this chat is stale the moment the user says
+        # something new, so main wires this to the stream registry's cancel.
+        self._on_supersede = on_supersede
         self._lock = threading.Lock()
         self._buffers: dict[int, list[str]] = {}
         self._generation: dict[int, int] = {}
@@ -108,6 +113,12 @@ class NaturalLanguageRouter:
             new_timer.daemon = True
             self._timers[chat_id] = new_timer
             new_timer.start()
+        if self._on_supersede is not None:
+            # Outside the lock: the hook touches the stream registry, never us.
+            try:
+                self._on_supersede(chat_id)
+            except Exception:
+                LOGGER.exception("Stream supersede hook failed")
 
     def _fire(self, chat_id: int, generation: int) -> None:
         threading.Thread(

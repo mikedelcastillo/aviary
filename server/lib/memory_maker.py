@@ -38,6 +38,7 @@ from lib.imaging import downscale_jpeg
 from lib.journal import MemoryEntry, MemoryObservation, append_entry
 from lib.memory_build import annotate, build_observation
 from lib.labels import pretty
+from lib.telegram.stream import StreamingCaptions
 
 
 LOGGER = logging.getLogger("lib.memory_maker")
@@ -417,21 +418,6 @@ class MemoryMaker:
                 # decorates the journal entry once the VLM is back.
                 stub_lines.append(f"• {who} seen on {display_camera}.")
             structured_observations.append(obs)
-        summary = ""
-        if grounded_notes:
-            try:
-                summary = summarise_activity(
-                    self._client, self._llm_model, grounded_notes,
-                    pronoun_note=self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
-                )
-            except OllamaUnavailableError:
-                LOGGER.warning("Memory summary skipped: Ollama down")
-            except Exception:
-                LOGGER.exception("Memory summary failed")
-            if not summary:
-                summary = "; ".join(grounded_notes)
-        summary = "\n".join(line for line in [summary, *stub_lines] if line)
-
         # Only the birds we actually captured a frame for are claimed; a trigger
         # bird this report couldn't confirm cools down until the next beat.
         self._cooldown(set(visible) - captured)
@@ -448,7 +434,7 @@ class MemoryMaker:
                 MemoryEntry(
                     when,
                     all_birds,
-                    journal_note or summary or "(activity)",
+                    journal_note or "(activity)",
                     saved_paths,
                     observations=structured_observations,
                 ),
@@ -456,21 +442,51 @@ class MemoryMaker:
         except Exception:
             LOGGER.exception("Writing memory entry failed")
 
-        # 3) Send it as ONE album — photos grouped, summary as the first caption —
-        #    instead of N separate photos plus a text (which spammed the chat).
+        # 3) Send it as ONE album — photos grouped, the summary as the first
+        #    caption — instead of N separate photos plus a text (which spammed
+        #    the chat). The album goes out IMMEDIATELY with just the header (and
+        #    any stub lines); the LLM summary then STREAMS into that caption as
+        #    it generates, so the report reaches the user without waiting on the
+        #    language model at all.
         self._activity_since = when
-        self._last_summary = summary
         self._reported_set = frozenset(captured)
         header = f"🐦 {when.strftime('%H:%M')} — " + ", ".join(pretty(b) for b in all_birds)
-        caption = _clip_caption(f"{header}\n{summary}".strip())
-        items = [(shot.annotated, caption if i == 0 else None) for i, shot in enumerate(shots)]
+        stub_text = "\n".join(stub_lines)
+        placeholder = _clip_caption(f"{header}\n{stub_text}".strip())
+        items = [(shot.annotated, placeholder if i == 0 else None) for i, shot in enumerate(shots)]
         self._activity_msgs = self._notifier.broadcast_album_tracked(items)
         self._last_is_caption = True
         if not self._activity_msgs:
             # Album delivery failed for everyone; fall back to a tracked text so
             # the refresh path still has something to edit.
-            self._activity_msgs = self._notifier.broadcast_text_tracked(f"{header}\n{summary}".strip())
+            self._activity_msgs = self._notifier.broadcast_text_tracked(placeholder)
             self._last_is_caption = False
+
+        summary = ""
+        if grounded_notes:
+            streamer = StreamingCaptions(
+                self._notifier, self._activity_msgs,
+                header=header, captions=self._last_is_caption,
+            )
+
+            def stream_body(partial: str) -> None:
+                streamer.update("\n".join(line for line in [partial, *stub_lines] if line))
+
+            try:
+                summary = summarise_activity(
+                    self._client, self._llm_model, grounded_notes,
+                    pronoun_note=self._pronoun_note, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+                    on_partial=stream_body if self._activity_msgs else None,
+                )
+            except OllamaUnavailableError:
+                LOGGER.warning("Memory summary skipped: Ollama down")
+            except Exception:
+                LOGGER.exception("Memory summary failed")
+            if not summary:
+                summary = "; ".join(grounded_notes)
+            streamer.finalize("\n".join(line for line in [summary, *stub_lines] if line))
+        summary = "\n".join(line for line in [summary, *stub_lines] if line)
+        self._last_summary = summary
         LOGGER.info("Memory report sent (%d photo(s), birds=%s)", len(shots), ",".join(all_birds))
         return True
 

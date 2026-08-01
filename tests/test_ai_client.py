@@ -682,3 +682,126 @@ def test_usage_not_recorded_for_health_gated_calls() -> None:
     except requests.RequestException:
         pass
     assert usage.failures == [] and usage.records == []
+
+
+# -- chat_stream ---------------------------------------------------------
+
+
+class StreamResponse:
+    def __init__(self, lines: list[bytes], *, status: int = 200) -> None:
+        self._lines = lines
+        self.status_code = status
+        self.closed = False
+
+    def iter_lines(self):
+        yield from self._lines
+
+    def close(self) -> None:
+        self.closed = True
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            error = requests.HTTPError(f"status {self.status_code}")
+            error.response = self  # type: ignore[attr-defined]
+            raise error
+
+    def json(self) -> dict:
+        return {}
+
+
+class StreamSession:
+    def __init__(self, response) -> None:
+        self.response = response
+        self.posts: list[tuple] = []
+
+    def post(self, url, json, timeout, stream=False):
+        self.posts.append((url, json, timeout, stream))
+        return self.response
+
+
+def test_chat_stream_yields_deltas_and_meters_final_chunk() -> None:
+    usage = RecordingUsage()
+    health = FakeHealth()
+    response = StreamResponse([
+        b'{"message": {"content": "hel"}, "done": false}',
+        b'',
+        b'{"message": {"content": "lo"}, "done": false}',
+        b'{"message": {"content": ""}, "done": true, "eval_count": 7}',
+    ])
+    session = StreamSession(response)
+    client = OllamaClient("http://x", session=session, usage=usage, health=health)
+
+    chunks = list(client.chat_stream("gemma3:4b", [{"role": "user", "content": "hi"}],
+                                     think=False, num_predict=64))
+
+    assert chunks == ["hel", "lo"]
+    url, payload, _timeout, stream = session.posts[0]
+    assert url == "http://x/api/chat"
+    assert stream is True
+    assert payload["stream"] is True
+    assert payload["think"] is False
+    assert payload["options"]["num_predict"] == 64
+    # The done chunk carries the metering and marks the model healthy.
+    assert usage.records and usage.records[0][0] == "gemma3:4b"
+    assert usage.records[0][1]["eval_count"] == 7
+    assert health.successes == 1 and health.model_served == ["gemma3:4b"]
+    assert response.closed  # stream fully drained, then released
+
+
+def test_chat_stream_close_aborts_generation() -> None:
+    usage = RecordingUsage()
+    response = StreamResponse([
+        b'{"message": {"content": "first"}, "done": false}',
+        b'{"message": {"content": "second"}, "done": false}',
+        b'{"message": {"content": ""}, "done": true}',
+    ])
+    client = OllamaClient("http://x", session=StreamSession(response), usage=usage)
+
+    stream = client.chat_stream("m", [])
+    assert next(stream) == "first"
+    stream.close()  # superseded mid-generation
+
+    # Closing the iterator closes the HTTP response (Ollama aborts server-side)
+    # and the never-finished call is not metered as a success.
+    assert response.closed
+    assert usage.records == []
+
+
+def test_chat_stream_error_chunk_raises_and_meters_failure() -> None:
+    from lib.ai.client import OllamaStreamError
+
+    usage = RecordingUsage()
+    response = StreamResponse([
+        b'{"message": {"content": "par"}, "done": false}',
+        b'{"error": "model crashed"}',
+    ])
+    client = OllamaClient("http://x", session=StreamSession(response), usage=usage)
+
+    stream = client.chat_stream("m", [])
+    assert next(stream) == "par"
+    try:
+        next(stream)
+    except OllamaStreamError:
+        pass
+    else:
+        raise AssertionError("expected OllamaStreamError")
+    assert usage.failures == ["m"]
+    assert response.closed
+
+
+def test_chat_stream_connect_404_gates_model() -> None:
+    from lib.ai.client import OllamaUnavailableError
+
+    usage = RecordingUsage()
+    health = FakeHealth()
+    session = StreamSession(StreamResponse([], status=404))
+    client = OllamaClient("http://x", session=session, usage=usage, health=health)
+
+    try:
+        client.chat_stream("gemma3:4b", [])
+    except OllamaUnavailableError:
+        pass
+    else:
+        raise AssertionError("expected OllamaUnavailableError")
+    assert health.model_missing == ["gemma3:4b"]
+    assert usage.failures == ["gemma3:4b"]

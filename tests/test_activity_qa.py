@@ -517,3 +517,94 @@ def test_replayed_question_never_fires_live_camera_find(tmp_path) -> None:
     responder.respond(7, "what is draft doing right now?", "draft")
     assert found == []
     assert sent and "haven't logged" in sent[0].lower()
+
+
+def test_respond_streams_answer_through_stream_factory(tmp_path) -> None:
+    # With a stream factory wired (Telegram), the recall answer is delivered by
+    # finalizing the STREAMED message — never as a second, separate send.
+    photo = tmp_path / "p.jpg"
+    photo.write_bytes(b"\xff\xd8jpeg")
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy"], "Percy preens.", [str(photo)]))
+
+    class FakeStream:
+        def __init__(self) -> None:
+            self.partials: list[str] = []
+            self.finalized: list[str] = []
+            self.started = False
+
+        def update(self, text: str) -> None:
+            self.partials.append(text)
+            self.started = True
+
+        def cancelled(self) -> bool:
+            return False
+
+        def finalize(self, text: str) -> None:
+            self.finalized.append(text)
+
+    streams: list[FakeStream] = []
+
+    def factory(chat_id: int) -> FakeStream:
+        stream = FakeStream()
+        streams.append(stream)
+        return stream
+
+    sent: list = []
+    albums: list = []
+    responder = ActivityResponder(
+        tmp_path,
+        FakeClient(),
+        "gemma3:12b",
+        lambda: KNOWN,
+        notify=lambda c, t: sent.append(t),
+        send_album=lambda c, items: albums.append(items),
+        pronoun_note="",
+        now=lambda: datetime(2026, 6, 25, 15, 0),
+        stream_factory=factory,
+    )
+    responder.respond(7, "what did percy do today?", "percy")
+
+    assert len(streams) == 1
+    assert streams[0].finalized  # the answer landed via the stream
+    assert sent == []            # not as a separate message
+    assert albums                # the photo album still follows
+
+
+def test_respond_superseded_stream_freezes_partial(tmp_path) -> None:
+    photo = tmp_path / "p.jpg"
+    photo.write_bytes(b"\xff\xd8jpeg")
+    append_entry(tmp_path, MemoryEntry(datetime(2026, 6, 25, 14, 40), ["percy"], "Percy preens.", [str(photo)]))
+
+    class CancelledStream:
+        started = True
+
+        def __init__(self) -> None:
+            self.finalized: list[str] = []
+
+        def update(self, text: str) -> None:
+            pass
+
+        def cancelled(self) -> bool:
+            return True  # a newer message arrived mid-answer
+
+        def finalize(self, text: str) -> None:
+            self.finalized.append(text)
+
+    stream = CancelledStream()
+    sent: list = []
+    responder = ActivityResponder(
+        tmp_path,
+        FakeClient(),
+        "gemma3:12b",
+        lambda: KNOWN,
+        notify=lambda c, t: sent.append(t),
+        pronoun_note="",
+        now=lambda: datetime(2026, 6, 25, 15, 0),
+        stream_factory=lambda chat_id: stream,
+    )
+    responder.respond(7, "what did percy do today?", "percy")
+
+    # The stream is finalized with "" (freeze the partial, release the slot)
+    # and nothing else goes out for the stale turn.
+    assert stream.finalized == [""]
+    assert sent == []

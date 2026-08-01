@@ -175,3 +175,120 @@ def test_chat_reply_flattens_a_table_in_a_real_answer() -> None:
     assert "|" not in out
     assert "Bird: Percy, Where: perch" in out
     assert client.calls == 1
+
+
+# -- streaming -----------------------------------------------------------
+
+
+from lib.ai.chat import clean_partial, collect_stream, stream_chat_reply  # noqa: E402
+
+
+class StreamingClient:
+    """chat_stream fake: one generator of chunk-lists per call."""
+
+    def __init__(self, *rounds: list[str]) -> None:
+        self._rounds = list(rounds)
+        self.calls = 0
+        self.closed = 0
+
+    def chat_stream(self, model, messages, **kwargs):
+        chunks = self._rounds[min(self.calls, len(self._rounds) - 1)]
+        self.calls += 1
+
+        def gen():
+            try:
+                yield from chunks
+            finally:
+                self.closed += 1
+
+        return gen()
+
+
+def test_clean_partial_hides_unclosed_think_block() -> None:
+    assert clean_partial("Sure!<think>hmm the user wants") == "Sure!"
+    assert clean_partial("<think>a</think>Percy naps.") == "Percy naps."
+
+
+def test_clean_partial_suppresses_degenerate_text() -> None:
+    assert clean_partial("@@@@@@@@") == ""
+
+
+def test_collect_stream_surfaces_growing_partials() -> None:
+    seen: list[str] = []
+    raw, cancelled = collect_stream(iter(["Per", "cy ", "naps."]), on_partial=seen.append)
+    assert raw == "Percy naps."
+    assert not cancelled
+    assert seen == ["Per", "Percy", "Percy naps."]
+
+
+def test_collect_stream_stops_on_cancel_and_keeps_partial() -> None:
+    calls = {"n": 0}
+
+    def cancelled() -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 2  # cancel after the second chunk lands
+
+    raw, was_cancelled = collect_stream(
+        iter(["Percy ", "is ", "never-seen"]), on_partial=lambda _: None, cancelled=cancelled
+    )
+    assert was_cancelled
+    assert raw == "Percy is "
+
+
+def test_collect_stream_keeps_partial_when_stream_breaks() -> None:
+    def broken():
+        yield "Percy was "
+        raise RuntimeError("backend died")
+
+    raw, cancelled = collect_stream(broken(), on_partial=lambda _: None)
+    assert raw == "Percy was "
+    assert not cancelled
+
+
+def test_stream_chat_reply_streams_then_returns_clean_text() -> None:
+    client = StreamingClient(["Percy ", "is happy."])
+    partials: list[str] = []
+    reply, superseded = stream_chat_reply(
+        client, "m", "how is percy?", on_partial=partials.append
+    )
+    assert reply == "Percy is happy."
+    assert not superseded
+    assert partials[-1] == "Percy is happy."
+    assert client.closed == 1  # stream released after the drain
+
+
+def test_stream_chat_reply_retries_degenerate_then_falls_back() -> None:
+    client = StreamingClient(["@@@@@@@@"], ["@@@@@@@@"])
+    reply, superseded = stream_chat_reply(
+        client, "m", "hi", on_partial=lambda _: None
+    )
+    assert reply == CHAT_FALLBACK
+    assert not superseded
+    assert client.calls == 2
+
+
+def test_stream_chat_reply_supersede_returns_partial() -> None:
+    import threading
+
+    cancel = threading.Event()
+
+    def on_partial(text: str) -> None:
+        if "is" in text:
+            cancel.set()  # a new user message arrives mid-generation
+
+    client = StreamingClient(["Percy ", "is ", "asleep ", "on the perch."])
+    reply, superseded = stream_chat_reply(
+        client, "m", "how is percy?", on_partial=on_partial, cancelled=cancel.is_set
+    )
+    assert superseded
+    assert reply.startswith("Percy is")
+    assert client.calls == 1  # no retry for a superseded turn
+
+
+def test_stream_chat_reply_cancelled_before_start_generates_nothing() -> None:
+    client = StreamingClient(["never"])
+    reply, superseded = stream_chat_reply(
+        client, "m", "hi", on_partial=lambda _: None, cancelled=lambda: True
+    )
+    assert superseded and reply == ""
+    assert client.calls == 0

@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 from dotenv import load_dotenv
 
-from lib.ai.chat import chat_reply
+from lib.ai.chat import chat_reply, stream_chat_reply
 from lib.ai.client import OllamaClient, OllamaUnavailableError
 from lib.ai.context import build_chat_context, format_system_state
 from lib.ai.health import OllamaHealth
@@ -72,6 +72,7 @@ from lib.watchlist import CameraRegistry
 from lib.telegram.commands import build_status_message, run_command_bot
 from lib.terminal_logging import NativeStderrRedirect
 from lib.telegram.notifier import TelegramNotifier
+from lib.telegram.stream import StreamedReply, StreamingMessage, StreamRegistry
 
 
 LOGGER = logging.getLogger("lib")
@@ -220,6 +221,7 @@ def build_nl_router(
     weather_provider=None,
     machine_provider=None,
     pending_store=None,
+    stream_registry=None,
 ) -> NaturalLanguageRouter | None:
     """Wire the natural-language router to the command providers, or None.
 
@@ -246,6 +248,13 @@ def build_nl_router(
     # Filled with the router after construction (dispatch is built first, but
     # needs the router's queue for the "cluster died mid-turn" case below).
     router_ref: list[NaturalLanguageRouter] = []
+    # One in-flight streamed reply per chat; a new message supersedes the old
+    # stream (wired to the router's on_supersede below). Shared with the recall
+    # responder when the caller passes its registry in, so a new message also
+    # cancels a streaming recall answer. Streaming needs a notifier that can
+    # edit messages — Telegram can, the console can't.
+    stream_registry = stream_registry if stream_registry is not None else StreamRegistry()
+    can_stream = hasattr(notifier, "edit_message_text")
 
     def send_chat_reply(chat_id: int, text: str) -> None:
         history = memory.history(chat_id) if memory is not None else None
@@ -259,10 +268,23 @@ def build_nl_router(
             except Exception:
                 LOGGER.exception("Building chat context failed")
         failed = False
+        superseded = False
+        cancel = stream_registry.begin(chat_id) if can_stream else None
+        streamer = StreamingMessage(notifier, chat_id) if can_stream else None
         try:
-            reply = chat_reply(
-                client, app_config.ollama.llm_model, text, history=history, context=context
-            )
+            if streamer is not None:
+                # Stream: the first tokens are SENT the moment they exist, then
+                # the message grows by throttled edits (like /discover's bar).
+                reply, superseded = stream_chat_reply(
+                    client, app_config.ollama.llm_model, text,
+                    history=history, context=context,
+                    on_partial=streamer.update,
+                    cancelled=cancel.is_set,
+                )
+            else:
+                reply = chat_reply(
+                    client, app_config.ollama.llm_model, text, history=history, context=context
+                )
         except OllamaUnavailableError:
             # During a REPLAY, propagate: the backfill worker keeps the same
             # queued item (and its attempt count) — re-queueing a fresh copy here
@@ -281,12 +303,24 @@ def build_nl_router(
             LOGGER.exception("Chat reply failed")
             reply = "🤖 My language brain (Ollama) is unreachable right now."
             failed = True
-        notifier.send_text(chat_id, reply or "🤔")
+        finally:
+            if cancel is not None:
+                stream_registry.finish(chat_id, cancel)
+        if streamer is not None:
+            if superseded and not streamer.started:
+                return  # cancelled before a single character; the newer turn answers
+            # Superseded mid-message: leave the partial as the final text (drop
+            # the cursor) rather than keep generating for a stale turn.
+            streamer.finalize("" if superseded else (reply or "🤔"))
+            reply = reply or streamer.shown
+        else:
+            notifier.send_text(chat_id, reply or "🤔")
         # Don't persist a failed turn: a fake "I'm unreachable" assistant line
         # would be fed back as context on the next message and corrupt the chat.
         if memory is not None and not failed:
             memory.record(chat_id, "user", text)
-            memory.record(chat_id, "assistant", reply)
+            if reply:
+                memory.record(chat_id, "assistant", reply)
 
     def dispatch(chat_id: int, intent: Intent, text: str) -> None:
         action = intent.action
@@ -369,6 +403,9 @@ def build_nl_router(
         notifier.send_text,
         typing=typing,
         pending=pending_store,
+        # A new message makes any still-streaming reply to that chat stale —
+        # stop editing it right away, before classification even starts.
+        on_supersede=stream_registry.cancel if can_stream else None,
     )
     router_ref.append(router)
     return router
@@ -1260,6 +1297,10 @@ def main() -> None:
     # Activity Q&A ("what did percy do today?") reads the collected-photos log;
     # conversation memory keeps ~20 turns per chat for coherent follow-ups.
     memory = ConversationMemory() if ollama_client is not None else None
+    # Shared per-chat stream registry: chat replies and recall answers stream
+    # through it, and the NL router cancels the active stream on every new
+    # message (see build_nl_router / on_supersede).
+    chat_stream_registry = StreamRegistry()
     activity_responder = (
         ActivityResponder(
             memories_dir,
@@ -1277,6 +1318,12 @@ def main() -> None:
             longitude=app_config.longitude,
             utc_offset_hours=app_config.utc_offset_hours,
             health=ollama_health,
+            # Recall runs on the big model — stream the answer as it generates.
+            stream_factory=(
+                (lambda cid: StreamedReply(chat_stream_registry, notifier, cid))
+                if notifier is not None and hasattr(notifier, "edit_message_text")
+                else None
+            ),
         )
         if (ollama_client is not None and notifier is not None and finder is not None)
         else None
@@ -1450,6 +1497,7 @@ def main() -> None:
         weather_provider=weather_provider,
         machine_provider=machine_frames.snapshot,
         pending_store=pending_store,
+        stream_registry=chat_stream_registry,
     )
     if activity_responder is not None and nl_router is not None:
         # An activity question that finds the whole cluster down is queued for

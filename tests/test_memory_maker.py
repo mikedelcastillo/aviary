@@ -434,9 +434,13 @@ def test_mixed_report_keeps_stub_notes_away_from_llm(tmp_path) -> None:
     assert client.calls == 1
     llm_input = client.messages[0][-1]["content"]
     assert "Matcha" not in llm_input  # the stub never reached the LLM
+    # The album goes out immediately with the header + stub bullet; the LLM
+    # summary streams into the caption afterwards via caption edits.
     caption = notifier.albums[0][0][1]
-    assert "Percy preened on the perch." in caption
     assert "• Matcha seen on Big Cage." in caption
+    final_caption = notifier.caption_edits[-1][2]
+    assert "Percy preened on the perch." in final_caption
+    assert "• Matcha seen on Big Cage." in final_caption
 
 
 def test_ghost_bird_beat_retry_never_duplicates_the_album(tmp_path) -> None:

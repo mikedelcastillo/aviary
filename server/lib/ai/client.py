@@ -15,6 +15,7 @@ ladder — so callers can queue the work for backfill instead of hanging.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -41,6 +42,14 @@ class OllamaUnavailableError(requests.exceptions.ConnectionError):
     Subclasses ``ConnectionError`` so every existing ``RequestException``
     handler degrades exactly as it would for a real refused connection — just
     instantly.
+    """
+
+
+class OllamaStreamError(requests.exceptions.RequestException):
+    """The backend reported an error mid-stream (an ``{"error": ...}`` chunk).
+
+    A ``RequestException`` subclass so callers' existing transport-error
+    handling degrades a broken stream the same way as a failed request.
     """
 
 
@@ -129,6 +138,118 @@ class OllamaClient:
             payload.setdefault("options", {})["num_predict"] = num_predict
         data = self._post_json("/api/chat", payload, timeout_seconds or self.timeout_seconds)
         return (data.get("message") or {}).get("content", "") or ""
+
+    def chat_stream(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        think: bool | None = None,
+        temperature: float | None = None,
+        num_predict: int | None = None,
+        timeout_seconds: float | None = None,
+    ):
+        """One STREAMING /api/chat turn; returns an iterator of content deltas.
+
+        The connection is opened (and transport errors raised) HERE, so callers
+        see the same gate/outage behaviour as :meth:`chat`; only the token
+        chunks arrive lazily. Closing the iterator early (``close()``, or just
+        abandoning a ``for`` loop) closes the HTTP response, which makes Ollama
+        abort the generation server-side — that is the cancellation path for a
+        superseded reply. Usage is metered from the final ``done`` chunk, which
+        carries the same token counts as a non-streaming response.
+        """
+        self._gate(model)
+        payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+        if think is not None:
+            payload["think"] = think
+        if self._keep_alive is not None:
+            payload["keep_alive"] = self._keep_alive
+        if temperature is not None:
+            payload.setdefault("options", {})["temperature"] = temperature
+        if num_predict is not None:
+            payload.setdefault("options", {})["num_predict"] = num_predict
+
+        timeout = timeout_seconds or self.timeout_seconds
+        url = f"{self.base_url}/api/chat"
+        timeouts = (min(10.0, timeout), timeout)
+        last_exc: Exception | None = None
+        response = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self._session.post(
+                    url, json=payload, timeout=timeouts, stream=True
+                )
+                response.raise_for_status()
+                break
+            except requests.RequestException as exc:
+                last_exc = exc
+                try:
+                    self._note_request_failure(exc, model)
+                except requests.RequestException:
+                    self._record_failure(model)
+                    raise
+                if attempt < self._max_retries:
+                    LOGGER.warning(
+                        "Ollama /api/chat stream failed (%s); retry %d/%d",
+                        exc, attempt + 1, self._max_retries,
+                    )
+                    time.sleep(self._retry_backoff)
+        else:
+            self._record_failure(model)
+            raise last_exc  # type: ignore[misc]
+        return self._iter_chat_chunks(response, model)
+
+    def _iter_chat_chunks(self, response, model: str):
+        """Yield content deltas from a streaming chat response.
+
+        The stream is NOT retried once open — a retry would restart the whole
+        generation and the partial text is already on screen. A mid-stream
+        ``{"error": ...}`` chunk or transport failure raises (after metering the
+        failure); the response is always closed, including when the consumer
+        abandons the iterator, so a superseded generation is aborted rather
+        than left decoding to nobody.
+        """
+        try:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue
+                if data.get("error"):
+                    raise OllamaStreamError(str(data["error"]))
+                content = (data.get("message") or {}).get("content", "") or ""
+                if content:
+                    yield content
+                if data.get("done"):
+                    if self._health is not None:
+                        self._health.note_success()
+                        if model:
+                            self._health.note_model_served(model)
+                    if self._usage is not None:
+                        try:
+                            self._usage.record(model, data)
+                        except Exception:
+                            LOGGER.exception("Recording LLM usage failed")
+                    return
+        except requests.RequestException:
+            self._record_failure(model)
+            raise
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def _record_failure(self, model: str) -> None:
+        """Meter a failed call, never letting the recorder mask the real error."""
+        if self._usage is not None:
+            try:
+                self._usage.record_failure(model)
+            except Exception:
+                LOGGER.exception("Recording LLM failure failed")
 
     def generate(
         self,
@@ -243,49 +364,7 @@ class OllamaClient:
                 return data
             except requests.RequestException as exc:
                 last_exc = exc
-                # Transport-level failures (refused/unreachable/connect-timeout)
-                # mean the whole backend is gone — outage evidence. A 404 (Olla:
-                # "No ollama endpoints available" for this model) or 503 (no
-                # healthy backend for THIS request) is MODEL-scoped: the cluster
-                # may still serve everything else, so gate just the model —
-                # slamming the global gate here is what flapped the backend
-                # down/up all night when only the vision worker was off. Those
-                # two re-raise as OllamaUnavailableError (a ConnectionError):
-                # every outage handler then treats the failed re-test like the
-                # gated calls it follows — queue/pause, never a burned give-up
-                # attempt. A 503 also pokes a probe, in case it really is a full
-                # outage (the probe's endpoint counts decide that within
-                # seconds). Anything ambiguous — ReadTimeout, 502 on one busy
-                # worker, 429, a request-specific 500 (one poison photo can
-                # reproducibly crash a runner) — is evidence of NOTHING: gating
-                # a served model on it would stall every caller for the TTL.
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                if self._health is not None:
-                    if isinstance(
-                        exc, (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout)
-                    ):
-                        self._health.note_failure()
-                    elif status in (404, 503) and model:
-                        self._health.note_model_missing(model)
-                        if status == 503:
-                            self._health.poke()
-                        raise OllamaUnavailableError(
-                            f"no Ollama backend serves {model} right now (HTTP {status})"
-                        ) from exc
-                # A 4xx is usually a client error (bad request, auth, not-found)
-                # that a retry can't fix — fail fast rather than burning the
-                # backoff. The exceptions are 408 (timeout) and 429 (rate limit),
-                # which ARE transient (a busy Olla backend) and worth retrying,
-                # like 5xx and connection/timeout errors.
-                if status is not None and 400 <= status < 500 and status not in (408, 429):
-                    raise
-                # A ReadTimeout means the backend accepted the request and is
-                # still generating server-side; retrying does NOT cancel that
-                # work, it spawns a *second* full generation on top of the first
-                # and triples CPU on an already-slow backend. Fail fast instead.
-                # (A ConnectTimeout — never reached the backend — still retries.)
-                if isinstance(exc, requests.exceptions.ReadTimeout):
-                    raise
+                self._note_request_failure(exc, model)
                 if attempt < self._max_retries:
                     LOGGER.warning(
                         "Ollama %s failed (%s); retry %d/%d",
@@ -293,3 +372,51 @@ class OllamaClient:
                     )
                     time.sleep(self._retry_backoff)
         raise last_exc  # type: ignore[misc]
+
+    def _note_request_failure(self, exc: requests.RequestException, model: str) -> None:
+        """Failure bookkeeping shared by the blocking and streaming paths.
+
+        Returning normally means "retryable"; a non-retryable error re-raises.
+
+        Transport-level failures (refused/unreachable/connect-timeout) mean the
+        whole backend is gone — outage evidence. A 404 (Olla: "No ollama
+        endpoints available" for this model) or 503 (no healthy backend for
+        THIS request) is MODEL-scoped: the cluster may still serve everything
+        else, so gate just the model — slamming the global gate here is what
+        flapped the backend down/up all night when only the vision worker was
+        off. Those two re-raise as OllamaUnavailableError (a ConnectionError):
+        every outage handler then treats the failed re-test like the gated
+        calls it follows — queue/pause, never a burned give-up attempt. A 503
+        also pokes a probe, in case it really is a full outage (the probe's
+        endpoint counts decide that within seconds). Anything ambiguous —
+        ReadTimeout, 502 on one busy worker, 429, a request-specific 500 (one
+        poison photo can reproducibly crash a runner) — is evidence of NOTHING:
+        gating a served model on it would stall every caller for the TTL.
+        """
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if self._health is not None:
+            if isinstance(
+                exc, (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout)
+            ):
+                self._health.note_failure()
+            elif status in (404, 503) and model:
+                self._health.note_model_missing(model)
+                if status == 503:
+                    self._health.poke()
+                raise OllamaUnavailableError(
+                    f"no Ollama backend serves {model} right now (HTTP {status})"
+                ) from exc
+        # A 4xx is usually a client error (bad request, auth, not-found) that a
+        # retry can't fix — fail fast rather than burning the backoff. The
+        # exceptions are 408 (timeout) and 429 (rate limit), which ARE transient
+        # (a busy Olla backend) and worth retrying, like 5xx and connection/
+        # timeout errors.
+        if status is not None and 400 <= status < 500 and status not in (408, 429):
+            raise exc
+        # A ReadTimeout means the backend accepted the request and is still
+        # generating server-side; retrying does NOT cancel that work, it spawns
+        # a *second* full generation on top of the first and triples CPU on an
+        # already-slow backend. Fail fast instead. (A ConnectTimeout — never
+        # reached the backend — still retries.)
+        if isinstance(exc, requests.exceptions.ReadTimeout):
+            raise exc

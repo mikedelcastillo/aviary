@@ -553,6 +553,7 @@ class ActivityResponder:
         longitude: float = 0.0,
         utc_offset_hours: float = 0.0,
         health=None,
+        stream_factory: Callable[[int], object] | None = None,
     ) -> None:
         self._memories_dir = Path(memories_dir)
         self._client = client
@@ -582,6 +583,10 @@ class ActivityResponder:
         self._latitude = latitude
         self._longitude = longitude
         self._utc_offset_hours = utc_offset_hours
+        # Optional lib.telegram.stream.StreamedReply factory: when set, recall
+        # answers stream into a growing message (recall runs on the BIG model,
+        # whose full answer can take tens of seconds — the first words matter).
+        self._stream_factory = stream_factory
 
     def set_on_unavailable(self, callback: Callable[[int, str], None]) -> None:
         """Late-bind the queue-for-replay hook (the router is built after us)."""
@@ -716,18 +721,37 @@ class ActivityResponder:
                 "fallback notes were included and should be described as less certain."
             )
             facts = f"{facts}\n{fallback_line}" if facts else fallback_line
+        # Stream the answer into a growing message when the notifier can edit
+        # (a photo-only request has no LLM text to stream). Every path below
+        # must end in deliver()/finalize so the registry slot is released.
+        stream = (
+            self._stream_factory(chat_id)
+            if self._stream_factory is not None and not pure_photo_request
+            else None
+        )
+
+        def deliver(message: str) -> None:
+            if stream is not None:
+                stream.finalize(message)
+            elif message:
+                self._notify(chat_id, message)
+
         def _ask(model: str) -> str:
             if pure_photo_request:
                 return ""
+            on_partial = stream.update if stream is not None else None
+            cancelled = stream.cancelled if stream is not None else None
             if question:
                 return answer_activity_question(
                     self._client, model, text, notes, self._pronoun_note, window_phrase,
                     facts=facts, timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+                    on_partial=on_partial, cancelled=cancelled,
                 )
             subject = pretty_phrase(bird_text) if bird_text.strip() else ""
             return summarise_activity(
                 self._client, model, notes, subject, self._pronoun_note,
                 timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
+                on_partial=on_partial, cancelled=cancelled,
             )
 
         # Try the big recall model, then fall back to the small one if it's down /
@@ -762,7 +786,14 @@ class ActivityResponder:
         ):
             # No model could run at all — save the question for replay instead of
             # degrading to a raw journal line the user didn't ask for.
+            if stream is not None:
+                stream.finalize("")
             self._on_unavailable(chat_id, text)
+            return
+        # A newer message superseded this answer mid-stream: freeze whatever
+        # partial is on screen and stop — the newer turn is being answered.
+        if stream is not None and stream.cancelled():
+            stream.finalize("")
             return
         summary = summary or ("" if pure_photo_request else notes[-1])
 
@@ -828,8 +859,7 @@ class ActivityResponder:
                 except Exception:
                     LOGGER.exception("Reading activity photo failed")
             if items:
-                if summary:
-                    self._notify(chat_id, summary)
+                deliver(summary)
                 self._send_album(chat_id, items)
                 return
         # No photos (or no album sender). For an activity/together photo search that
@@ -837,9 +867,9 @@ class ActivityResponder:
         # photos" — the point of the query was the filter.
         who = pretty_phrase(bird_text) if bird_text.strip() else "the birds"
         if not chosen and want_acts:
-            self._notify(chat_id, f"I don't have any saved photos of {who} {' or '.join(sorted(want_acts))} {window_phrase}.")
+            deliver(f"I don't have any saved photos of {who} {' or '.join(sorted(want_acts))} {window_phrase}.")
             return
         if not chosen and pair_targets:
-            self._notify(chat_id, f"I don't have any saved photos of {who} together {window_phrase}.")
+            deliver(f"I don't have any saved photos of {who} together {window_phrase}.")
             return
-        self._notify(chat_id, summary or f"I found activity for {who} {window_phrase}, but no saved photos to show.")
+        deliver(summary or f"I found activity for {who} {window_phrase}, but no saved photos to show.")

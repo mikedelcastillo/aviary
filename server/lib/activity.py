@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib.ai.chat import clean_reply
+from lib.ai.chat import clean_reply, collect_stream
 from lib.labels import pretty
 
 
@@ -226,6 +226,8 @@ def answer_activity_question(
     *,
     facts: str = "",
     timeout_seconds: float | None = None,
+    on_partial=None,
+    cancelled=None,
 ) -> str:
     """Answer a free-form day-lookback question grounded in the memory notes."""
     if not notes:
@@ -239,24 +241,59 @@ def answer_activity_question(
         parts.append(f"Counts (exact tallies — trust over prose, but never quote):\n{facts}")
     header = f"Memory notes from {window_phrase}" if window_phrase else "Memory notes"
     parts.append(f"{header}:\n{body}")
-    reply = client.chat(
-        model,
-        [
-            {"role": "system", "content": _ACTIVITY_QA_PROMPT},
-            {"role": "user", "content": "\n\n".join(parts)},
-        ],
-        # llm_model is an instruct model (gemma3): answer directly, no thinking.
-        # With a reasoning model think=True burned the whole 768-token budget on
-        # deliberation and returned EMPTY content; num_predict now caps the answer.
-        think=False,
-        num_predict=400,
-        timeout_seconds=timeout_seconds,
+    messages = [
+        {"role": "system", "content": _ACTIVITY_QA_PROMPT},
+        {"role": "user", "content": "\n\n".join(parts)},
+    ]
+    # llm_model is an instruct model (gemma3): answer directly, no thinking.
+    # With a reasoning model think=True burned the whole 768-token budget on
+    # deliberation and returned EMPTY content; num_predict now caps the answer.
+    reply = _chat_maybe_streaming(
+        client, model, messages, num_predict=400,
+        timeout_seconds=timeout_seconds, on_partial=on_partial, cancelled=cancelled,
     )
     return _strip_stray_yesno(clean_reply(reply), question)
 
 
+def _chat_maybe_streaming(
+    client,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    num_predict: int,
+    timeout_seconds: float | None,
+    on_partial=None,
+    cancelled=None,
+) -> str:
+    """One chat turn, streamed when the caller wants partials.
+
+    With ``on_partial`` set (and a client that can stream), tokens surface as
+    they arrive so the recall answer / report caption grows on screen instead
+    of appearing all at once; otherwise this is the plain blocking call.
+    """
+    if on_partial is not None and hasattr(client, "chat_stream"):
+        stream = client.chat_stream(
+            model, messages, think=False,
+            num_predict=num_predict, timeout_seconds=timeout_seconds,
+        )
+        raw, _ = collect_stream(stream, on_partial=on_partial, cancelled=cancelled)
+        return raw
+    return client.chat(
+        model, messages, think=False,
+        num_predict=num_predict, timeout_seconds=timeout_seconds,
+    )
+
+
 def summarise_activity(
-    client, model: str, notes: list[str], subject: str = "", pronoun_note: str = "", *, timeout_seconds: float | None = None
+    client,
+    model: str,
+    notes: list[str],
+    subject: str = "",
+    pronoun_note: str = "",
+    *,
+    timeout_seconds: float | None = None,
+    on_partial=None,
+    cancelled=None,
 ) -> str:
     """Fold journal memory notes into a terse bulleted activity report.
 
@@ -269,16 +306,18 @@ def summarise_activity(
     ask = f"Summarise {subject}'s activity from these notes:\n{body}" if subject else f"Notes:\n{body}"
     if pronoun_note:
         ask = f"Bird pronouns (use these exactly): {pronoun_note}\n\n{ask}"
-    reply = client.chat(
+    # Instruct model (gemma3): think=False means a direct answer, not leaked
+    # reasoning; 5 short bullets fit comfortably under this cap.
+    reply = _chat_maybe_streaming(
+        client,
         model,
         [
             {"role": "system", "content": _ACTIVITY_SUMMARY_PROMPT},
             {"role": "user", "content": ask},
         ],
-        # Instruct model (gemma3): think=False means a direct answer, not leaked
-        # reasoning; 5 short bullets fit comfortably under this cap.
-        think=False,
         num_predict=350,
         timeout_seconds=timeout_seconds,
+        on_partial=on_partial,
+        cancelled=cancelled,
     )
     return clean_reply(reply)

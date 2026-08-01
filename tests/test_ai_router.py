@@ -392,3 +392,37 @@ def test_dispatch_sees_replaying_flag_during_replay() -> None:
     router.replay_pending(3, "hello", now_ph())
     assert seen == [True]
     assert router.replaying() is False
+
+
+def test_handle_async_fires_supersede_hook_on_every_message() -> None:
+    # Any stream still editing a reply to this chat is stale the moment a new
+    # message arrives — the hook must fire immediately, not after debounce.
+    superseded: list[int] = []
+    router = NaturalLanguageRouter(
+        FakeClient('{"action": "chat", "argument": ""}'),
+        "qwen3:4b",
+        lambda: [],
+        dispatch=lambda *a: None,
+        notify=lambda *a: None,
+        debounce_seconds=999.0,  # the timer must never fire in this test
+        on_supersede=superseded.append,
+    )
+    router.handle_async(7, "hello")
+    router.handle_async(7, "actually, another thing")
+    assert superseded == [7, 7]
+
+
+def test_handle_async_survives_broken_supersede_hook() -> None:
+    def boom(chat_id: int) -> None:
+        raise RuntimeError("registry exploded")
+
+    router = NaturalLanguageRouter(
+        FakeClient('{"action": "chat", "argument": ""}'),
+        "qwen3:4b",
+        lambda: [],
+        dispatch=lambda *a: None,
+        notify=lambda *a: None,
+        debounce_seconds=999.0,
+        on_supersede=boom,
+    )
+    router.handle_async(7, "hello")  # must not raise
