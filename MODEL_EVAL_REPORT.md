@@ -39,6 +39,40 @@ only when every task meets its requirement. Results persist to
 | vlm | scene | `/find`-style captions on collect sidecar frames with detection grounding: names the bird, concrete activity word, ≤32w, never "no bird" when detected | ≥75%, p90 ≤60s |
 | vlm | camera_names | view naming across distinct cameras: non-empty after cleaning, ≤2 words, stability across frames, uniqueness across cameras | ≥70%, p90 ≤60s |
 
+## Search plan
+
+Per-role, smallest-first; a candidate wins its role by PASSING every requirement
+at a lower parameter count than the incumbent (quality ties break toward fewer B,
+then lower latency). Incumbents are baselined first so requirements reflect what
+the app demonstrably needs today.
+
+Candidate queue (B = params; ✔ = already on disk):
+
+- **LLM** (needs: intent JSON schema, chat persona, instruct behavior):
+  gemma3:1b (1B), llama3.2:1b (1B), llama3.2:3b (3B), granite3.3:2b (2B),
+  phi4-mini (3.8B), gemma3:4b ✔ incumbent (4B)
+- **VLM** (needs: vision + format-schema JSON + grounded captions):
+  moondream (1.8B), granite3.2-vision (2B), qwen2.5vl:3b ✔ (3B),
+  gemma3:4b ✔ (4B — multimodal; could serve BOTH llm+vlm roles on one card),
+  llava-phi3 (3.8B), minicpm-v (8B), qwen2.5vl:7b ✔ incumbent (7B)
+- **Recall** (needs: numeric fidelity over COUNTS blocks):
+  llama3.2:3b (3B), gemma3:4b ✔ (4B), qwen2.5:7b (7B), llama3.1:8b (8B),
+  gemma3:12b ✔ incumbent (12B)
+
+## Incumbent baselines (2026-08-02, aviary stopped, direct Pascal endpoints)
+
+### gemma3:4b — LLM role — effectively PASS
+intent **98.3%** (58/59, p50 1.8s / p90 2.1s) — only miss: "where is everyone?" → find instead of activity.
+chat **90%** (9/10, p50 3.1s, 0 fallbacks) — reproducible flaw: **invents bird sightings while cameras are PAUSED**.
+sleep 2/3 at first run was a suite scoring bug (12-hour clock normalization, fixed in 94e8c69); with the fix the reply was compliant.
+
+### gemma3:12b — Recall role — PASS
+recall_qa **100%** (6/6, p50 21.1s / p90 26.5s), summary **100%** (2/2, p50 14.6s).
+Slow but well inside the 45s budget even running mostly on CPU (8.1GB model, 4GB card).
+
+### qwen2.5vl:7b — VLM role
+_(running)_
+
 ## Candidates tried
 
 _(one entry per model: why tried, scores, verdict, kept/deleted)_
