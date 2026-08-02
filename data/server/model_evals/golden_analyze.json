@@ -1,0 +1,861 @@
+{
+ "created": "2026-08-02",
+ "method": "3-way vision-agent labeling + orchestrator spot checks; silver labels deliberately hidden from labelers",
+ "frames": [
+  {
+   "id": "g00",
+   "photo": "data/server/memories/images/20260722_075955_camera-192.168.1.22.jpg",
+   "camera": "Green Blue",
+   "detections": [
+    {
+     "label": "jynx",
+     "bbox": [
+      1044,
+      423,
+      1139,
+      545
+     ]
+    },
+    {
+     "label": "percy",
+     "bbox": [
+      804,
+      509,
+      907,
+      612
+     ]
+    }
+   ],
+   "allowed": {
+    "percy": [
+     "preening",
+     "feeding",
+     "exploring",
+     "resting"
+    ],
+    "jynx": [
+     "alert",
+     "resting"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g01",
+   "photo": "data/server/memories/images/20260801_061800_camera-192.168.1.22.jpg",
+   "camera": "Green Tower",
+   "detections": [
+    {
+     "label": "percy",
+     "bbox": [
+      812,
+      424,
+      895,
+      565
+     ]
+    },
+    {
+     "label": "bambi",
+     "bbox": [
+      1059,
+      148,
+      1225,
+      255
+     ]
+    },
+    {
+     "label": "matcha",
+     "bbox": [
+      866,
+      654,
+      1007,
+      719
+     ]
+    }
+   ],
+   "allowed": {
+    "bambi": [
+     "alert",
+     "exploring",
+     "resting"
+    ],
+    "percy": [
+     "alert",
+     "resting",
+     "climbing"
+    ],
+    "matcha": [
+     "alert",
+     "resting",
+     "hidden"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g02",
+   "photo": "data/server/memories/images/20260706_111442_camera-192.168.1.20.jpg",
+   "camera": "White Feeder",
+   "detections": [
+    {
+     "label": "draft",
+     "bbox": [
+      297,
+      25,
+      683,
+      461
+     ]
+    }
+   ],
+   "allowed": {
+    "draft": [
+     "resting",
+     "alert",
+     "preening"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g03",
+   "photo": "data/server/memories/images/20260727_173324_camera-192.168.1.22.jpg",
+   "camera": "Green Feeder",
+   "detections": [
+    {
+     "label": "draft",
+     "bbox": [
+      666,
+      622,
+      783,
+      720
+     ]
+    }
+   ],
+   "allowed": {
+    "draft": [
+     "feeding",
+     "exploring"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g04",
+   "photo": "data/server/memories/images/20260702_165910_camera-192.168.1.61.jpg",
+   "camera": "Black Cage",
+   "detections": [
+    {
+     "label": "matcha",
+     "bbox": [
+      71,
+      350,
+      217,
+      716
+     ]
+    },
+    {
+     "label": "percy",
+     "bbox": [
+      577,
+      345,
+      696,
+      476
+     ]
+    },
+    {
+     "label": "jynx",
+     "bbox": [
+      954,
+      122,
+      1152,
+      322
+     ]
+    }
+   ],
+   "allowed": {
+    "matcha": [
+     "alert",
+     "resting"
+    ],
+    "percy": [
+     "alert",
+     "resting"
+    ],
+    "jynx": [
+     "preening",
+     "alert",
+     "resting"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g05",
+   "photo": "data/server/memories/images/20260705_112207_camera-192.168.1.61.jpg",
+   "camera": "Sunlight Cage",
+   "detections": [
+    {
+     "label": "matcha",
+     "bbox": [
+      357,
+      125,
+      462,
+      413
+     ]
+    },
+    {
+     "label": "percy",
+     "bbox": [
+      665,
+      55,
+      772,
+      185
+     ]
+    },
+    {
+     "label": "bambi",
+     "bbox": [
+      941,
+      93,
+      1202,
+      636
+     ]
+    }
+   ],
+   "allowed": {
+    "bambi": [
+     "climbing",
+     "alert",
+     "resting",
+     "exploring"
+    ],
+    "matcha": [
+     "climbing",
+     "exploring",
+     "alert",
+     "resting",
+     "playing"
+    ],
+    "percy": [
+     "alert",
+     "exploring",
+     "resting",
+     "preening",
+     "hidden"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g06",
+   "photo": "data/server/memories/images/20260708_162850_camera-192.168.1.20.jpg",
+   "camera": "Pink Parrot",
+   "detections": [
+    {
+     "label": "percy",
+     "bbox": [
+      346,
+      299,
+      423,
+      367
+     ]
+    }
+   ],
+   "allowed": {
+    "percy": [
+     "hidden",
+     "unknown",
+     "alert",
+     "resting"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g07",
+   "photo": "data/server/memories/images/20260724_174009_camera-192.168.1.19.jpg",
+   "camera": "Cockatiel Tower",
+   "detections": [
+    {
+     "label": "draft",
+     "bbox": [
+      602,
+      12,
+      687,
+      197
+     ]
+    }
+   ],
+   "allowed": {
+    "draft": [
+     "feeding",
+     "preening",
+     "resting"
+    ]
+   },
+   "notes": "labeled by orchestrator (direct view)"
+  },
+  {
+   "id": "g08",
+   "photo": "data/server/memories/images/20260705_134633_camera-192.168.1.61.jpg",
+   "camera": "Green Feeder",
+   "detections": [
+    {
+     "label": "matcha",
+     "bbox": [
+      219,
+      407,
+      398,
+      692
+     ]
+    },
+    {
+     "label": "jynx",
+     "bbox": [
+      468,
+      401,
+      672,
+      669
+     ]
+    },
+    {
+     "label": "percy",
+     "bbox": [
+      1113,
+      204,
+      1280,
+      390
+     ]
+    }
+   ],
+   "allowed": {
+    "matcha": [
+     "resting",
+     "alert"
+    ],
+    "jynx": [
+     "resting",
+     "alert"
+    ],
+    "percy": [
+     "resting",
+     "alert"
+    ]
+   },
+   "notes": "Three lovebirds perched still on separate perches; Matcha faces away with head slightly turned, Jynx upright and watchful, Percy perched high near cage top; no grooming posture visible on any bird."
+  },
+  {
+   "id": "g09",
+   "photo": "data/server/memories/images/20260706_101222_camera-192.168.1.61.jpg",
+   "camera": "Green Feeder",
+   "detections": [
+    {
+     "label": "jynx",
+     "bbox": [
+      121,
+      262,
+      289,
+      394
+     ]
+    },
+    {
+     "label": "matcha",
+     "bbox": [
+      385,
+      135,
+      545,
+      374
+     ]
+    }
+   ],
+   "allowed": {
+    "jynx": [
+     "exploring",
+     "alert",
+     "resting"
+    ],
+    "matcha": [
+     "resting",
+     "alert"
+    ]
+   },
+   "notes": "Jynx leans forward on the rope-wrapped branch with beak near a wire/rope end (possibly mouthing it); Matcha stands upright on the branch facing the camera, still and watchful; no visible interaction between them despite silver's 'interacting'."
+  },
+  {
+   "id": "g10",
+   "photo": "data/server/memories/images/20260729_160827_camera-192.168.1.19.jpg",
+   "camera": "Ladder Tower",
+   "detections": [
+    {
+     "label": "draft",
+     "bbox": [
+      538,
+      318,
+      761,
+      720
+     ]
+    }
+   ],
+   "allowed": {
+    "draft": [
+     "alert",
+     "resting"
+    ]
+   },
+   "notes": "White cockatiel perched on a wooden perch with crest raised and head turned, eyes open; a second pale bird's wing is partly visible behind it; no beak-in-feathers grooming despite silver's 'preening'."
+  },
+  {
+   "id": "g11",
+   "photo": "data/server/memories/images/20260703_000348_camera-192.168.1.61.jpg",
+   "camera": "White Bird",
+   "detections": [
+    {
+     "label": "lovebird",
+     "bbox": [
+      620,
+      247,
+      772,
+      593
+     ]
+    },
+    {
+     "label": "lovebird",
+     "bbox": [
+      726,
+      203,
+      850,
+      513
+     ]
+    },
+    {
+     "label": "budgie",
+     "bbox": [
+      957,
+      102,
+      1054,
+      292
+     ]
+    }
+   ],
+   "allowed": {
+    "lovebird": [
+     "resting",
+     "sleeping",
+     "interacting"
+    ],
+    "budgie": [
+     "resting",
+     "alert"
+    ]
+   },
+   "notes": "Night IR frame (12:03 AM): two lovebirds huddled together fluffed on the branch, plausibly dozing or allo-huddling (grain too coarse to confirm allopreening); budgie perched upright and apparently awake on its perch."
+  },
+  {
+   "id": "g12",
+   "photo": "data/server/memories/images/20260626_061415_camera-192.168.1.42.jpg",
+   "camera": "",
+   "detections": [
+    {
+     "label": "matcha",
+     "bbox": [
+      588,
+      351,
+      787,
+      622
+     ]
+    },
+    {
+     "label": "jynx",
+     "bbox": [
+      716,
+      489,
+      784,
+      643
+     ]
+    },
+    {
+     "label": "percy",
+     "bbox": [
+      780,
+      456,
+      849,
+      553
+     ]
+    }
+   ],
+   "allowed": {
+    "matcha": [
+     "resting",
+     "alert"
+    ],
+    "jynx": [
+     "resting",
+     "hidden",
+     "unknown"
+    ],
+    "percy": [
+     "hidden",
+     "unknown"
+    ]
+   },
+   "notes": "Matcha perched atop the stand with back to camera, head lowered but no visible grooming; Jynx is mostly occluded behind Matcha (only blue body/tail visible, head hidden); Percy's box shows only a small orange patch behind Matcha \u2014 effectively hidden."
+  },
+  {
+   "id": "g13",
+   "photo": "data/server/memories/images/20260712_142646_camera-192.168.1.19.jpg",
+   "camera": "White Tail",
+   "detections": [
+    {
+     "label": "bambi",
+     "bbox": [
+      310,
+      345,
+      398,
+      460
+     ]
+    },
+    {
+     "label": "matcha",
+     "bbox": [
+      178,
+      343,
+      397,
+      720
+     ]
+    }
+   ],
+   "allowed": {
+    "matcha": [
+     "preening",
+     "resting"
+    ],
+    "bambi": [
+     "hidden",
+     "unknown"
+    ]
+   },
+   "notes": "Large fluffed grey/white bird close to camera with head twisted down into its shoulder/wing \u2014 genuine grooming posture; the bird looks grey/white rather than Matcha's usual green, so the 'matcha' label may be wrong (possibly a cockatiel); Bambi's box is only a yellowish smudge occluded behind the foreground bird."
+  },
+  {
+   "id": "g14",
+   "photo": "data/server/memories/images/20260721_212900_camera-192.168.1.19.jpg",
+   "camera": "Play Gym",
+   "detections": [
+    {
+     "label": "cockatiel",
+     "bbox": [
+      256,
+      64,
+      505,
+      657
+     ]
+    },
+    {
+     "label": "cockatiel",
+     "bbox": [
+      440,
+      57,
+      690,
+      421
+     ]
+    }
+   ],
+   "allowed": {
+    "cockatiel": [
+     "resting",
+     "alert",
+     "exploring",
+     "climbing"
+    ]
+   },
+   "notes": "Two cockatiels on the play gym at night under one label: left bird perched upright with back to camera, right bird crest-raised leaning down toward the perch/ladder as if moving or investigating; box labels rendered blank/white but boxes clearly contain the birds; no grooming visible."
+  },
+  {
+   "id": "g15",
+   "photo": "data/server/memories/images/20260720_195702_camera-192.168.1.22.jpg",
+   "camera": "Big Cage 7",
+   "detections": [
+    {
+     "label": "cockatiel",
+     "bbox": [
+      1022,
+      48,
+      1280,
+      443
+     ]
+    }
+   ],
+   "allowed": {
+    "cockatiel": [
+     "resting",
+     "alert",
+     "exploring"
+    ]
+   },
+   "notes": "Single white cockatiel at top-right on a platform with head bent low toward the platform edge (head partly obscured at frame corner); could be investigating the platform; no confirmable beak-in-feathers grooming despite silver's 'preening'."
+  },
+  {
+   "id": "g16",
+   "photo": "data/server/memories/images/20260710_081632_camera-192.168.1.22.jpg",
+   "camera": "Night Perch",
+   "detections": [
+    {
+     "label": "percy",
+     "bbox": [
+      351,
+      664,
+      490,
+      719
+     ]
+    }
+   ],
+   "allowed": {
+    "percy": [
+     "hidden",
+     "unknown"
+    ]
+   },
+   "notes": "Box is at the very bottom edge of the frame; only a small sliver of the bird's head/back color is visible and cut off, so no activity can be judged."
+  },
+  {
+   "id": "g17",
+   "photo": "data/server/memories/images/20260725_072954_camera-192.168.1.22.jpg",
+   "camera": "Big Cage 7",
+   "detections": [
+    {
+     "label": "matcha",
+     "bbox": [
+      1081,
+      386,
+      1242,
+      598
+     ]
+    },
+    {
+     "label": "percy",
+     "bbox": [
+      631,
+      370,
+      804,
+      544
+     ]
+    },
+    {
+     "label": "bambi",
+     "bbox": [
+      795,
+      449,
+      857,
+      511
+     ]
+    }
+   ],
+   "allowed": {
+    "percy": [
+     "resting",
+     "alert"
+    ],
+    "bambi": [
+     "resting",
+     "alert"
+    ],
+    "matcha": [
+     "resting",
+     "alert",
+     "climbing"
+    ]
+   },
+   "notes": "Percy perched upright head-up on a perch (no beak-in-feathers, silver 'preening' not supported); Bambi is small and partially occluded behind Percy's perch but visibly perched; Matcha sits atop the ladder by a bead toy, possibly mid-climb."
+  },
+  {
+   "id": "g18",
+   "photo": "data/server/memories/images/20260702_215007_camera-192.168.1.61.jpg",
+   "camera": "White Bird",
+   "detections": [
+    {
+     "label": "lovebird",
+     "bbox": [
+      314,
+      310,
+      506,
+      558
+     ]
+    },
+    {
+     "label": "lovebird",
+     "bbox": [
+      209,
+      329,
+      397,
+      599
+     ]
+    }
+   ],
+   "allowed": {
+    "lovebird": [
+     "flying",
+     "playing",
+     "interacting"
+    ]
+   },
+   "notes": "Night IR frame: two overlapping lovebird boxes contain two heavily motion-blurred birds with wings spread mid-flap at the ladder perch \u2014 active movement, ambiguous between flight, play, and mutual interaction; an unboxed cockatiel perches above."
+  },
+  {
+   "id": "g19",
+   "photo": "data/server/memories/images/20260729_145315_camera-192.168.1.22.jpg",
+   "camera": "Bird Cage 3",
+   "detections": [
+    {
+     "label": "bambi",
+     "bbox": [
+      265,
+      517,
+      400,
+      644
+     ]
+    },
+    {
+     "label": "percy",
+     "bbox": [
+      127,
+      489,
+      209,
+      704
+     ]
+    },
+    {
+     "label": "matcha",
+     "bbox": [
+      636,
+      193,
+      684,
+      357
+     ]
+    }
+   ],
+   "allowed": {
+    "percy": [
+     "resting",
+     "alert"
+    ],
+    "bambi": [
+     "exploring",
+     "feeding",
+     "alert"
+    ],
+    "matcha": [
+     "climbing",
+     "playing",
+     "alert"
+    ]
+   },
+   "notes": "Percy perched upright at left (silver 'preening' not supported by pixels); Bambi stands on the platform beside a clear cup with head toward it, plausibly foraging; Matcha clings vertically to the hanging beaded strand near the bell."
+  },
+  {
+   "id": "g20",
+   "photo": "data/server/memories/images/20260720_090926_camera-192.168.1.22.jpg",
+   "camera": "Bird Cage 3",
+   "detections": [
+    {
+     "label": "percy",
+     "bbox": [
+      517,
+      247,
+      672,
+      405
+     ]
+    }
+   ],
+   "allowed": {
+    "percy": [
+     "resting",
+     "alert"
+    ]
+   },
+   "notes": "Percy perched on a wooden perch with head turned away/lowered; beak is not visible so preening cannot be confirmed from pixels \u2014 silver 'preening' unverifiable."
+  },
+  {
+   "id": "g21",
+   "photo": "data/server/memories/images/20260703_100711_camera-192.168.1.61.jpg",
+   "camera": "Bird Cage 2",
+   "detections": [
+    {
+     "label": "percy",
+     "bbox": [
+      817,
+      471,
+      1122,
+      706
+     ]
+    },
+    {
+     "label": "bambi",
+     "bbox": [
+      353,
+      7,
+      553,
+      558
+     ]
+    }
+   ],
+   "allowed": {
+    "bambi": [
+     "alert",
+     "resting"
+    ],
+    "percy": [
+     "alert",
+     "resting"
+    ]
+   },
+   "notes": "Bambi is a yellow budgie standing tall and slim on a branch (classic alert posture); Percy is perched close to the camera, head up and eye open \u2014 no grooming posture on either bird."
+  },
+  {
+   "id": "g22",
+   "photo": "data/server/memories/images/20260705_180427_camera-192.168.1.20.jpg",
+   "camera": "White Parrot",
+   "detections": [
+    {
+     "label": "draft",
+     "bbox": [
+      492,
+      216,
+      726,
+      575
+     ]
+    }
+   ],
+   "allowed": {
+    "draft": [
+     "climbing",
+     "exploring",
+     "playing"
+    ]
+   },
+   "notes": "Pied cockatiel stretched diagonally head-down from the ladder toward a rope/toy below, tail up \u2014 reaching/clambering; head is near but not inside the seed cup and no beak-in-feathers is visible, so silver 'preening' is not supported."
+  },
+  {
+   "id": "g23",
+   "photo": "data/server/memories/images/20260717_083322_camera-192.168.1.19.jpg",
+   "camera": "Green Parrot",
+   "detections": [
+    {
+     "label": "draft",
+     "bbox": [
+      513,
+      0,
+      748,
+      523
+     ]
+    }
+   ],
+   "allowed": {
+    "draft": [
+     "resting",
+     "alert"
+    ]
+   },
+   "notes": "White cockatiel perched stationary on the wooden perch facing the camera; head is cut off at the top frame edge, but the calm upright perch posture is clear and shows no grooming \u2014 silver 'preening' not supported."
+  }
+ ]
+}
