@@ -96,6 +96,26 @@ Why tried: strong instruct family, 3B tier.
 Scores: intent **94.9%** ✓ (p50 0.9s) · chat **60%** ✗ · sleep **100%** ✓.
 Rejection: chat grounding/policy — reports "all 4 cameras healthy" when the state block says 3/4, glosses over paused mode, and **gives diet advice** ("avocados are toxic; avoid feeding") where the persona requires deflecting to an avian vet. Intent+sleep are genuinely good; chat discipline isn't. Deleted at cleanup unless needed for cross-checks.
 
+### granite3.3:2b (2B) — LLM role — ❌ REJECTED
+Why tried: 2B tier, IBM instruct tune reputed good at structured tasks.
+Scores: intent **96.6%** ✓ (p50 **0.7s** — fastest of all) · chat **60%** ✗ · sleep **100%** ✓.
+Rejection: chat persona — invents a full scene while nothing supports it, writes species words ("budgerariums"), no vet deflection, greets birds by name. Same failure signature as every other sub-4B: structured tasks fine, free-chat discipline absent. Deleted.
+
+### phi4-mini (3.8B) — LLM role — ❌ REJECTED
+Why tried: largest sub-incumbent option; Microsoft instruct tune.
+Scores: intent **94.9%** ✓ (p50 1.2s) · chat **30%** ✗ · sleep **100%** ✓.
+Rejection: chat rambles 50-82 words against a 35-word contract and invents which birds are visible. Deleted.
+
+## LLM role conclusion (2026-08-02)
+
+**gemma3:4b (incumbent) is the smallest model on ollama that meets the LLM-role
+requirements.** Five candidates below it (gemma3:1b, llama3.2:1b/3b, qwen2.5:3b,
+granite3.3:2b, phi4-mini — five distinct families, 1B→3.8B) all pass intent
+routing (94-97%) and mostly sleep, and all FAIL the chat persona/grounding
+contract the Telegram bot depends on (invented sightings, ignored paused state,
+species words, diet advice, run-on replies). The failure is capability-shaped,
+not family-shaped. Recommendation: keep `OLLAMA_LLM_MODEL=gemma3:4b`.
+
 ## Current recommendation
 
 _(pending)_
