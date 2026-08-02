@@ -111,6 +111,18 @@ Why tried: already the configured fallback; passing would retire the 12b (8GB + 
 Scores: recall_qa **16.7%** ✗ (p50 4.9s) · summary 50% ✗.
 Rejection: confabulates clock times not present in the data ("9:30 am"), quotes meta-words ("feeding observations recorded"), bullets omit the subject's name. Confirms the .env comment: a 4B confabulates over per-bird tallies. The 12b's 100% under identical scoring is real headroom, not slack requirements.
 
+### qwen2.5:7b (7B) — Recall role — ❌ REJECTED
+Why tried: halfway point between failed 4B and passing 12B.
+Scores: recall_qa **33.3%** ✗ (p50 7.1s) · summary **100%** ✓.
+Rejection: correct facts but poor instruction-following — omits the required Yes/No opener, misgenders Draft ("she"), skips the vet suggestion, quotes meta-words. Deleted.
+
+## Recall role conclusion (2026-08-02)
+
+**gemma3:12b stays.** 4B scored 16.7%, 7B scored 33.3%, the 12B scores 100% with
+p90 26.5s — the accuracy cliff between 7B and 12B is exactly why the role exists.
+The role is also the lowest-volume call site (5 production calls since 2026-07-04),
+so shrinking it buys nearly nothing. Recommendation: keep `OLLAMA_RECALL_MODEL=gemma3:12b`.
+
 ## LLM role conclusion (2026-08-02)
 
 **gemma3:4b (incumbent) is the smallest model on ollama that meets the LLM-role
