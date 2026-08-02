@@ -98,10 +98,21 @@ def has_markdown(text: str) -> bool:
 
 
 def numbers_in(text: str) -> set[str]:
-    """Every number token, normalised (times split into components, '86/100'
-    into both halves) — used to assert a reply invents no figure that isn't in
-    its source facts."""
-    return set(re.findall(r"\d+", text))
+    """Every number token, normalised — used to assert a reply invents no
+    figure that isn't in its source facts.
+
+    Normalisation: leading zeros stripped ("04" == "4"), and 24-hour clock
+    hours also contribute their 12-hour form ("20:10" -> 20, 8, 10) so a model
+    that writes "8:10 pm" for 20:10 isn't flagged as inventing an 8.
+    """
+    tokens: set[str] = set()
+    for match in re.findall(r"\d+", text):
+        tokens.add(match.lstrip("0") or "0")
+    for hour, _minute in re.findall(r"\b(\d{1,2}):(\d{2})\b", text):
+        h = int(hour)
+        if 13 <= h <= 23:
+            tokens.add(str(h - 12))
+    return tokens
 
 
 def invented_numbers(reply: str, source: str) -> set[str]:
