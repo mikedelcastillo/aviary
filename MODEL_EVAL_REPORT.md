@@ -119,6 +119,29 @@ Takeaway: best decoration model available at any size tested, and decoration is 
 production VLM volume. Loses the two low-volume tasks. See phase-2 conclusion for the
 split-role recommendation.
 
+### hf.co/unsloth/gemma-3-12b-it-GGUF:UD-IQ3_XXS (12B @ IQ3, 4.8GB) — ❌ both roles
+Why tried: 12B quality fully resident on the 6GB card; unsloth repo ships mmproj so
+quantized vision works via plain `ollama pull hf.co/...` (verified — 16.5s cold smoke).
+VLM: analyze **62.5%** (agreement 0.604 — marginally best) but p50 22.8s (2x slower than
+gemma3:4b, no win), scene 0% (gemma preamble). Recall: **66.7%** ✗ @ p50 8.1s — 2.6x faster
+than full 12b but IQ3 visibly dents factual discipline (full q4_K_M: 100%). Deleted at cleanup.
+
+### gemma3:12b q4_K_M, CPU-spilled on the 6GB card — VLM role — partial
+analyze **66.7%** (16/24) — best analyze score of any model, at ~20s/frame (still faster
+than the incumbent's 32s). Scene text goes flowery and stops naming birds ("a vibrant
+splash of green life perches regally"). Eval process was killed externally before
+scene/camera tasks; analyze data complete.
+
+### gemma3:12b q4_K_M on a dual-GPU split (experimental :11436 container) — ✅ RECALL WIN
+Setup: third ollama container seeing both Pascal cards (10GB combined); 12b loads
+5.5GB-on-GPU split 1.3GB/5.1GB (vs ~30%-on-GPU single-card). Gotcha: the split only
+happens if the 1060 is free at load time — a resident model on ollama-gpu1 silently
+forces a 3GB/CPU-heavy placement.
+Result: recall_qa **100%** + summary **100%** at p50 **11.5s** (vs 21.1s today) —
+**1.8x faster recall at identical quality**. Deployment would need topology rework
+(the dual container competes with YOLO + the VLM for the same cards); tradeoffs in
+the phase-2 conclusion.
+
 ## Candidates tried
 
 ### gemma3:1b (1B) — LLM role — ❌ REJECTED
