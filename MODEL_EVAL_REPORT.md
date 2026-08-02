@@ -126,6 +126,11 @@ Why tried: smallest vision model on ollama; "fastest" per old harness notes.
 Scores: analyze **0%** (0/24; names_birds 0.125, overlay leakage — literally describes "colored boxes with names printed on them") · scene **8.3%** (empty captions, echoes the prompt text back).
 Rejection: not viable for any VLM task in this app. Deleted immediately.
 
+### granite3.2-vision (2B) — VLM role — ❌ REJECTED
+Why tried: 2B document/vision tune; decent JSON discipline expected.
+Scores: analyze **16.7%** ✗ (coverage 0.91 — best of the small models — but golden agreement 0.285, species words, invented identities: "vibrant yellow parakeet named Percy" on a bambi/matcha/percy frame) · scene **41.7%** ✗.
+Rejection: hallucinated identity + species leakage. Deleted.
+
 ## Recall role conclusion (2026-08-02)
 
 **gemma3:12b stays.** 4B scored 16.7%, 7B scored 33.3%, the 12B scores 100% with
