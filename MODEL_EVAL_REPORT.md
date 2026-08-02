@@ -116,6 +116,11 @@ Why tried: halfway point between failed 4B and passing 12B.
 Scores: recall_qa **33.3%** ✗ (p50 7.1s) · summary **100%** ✓.
 Rejection: correct facts but poor instruction-following — omits the required Yes/No opener, misgenders Draft ("she"), skips the vet suggestion, quotes meta-words. Deleted.
 
+### qwen2.5vl:3b (3B) — VLM role — ❌ REJECTED
+Why tried: already on disk; 3x faster than the 7b (p50 8.9s vs 32.2s); same family.
+Scores: analyze **12.5%** ✗ (coverage 0.458 — skips half the labeled birds; golden agreement 0.167) · scene 83.3% ✓ · camera_names 100% but stability 0.0 (new name every frame).
+Rejection: decoration coverage collapse — the exact quality gap Mike's earlier "keep 7b" decision predicted. Kept on disk for now (useful A/B reference), candidate for deletion at cleanup.
+
 ## Recall role conclusion (2026-08-02)
 
 **gemma3:12b stays.** 4B scored 16.7%, 7B scored 33.3%, the 12B scores 100% with
