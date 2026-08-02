@@ -94,6 +94,20 @@ species words in 1/3 of scenes ("parrot", "the lovebirds"), occasional identity 
 cat/dog frames from a sampler bug, since fixed — bird-only score 10/10). camera_names 80% ✓
 (uniqueness only 0.4 — many cameras get the same name, matching the odd names in the journal).
 
+## Phase 2: quantization / bigger-models-on-small-cards (2026-08-02)
+
+Directive: try aggressive quants (q3/q2/IQ2/IQ3, QAT), HF GGUF imports, KV-cache
+quantization, dual-GPU split, partial CPU offload — a well-quantized larger model
+may beat a small full-precision one.
+
+### colibri — ❌ RESEARCHED, NOT APPLICABLE
+"Colibri" = [JustVugg/colibri](https://github.com/JustVugg/colibri) (Jul 2026): a
+pure-C inference engine that runs GLM-5.2 (744B MoE) on ~25GB-RAM machines by
+streaming routed experts from SSD. Real and impressive, but measured at
+**0.05–0.1 tokens/sec** — a 30-token intent JSON would take 5–10 minutes against
+the app's 45s interactive gate, and GLM-5.2 has no vision. Wrong tool for a
+latency-bound Telegram bot on this box. Not pulled.
+
 ## Candidates tried
 
 ### gemma3:1b (1B) — LLM role — ❌ REJECTED
