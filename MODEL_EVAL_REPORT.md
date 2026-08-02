@@ -75,7 +75,21 @@ _(running)_
 
 ## Candidates tried
 
-_(one entry per model: why tried, scores, verdict, kept/deleted)_
+### gemma3:1b (1B) — LLM role — ❌ REJECTED
+Why tried: smallest gemma3; shares family with incumbent so prompt style transfers.
+Scores: intent **66.1%** (39/59) ✗ · chat 80.0% ✓ (borderline) · sleep 100% ✓ · p50 ~1.7-2.9s.
+Rejection: intent routing is unsafe — "stop the cams" → stop_find and "turn the cameras off" → stop_find mean a **privacy request would leave cameras recording**; "play" → pause inverts resume. Disqualifying regardless of speed.
+Disk: kept temporarily for cross-checks, will delete at cleanup.
+
+### llama3.2:1b (1B) — LLM role — ❌ REJECTED
+Why tried: 1B tier, different family in case gemma-style failures were family-specific.
+Scores: intent **69.5%** ✗ · chat **30%** ✗ · p50 1.7-3.6s.
+Rejection: worst-in-class safety — "hello there"/"good morning" → **home** (physically slews the PTZ cameras on a greeting); chat invents the wrong visible birds ("Jynx and Draft" when the state block says Percy+Pizza) and leaks the raw state block verbatim. Deleted.
+
+### llama3.2:3b (3B) — LLM role — ❌ REJECTED
+Why tried: 3B tier; llama family's stronger instruct tune.
+Scores: intent **96.6%** ✓ (p50 **0.9s** — fastest seen) · chat **60%** ✗ · sleep **33%** ✗.
+Rejection: chat invents sightings ("Percy, Matcha, Jynx, Bambi and Draft" visible when the state says Percy+Pizza; ignores paused state), no vet deflection; sleep summary miscalculates durations ("9 hours 55" for a 655-minute night). Fast but ungrounded. Deleted.
 
 ## Current recommendation
 
