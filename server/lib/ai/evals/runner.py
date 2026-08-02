@@ -79,6 +79,13 @@ class TaskResult:
         return self.score >= req["score"] and self.latency_p90 <= req["p90"]
 
 
+def _note(task: str, index: int, total: int, result: CaseResult) -> None:
+    """Live per-case progress line (flushed) — a wedged backend call is then
+    visible as a stalled counter instead of minutes of silence."""
+    mark = "✓" if result.ok else "✗"
+    print(f"    {task} {index}/{total} {mark} {result.latency:5.1f}s  {result.detail[:110]}", flush=True)
+
+
 def _percentiles(latencies: list[float]) -> tuple[float, float]:
     if not latencies:
         return 0.0, 0.0
@@ -133,6 +140,7 @@ def run_intent(client, model: str, *, quick: bool = False) -> TaskResult:
         elif not ok:
             detail += f" (expected {case.action})"
         results.append(CaseResult(ok, detail, latency))
+        _note("intent", len(results), len(base) + len(extra), results[-1])
     return _finish("intent", results)
 
 
@@ -177,6 +185,7 @@ def run_chat(client, model: str, *, quick: bool = False) -> TaskResult:
                 if banned in low:
                     problems.append(f"contains banned {banned!r}")
         results.append(CaseResult(not problems, f"{case.message!r} -> {reply[:90]!r} [{'; '.join(problems)}]", latency))
+        _note("chat", len(results), len(cases.CHAT_CASES[:5] if quick else cases.CHAT_CASES), results[-1])
     return _finish("chat", results, {"fallbacks": float(fallbacks)})
 
 
@@ -222,6 +231,7 @@ def run_sleep(client, model: str) -> TaskResult:
                 if not any(tok in low for tok in group):
                     problems.append(f"missing {'/'.join(group)}")
         results.append(CaseResult(not problems, f"{case.name}: {reply[:100]!r} [{'; '.join(problems)}]", latency))
+        _note("sleep", len(results), len(cases.SLEEP_CASES), results[-1])
     return _finish("sleep", results)
 
 
@@ -275,6 +285,7 @@ def run_recall_qa(client, model: str) -> TaskResult:
             if invented:
                 problems.append(f"invented numbers {sorted(invented)}")
         results.append(CaseResult(not problems, f"{case.question!r} -> {reply[:100]!r} [{'; '.join(problems)}]", latency))
+        _note("recall_qa", len(results), len(cases.RECALL_CASES), results[-1])
     return _finish("recall_qa", results)
 
 
@@ -303,6 +314,7 @@ def run_summary(client, model: str) -> TaskResult:
                 if not any(tok in low for tok in group):
                     problems.append(f"missing {'/'.join(group)}")
         results.append(CaseResult(not problems, f"{case.subject}: {reply[:110]!r} [{'; '.join(problems)}]", latency))
+        _note("summary", len(results), len(cases.SUMMARY_CASES), results[-1])
     return _finish("summary", results)
 
 
@@ -316,7 +328,10 @@ def run_analyze(client, model: str, *, limit: int = 24) -> TaskResult:
     # journal sample fills the rest of the budget.
     pool = golden_only + [s for s in samples if all(str(s.photo) != str(g.photo) for g in golden_only)]
     pool = pool[:limit] if limit else pool
-    results = [vlm_eval.eval_analyze_case(client, model, s) for s in pool]
+    results = []
+    for sample in pool:
+        results.append(vlm_eval.eval_analyze_case(client, model, sample))
+        _note("analyze", len(results), len(pool), results[-1])
     subtotals: dict[str, list[float]] = {}
     for r in results:
         for key, value in r.subscores.items():
@@ -327,7 +342,10 @@ def run_analyze(client, model: str, *, limit: int = 24) -> TaskResult:
 
 def run_scene(client, model: str, *, limit: int = 10) -> TaskResult:
     sightings = vlm_eval.sample_sightings(limit=limit)
-    results = [vlm_eval.eval_scene_case(client, model, s) for s in sightings]
+    results = []
+    for sighting in sightings:
+        results.append(vlm_eval.eval_scene_case(client, model, sighting))
+        _note("scene", len(results), len(sightings), results[-1])
     return _finish("scene", results)
 
 
