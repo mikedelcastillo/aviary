@@ -131,6 +131,11 @@ Why tried: 2B document/vision tune; decent JSON discipline expected.
 Scores: analyze **16.7%** ✗ (coverage 0.91 — best of the small models — but golden agreement 0.285, species words, invented identities: "vibrant yellow parakeet named Percy" on a bambi/matcha/percy frame) · scene **41.7%** ✗.
 Rejection: hallucinated identity + species leakage. Deleted.
 
+### llava-phi3 (3.8B) — VLM role — ❌ REJECTED
+Why tried: llava tune on phi3; last sub-incumbent candidate.
+Scores: analyze **20.8%** ✗ (overlay leakage 0.417 — "birds sitting in their boxes"; names_birds 0.167) · scene **66.7%** ✗ (fast though: p50 2.5s).
+Rejection: describes the annotation overlay, rarely uses the given bird names. Deleted.
+
 ## Recall role conclusion (2026-08-02)
 
 **gemma3:12b stays.** 4B scored 16.7%, 7B scored 33.3%, the 12B scores 100% with
