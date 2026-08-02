@@ -106,6 +106,11 @@ Why tried: largest sub-incumbent option; Microsoft instruct tune.
 Scores: intent **94.9%** ✓ (p50 1.2s) · chat **30%** ✗ · sleep **100%** ✓.
 Rejection: chat rambles 50-82 words against a 35-word contract and invents which birds are visible. Deleted.
 
+### gemma3:4b (4B) — Recall role — ❌ REJECTED
+Why tried: already the configured fallback; passing would retire the 12b (8GB + ~4x faster answers).
+Scores: recall_qa **16.7%** ✗ (p50 4.9s) · summary 50% ✗.
+Rejection: confabulates clock times not present in the data ("9:30 am"), quotes meta-words ("feeding observations recorded"), bullets omit the subject's name. Confirms the .env comment: a 4B confabulates over per-bird tallies. The 12b's 100% under identical scoring is real headroom, not slack requirements.
+
 ## LLM role conclusion (2026-08-02)
 
 **gemma3:4b (incumbent) is the smallest model on ollama that meets the LLM-role
