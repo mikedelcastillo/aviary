@@ -121,6 +121,11 @@ Why tried: already on disk; 3x faster than the 7b (p50 8.9s vs 32.2s); same fami
 Scores: analyze **12.5%** ✗ (coverage 0.458 — skips half the labeled birds; golden agreement 0.167) · scene 83.3% ✓ · camera_names 100% but stability 0.0 (new name every frame).
 Rejection: decoration coverage collapse — the exact quality gap Mike's earlier "keep 7b" decision predicted. Kept on disk for now (useful A/B reference), candidate for deletion at cleanup.
 
+### moondream (1.8B) — VLM role — ❌ REJECTED
+Why tried: smallest vision model on ollama; "fastest" per old harness notes.
+Scores: analyze **0%** (0/24; names_birds 0.125, overlay leakage — literally describes "colored boxes with names printed on them") · scene **8.3%** (empty captions, echoes the prompt text back).
+Rejection: not viable for any VLM task in this app. Deleted immediately.
+
 ## Recall role conclusion (2026-08-02)
 
 **gemma3:12b stays.** 4B scored 16.7%, 7B scored 33.3%, the 12B scores 100% with
