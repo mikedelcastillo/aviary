@@ -3,6 +3,23 @@
 Goal: find the **lowest-parameter-count** ollama models that fully meet the app's
 LLM/VLM requirements, per role. Maintained live during the 2026-08-02 model search.
 
+## Final verdict (2026-08-02)
+
+**All three incumbents survive a 10-candidate challenge. No .env change recommended.**
+
+| Role | Winner | Challengers beaten | Deciding evidence |
+|------|--------|--------------------|-------------------|
+| LLM | **gemma3:4b** (keep) | gemma3:1b, llama3.2:1b, llama3.2:3b, qwen2.5:3b, granite3.3:2b, phi4-mini | every sub-4B passes intent (94-97%) but fails chat grounding — invented sightings, ignored paused state, diet advice, run-ons |
+| Recall | **gemma3:12b** (keep) | gemma3:4b (16.7%), qwen2.5:7b (33.3%) | accuracy cliff below 12B: confabulated clock times, dropped Yes/No polarity, misgendering |
+| VLM | **qwen2.5vl:7b** (keep) | qwen2.5vl:3b, moondream, granite3.2-vision, llava-phi3, minicpm-v (8B) | incumbent's analyze 50% doubles the field's best (25%); smaller models collapse on coverage or describe the annotation overlay |
+
+Verification is reproducible: `uv run llm-eval --all` (suite added in this work;
+per-model JSON history in `data/server/model_evals/`). All losing models deleted
+from disk; the aviary service was stopped during benchmarks and restarted and
+health-verified after. Known incumbent flaws the suite now tracks (improvement
+backlog, prompt-level not model-level): chat invents sightings while paused;
+VLM golden agreement 0.479 with species-word leakage; camera-name uniqueness 0.4.
+
 ## Model roles (from `.env` + call sites)
 
 | Role | Env key | Current model | Serves |
@@ -70,8 +87,12 @@ sleep 2/3 at first run was a suite scoring bug (12-hour clock normalization, fix
 recall_qa **100%** (6/6, p50 21.1s / p90 26.5s), summary **100%** (2/2, p50 14.6s).
 Slow but well inside the 45s budget even running mostly on CPU (8.1GB model, 4GB card).
 
-### qwen2.5vl:7b — VLM role
-_(running)_
+### qwen2.5vl:7b — VLM role — best available, but fails the aspirational bar
+analyze **50%** (12/24, p50 32.2s / p90 42.4s): coverage 0.931, golden agreement **0.479**,
+species words in 1/3 of scenes ("parrot", "the lovebirds"), occasional identity swaps
+(labels a Draft frame's scene "Percy perches calmly…"). scene **83.3%** ✓ (both misses were
+cat/dog frames from a sampler bug, since fixed — bird-only score 10/10). camera_names 80% ✓
+(uniqueness only 0.4 — many cameras get the same name, matching the odd names in the journal).
 
 ## Candidates tried
 
@@ -135,6 +156,25 @@ Rejection: hallucinated identity + species leakage. Deleted.
 Why tried: llava tune on phi3; last sub-incumbent candidate.
 Scores: analyze **20.8%** ✗ (overlay leakage 0.417 — "birds sitting in their boxes"; names_birds 0.167) · scene **66.7%** ✗ (fast though: p50 2.5s).
 Rejection: describes the annotation overlay, rarely uses the given bird names. Deleted.
+
+### minicpm-v (8B) — VLM role — ❌ REJECTED
+Why tried: one tier above the incumbent; if nothing ≤7B meets the bar, an 8B that
+does would be the smallest model meeting all requirements.
+Scores: analyze **25%** ✗ (golden agreement **0.514** — the best of any model — but
+names_birds 0.25, invents a bird called "Lynx", describes "colorful boxes overlayed") ·
+scene **16.7%** ✗ · fast (p50 ~7s). Deleted.
+
+## VLM role conclusion (2026-08-02)
+
+**qwen2.5vl:7b stays.** Nothing at any size met the 70% analyze bar, and the
+incumbent leads everything tested at 50% (next best: minicpm-v 8B at 25%,
+llava-phi3 20.8%, granite3.2-vision 16.7%, qwen2.5vl:3b 12.5%, moondream 0%).
+The operative rule — beat the incumbent's subscores at lower parameters — was
+never approached: sub-7B models collapse on either coverage (3b: 0.458) or
+identity/overlay discipline (all others). Recommendation: keep
+`OLLAMA_VLM_MODEL=qwen2.5vl:7b`. The suite also documents the incumbent's real
+flaws (golden agreement 0.479, species leakage, camera-name uniqueness 0.4) —
+those are prompt/post-processing opportunities, not model-swap opportunities.
 
 ## Recall role conclusion (2026-08-02)
 
