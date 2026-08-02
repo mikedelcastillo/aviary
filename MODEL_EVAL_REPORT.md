@@ -142,6 +142,40 @@ Result: recall_qa **100%** + summary **100%** at p50 **11.5s** (vs 21.1s today) 
 (the dual container competes with YOLO + the VLM for the same cards); tradeoffs in
 the phase-2 conclusion.
 
+### Flash-attention + KV-cache q8_0 on Pascal — ❌ QUALITY COLLAPSE
+FA does engage on these cards (`flash_attn = enabled`, KV K/V at q8_0, ~390MB saved
+at 4k ctx) — but gemma3:12b recall quality collapsed under it: **100% → 50% → 33%**
+across consecutive runs, with incoherent openers ("He was. Jynx had…"). Consistent
+with the known Pascal trap (fp16 ≈ 1/64 fp32). **Never enable OLLAMA_FLASH_ATTENTION /
+OLLAMA_KV_CACHE_TYPE on this box.**
+
+### gemma3:12b-it-qat — not evaluated
+QAT targets quality-at-q4_0, but the standard q4_K_M already scores 100% on recall —
+nothing to gain; and at 8.9GB it spills worse. Pulled into the experimental volume,
+not benched.
+
+## Phase 2 conclusion (2026-08-02)
+
+1. **Recall: dual-GPU split is a real, deployable 1.8x speedup** (p50 21.1s → 11.5s,
+   quality identical). Requires topology change: one ollama container seeing both
+   cards for the 12b (layer-split 1.3+5.1GB), coordinated with YOLO's VRAM
+   (MODEL_DEVICE=auto re-picks on OOM) and the VLM's placement. The load-order gotcha
+   (1060 must be free at 12b load time) needs `OLLAMA_SCHED_SPREAD` or careful
+   keep-alive management. Mike's call — the eval evidence is in
+   `data/server/model_evals/recall/`. Volume `ollama-dual` retained; recreate with:
+   `docker run -d --name ollama-dual --gpus all -e OLLAMA_KEEP_ALIVE=30m -e OLLAMA_NUM_PARALLEL=1 -p 11436:11434 -v ollama-dual:/root/.ollama ollama/ollama`
+2. **VLM decoration: gemma3:4b beats every 12B variant on speed at equal quality**
+   (62.5% @ 10s vs 58-67% @ 20-23s). The winning production move would be
+   **split VLM roles**: gemma3:4b for `analyze_frame` (95%+ of volume, 3x throughput,
+   zero species/overlay leaks) + qwen2.5vl:7b kept for scene/camera-naming — needs a
+   second VLM env key in the app (small change, `OLLAMA_ANALYZE_MODEL`).
+3. **Aggressive quants (IQ3) trade exactly the wrong thing** — factual discipline —
+   for speed on this workload. QAT is moot (q4_K_M already passes).
+4. **colibri**: real, inapplicable (0.05-0.1 tok/s MoE disk-streaming).
+5. Suite improvement noted: recall/chat tasks sample at default temperature, so
+   single-run scores carry ±1-2 case noise; pin temperature or run repeats for
+   tighter gates (the FA/KV verdict used consecutive replicates for this reason).
+
 ## Candidates tried
 
 ### gemma3:1b (1B) — LLM role — ❌ REJECTED
