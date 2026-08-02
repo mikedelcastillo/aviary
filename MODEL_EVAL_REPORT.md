@@ -91,6 +91,11 @@ Why tried: 3B tier; llama family's stronger instruct tune.
 Scores: intent **96.6%** ✓ (p50 **0.9s** — fastest seen) · chat **60%** ✗ · sleep **33%** ✗.
 Rejection: chat invents sightings ("Percy, Matcha, Jynx, Bambi and Draft" visible when the state says Percy+Pizza; ignores paused state), no vet deflection; sleep summary miscalculates durations ("9 hours 55" for a 655-minute night). Fast but ungrounded. Deleted.
 
+### qwen2.5:3b (3B) — LLM role — ❌ REJECTED (closest sub-4B so far)
+Why tried: strong instruct family, 3B tier.
+Scores: intent **94.9%** ✓ (p50 0.9s) · chat **60%** ✗ · sleep **100%** ✓.
+Rejection: chat grounding/policy — reports "all 4 cameras healthy" when the state block says 3/4, glosses over paused mode, and **gives diet advice** ("avocados are toxic; avoid feeding") where the persona requires deflecting to an avian vet. Intent+sleep are genuinely good; chat discipline isn't. Deleted at cleanup unless needed for cross-checks.
+
 ## Current recommendation
 
 _(pending)_

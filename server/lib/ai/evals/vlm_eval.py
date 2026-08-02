@@ -277,11 +277,17 @@ def eval_analyze_case(client, model: str, sample: ObsSample, *, timeout: float =
 
 
 def sample_sightings(limit: int = 12):
-    """Deterministic spread of collect sidecar frames across distinct birds."""
+    """Deterministic spread of collect sidecar frames across distinct birds.
+
+    Non-bird collect labels (cat, dog) are excluded — the scene contract under
+    test is specifically bird descriptions with detection grounding.
+    """
     by_bird: dict[str, list] = {}
     for json_path in sorted(glob.glob("data/server/collect/**/*.json", recursive=True), reverse=True):
         sighting = _parse_sidecar(Path(json_path))
         if sighting is None or not sighting.width:
+            continue
+        if sighting.label in ("cat", "dog"):
             continue
         by_bird.setdefault(sighting.label, []).append(sighting)
 
