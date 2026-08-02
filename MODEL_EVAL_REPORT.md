@@ -108,6 +108,17 @@ streaming routed experts from SSD. Real and impressive, but measured at
 the app's 45s interactive gate, and GLM-5.2 has no vision. Wrong tool for a
 latency-bound Telegram bot on this box. Not pulled.
 
+### gemma3:4b (4B, multimodal) — VLM role — ⭐ BEATS INCUMBENT ON DECORATION
+Why tried: phase-2 insight — the LLM incumbent is multimodal, nobody had tested it as the VLM.
+Scores: analyze **62.5%** (vs incumbent 50%) — coverage 0.986, golden agreement **0.597**
+(vs 0.479), **zero** species/overlay leaks, evasion 1.0, p50 **10.1s** (vs 32.2s, 3x faster) ·
+scene **66.7%** ✗ (grounded but prefixes "Here's a description of the scene:" — a fixable
+prompt/post-processing issue, not a capability gap) · camera_names **40%** ✗ (stability 1.0
+but uniqueness 0.2 — names most views identically).
+Takeaway: best decoration model available at any size tested, and decoration is 95%+ of
+production VLM volume. Loses the two low-volume tasks. See phase-2 conclusion for the
+split-role recommendation.
+
 ## Candidates tried
 
 ### gemma3:1b (1B) — LLM role — ❌ REJECTED
