@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 660" width="1240" height="660" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7d8590"/>
+    </marker>
+    <marker id="arrowLoop" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#bc8cff"/>
+    </marker>
+  </defs>
+
+  <rect width="1240" height="660" rx="14" fill="#0d1117"/>
+
+  <text x="40" y="52" fill="#e6edf3" font-size="24" font-weight="700">Aviary — how a frame becomes a memory</text>
+  <text x="40" y="78" fill="#8b949e" font-size="14.5">Every stage runs on one Linux box with two 2016-era Pascal GPUs. Nothing leaves the LAN except the Telegram message.</text>
+
+  <!-- ============ MAIN PIPELINE ============ -->
+  <!-- 1 Cameras -->
+  <rect x="40" y="130" width="182" height="112" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="40" y="130" width="182" height="3.5" rx="2" fill="#7d8590"/>
+  <text x="58" y="163" fill="#e6edf3" font-size="15" font-weight="650">Tapo cameras</text>
+  <text x="58" y="186" fill="#8b949e" font-size="12.5">RTSP · auto-discovered</text>
+  <text x="58" y="205" fill="#8b949e" font-size="12.5">by subnet scan</text>
+  <text x="58" y="228" fill="#7d8590" font-size="12">reboot-on-wedge</text>
+
+  <!-- 2 Detector -->
+  <rect x="272" y="130" width="196" height="112" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="272" y="130" width="196" height="3.5" rx="2" fill="#3fb950"/>
+  <text x="290" y="163" fill="#e6edf3" font-size="15" font-weight="650">YOLO detector</text>
+  <text x="290" y="186" fill="#3fb950" font-size="12.5" font-family="ui-monospace, monospace">live-019.pt</text>
+  <text x="290" y="205" fill="#8b949e" font-size="12.5">10 classes · fp32 only</text>
+  <text x="290" y="228" fill="#7d8590" font-size="12">picks the freest GPU</text>
+
+  <!-- 3 Privacy -->
+  <rect x="518" y="130" width="182" height="112" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="518" y="130" width="182" height="3.5" rx="2" fill="#d29922"/>
+  <text x="536" y="163" fill="#e6edf3" font-size="15" font-weight="650">Privacy screen</text>
+  <text x="536" y="186" fill="#8b949e" font-size="12.5">person in frame?</text>
+  <text x="536" y="205" fill="#8b949e" font-size="12.5">fail-closed</text>
+  <text x="536" y="228" fill="#d29922" font-size="12">1,399 photos withheld</text>
+
+  <!-- 4 VLM -->
+  <rect x="750" y="130" width="196" height="112" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="750" y="130" width="196" height="3.5" rx="2" fill="#58a6ff"/>
+  <text x="768" y="163" fill="#e6edf3" font-size="15" font-weight="650">Vision model</text>
+  <text x="768" y="186" fill="#58a6ff" font-size="12.5" font-family="ui-monospace, monospace">qwen2.5vl:7b</text>
+  <text x="768" y="205" fill="#8b949e" font-size="12.5">reads the boxed frame,</text>
+  <text x="768" y="224" fill="#8b949e" font-size="12.5">writes what each bird is doing</text>
+
+  <!-- 5 Memory -->
+  <rect x="996" y="130" width="204" height="112" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="996" y="130" width="204" height="3.5" rx="2" fill="#bc8cff"/>
+  <text x="1014" y="163" fill="#e6edf3" font-size="15" font-weight="650">Memory store</text>
+  <text x="1014" y="186" fill="#8b949e" font-size="12.5">JSONL + Markdown + frame</text>
+  <text x="1014" y="205" fill="#8b949e" font-size="12.5">filesystem is the database</text>
+  <text x="1014" y="228" fill="#bc8cff" font-size="12">33,160 frames kept</text>
+
+  <!-- arrows across the main row -->
+  <line x1="222" y1="186" x2="266" y2="186" stroke="#7d8590" stroke-width="1.7" marker-end="url(#arrow)"/>
+  <line x1="468" y1="186" x2="512" y2="186" stroke="#7d8590" stroke-width="1.7" marker-end="url(#arrow)"/>
+  <line x1="700" y1="186" x2="744" y2="186" stroke="#7d8590" stroke-width="1.7" marker-end="url(#arrow)"/>
+  <line x1="946" y1="186" x2="990" y2="186" stroke="#7d8590" stroke-width="1.7" marker-end="url(#arrow)"/>
+
+  <text x="228" y="176" fill="#6e7681" font-size="11">frames</text>
+  <text x="470" y="176" fill="#6e7681" font-size="11">boxes</text>
+  <text x="702" y="176" fill="#6e7681" font-size="11">safe?</text>
+  <text x="948" y="176" fill="#6e7681" font-size="11">notes</text>
+
+  <!-- ============ TELEGRAM ============ -->
+  <rect x="996" y="296" width="204" height="122" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="996" y="296" width="204" height="3.5" rx="2" fill="#3fb950"/>
+  <text x="1014" y="329" fill="#e6edf3" font-size="15" font-weight="650">Telegram bot</text>
+  <text x="1014" y="352" fill="#8b949e" font-size="12.5">album out immediately —</text>
+  <text x="1014" y="371" fill="#8b949e" font-size="12.5">the caption streams in as</text>
+  <text x="1014" y="390" fill="#8b949e" font-size="12.5">the model writes it</text>
+  <text x="1014" y="410" fill="#7d8590" font-size="12">24 commands · free chat</text>
+  <line x1="1098" y1="242" x2="1098" y2="290" stroke="#7d8590" stroke-width="1.7" marker-end="url(#arrow)"/>
+
+  <!-- language models feeding the bot -->
+  <rect x="750" y="296" width="196" height="122" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="750" y="296" width="196" height="3.5" rx="2" fill="#58a6ff"/>
+  <text x="768" y="329" fill="#e6edf3" font-size="15" font-weight="650">Language models</text>
+  <text x="768" y="352" fill="#58a6ff" font-size="12.5" font-family="ui-monospace, monospace">gemma3:4b</text>
+  <text x="768" y="370" fill="#8b949e" font-size="12">intent routing · chat replies</text>
+  <text x="768" y="394" fill="#58a6ff" font-size="12.5" font-family="ui-monospace, monospace">gemma3:12b</text>
+  <text x="768" y="412" fill="#8b949e" font-size="12">recall over past days</text>
+  <line x1="946" y1="357" x2="990" y2="357" stroke="#7d8590" stroke-width="1.7" marker-end="url(#arrow)"/>
+
+  <!-- memory feeds recall -->
+  <path d="M 1050 242 L 1050 268 L 848 268 L 848 290" fill="none" stroke="#7d8590" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+
+  <!-- ============ TRAINING LOOP ============ -->
+  <rect x="40" y="296" width="660" height="122" rx="10" fill="#0f1620" stroke="#21262d"/>
+  <text x="62" y="325" fill="#bc8cff" font-size="12.5" font-weight="650" letter-spacing="0.06em">THE LOOP THAT MAKES IT BETTER</text>
+
+  <rect x="62" y="340" width="150" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="78" y="364" fill="#e6edf3" font-size="13.5" font-weight="600">Sampled frames</text>
+  <text x="78" y="384" fill="#8b949e" font-size="11.5">27,476 in the pool</text>
+
+  <rect x="248" y="340" width="180" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="264" y="364" fill="#e6edf3" font-size="13.5" font-weight="600">Annotation tool</text>
+  <text x="264" y="384" fill="#8b949e" font-size="11.5">box → label, against a roster</text>
+
+  <rect x="464" y="340" width="216" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="480" y="364" fill="#e6edf3" font-size="13.5" font-weight="600">Train &amp; benchmark</text>
+  <text x="480" y="384" fill="#8b949e" font-size="11.5">versioned weights, never clobbered</text>
+
+  <line x1="212" y1="370" x2="242" y2="370" stroke="#7d8590" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <line x1="428" y1="370" x2="458" y2="370" stroke="#7d8590" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- detector feeds the pool, and training feeds the detector -->
+  <path d="M 340 242 L 340 270 L 22 270 L 22 370 L 56 370" fill="none" stroke="#bc8cff" stroke-width="1.6" stroke-dasharray="4 4" marker-end="url(#arrowLoop)"/>
+  <path d="M 572 336 L 572 262 L 400 262 L 400 246" fill="none" stroke="#bc8cff" stroke-width="1.6" marker-end="url(#arrowLoop)"/>
+
+  <!-- ============ FOOTER STATS ============ -->
+  <line x1="40" y1="470" x2="1200" y2="470" stroke="#21262d" stroke-width="1"/>
+
+  <text x="40" y="510" fill="#3fb950" font-size="27" font-weight="700">6</text>
+  <text x="40" y="532" fill="#8b949e" font-size="12.5">birds told apart by name</text>
+
+  <text x="248" y="510" fill="#58a6ff" font-size="27" font-weight="700">74 / 84</text>
+  <text x="248" y="532" fill="#8b949e" font-size="12.5">recall / precision on a held-out split</text>
+
+  <text x="512" y="510" fill="#bc8cff" font-size="27" font-weight="700">27,476</text>
+  <text x="512" y="532" fill="#8b949e" font-size="12.5">frames in the labeling pool</text>
+
+  <text x="800" y="510" fill="#d29922" font-size="27" font-weight="700">1,399</text>
+  <text x="800" y="532" fill="#8b949e" font-size="12.5">photos withheld by the privacy screen</text>
+
+  <text x="40" y="588" fill="#6e7681" font-size="12.5">Day frames name the individual bird. Infrared frames fall back to species — in greyscale, even a human can't tell Percy from Jynx.</text>
+  <text x="40" y="612" fill="#6e7681" font-size="12.5">Both GPUs are shared with the language models, so the detector re-picks its card on every CUDA out-of-memory.</text>
+</svg>

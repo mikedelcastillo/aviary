@@ -1,143 +1,232 @@
-# Aviary
+<h1 align="center">Aviary</h1>
 
-Computer vision platform for monitoring a bird room with Tapo cameras.
+<p align="center">
+  <b>Six birds live in one room. This knows which is which, what each one is doing, and tells me about it.</b>
+</p>
 
-The project is split into three working areas:
+<p align="center">
+  <img src="docs/images/hero-day.jpg" alt="Four birds in a cage, each detected and labelled by name: Bambi, Matcha, Jynx and Percy" width="100%">
+</p>
 
-- `annotation/`: the `/annotation` web tool to collect images and label birds
-  with bounding boxes (run `uv run annotation` — a Next.js app).
-- `training/`: prepare datasets and train the Ultralytics YOLO detectors.
-- `server/`: consume camera streams, run inference, and send Telegram alerts.
+<p align="center">
+  <sub>A real frame from the running system. Not a demo — the server that produced this has been up for months.</sub>
+</p>
 
-The first production goal is to identify each of the six birds. The model uses
-one detection class per bird plus `unknown_bird` for visible birds that are not
-confidently identifiable.
+---
 
-## Platform assumption
+Aviary watches a bird room through cheap Tapo cameras. A YOLO detector finds every
+bird in every frame and says **which** bird it is — not "a bird", but *Percy*, by
+name. A vision-language model then reads the labelled frame and writes down what
+each one is doing. The result lands on my phone as a Telegram album, and is kept
+as a searchable daily record I can ask questions about later.
 
-This project runs on a single Linux machine with **two Pascal GPUs: a GTX
-1060 6GB and a GTX 1050 Ti 4GB** (both sm_61, CUDA **cu118**).
-`torch`/`torchvision` are pinned to the cu118 wheel index in `pyproject.toml`
-— torch 2.7.1 is the last release with Pascal (sm_61) kernels; newer cu12x
-builds ship cuDNN 9, which refuses SM < 7.5 and crashes every inference — so
-`uv sync` installs the right GPU build with no post-step. There is no
-install-gpu script and no Windows/ROCm/Docker tooling.
+All of it runs on one Linux box with **two GPUs from 2016**. Nothing leaves the
+LAN except the Telegram message.
 
-Both cards are mostly occupied by the root-owned Ollama models (the VLM on
-the 1060, the chat LLM on the 1050 Ti); the detector's `MODEL_DEVICE=auto`
-picks whichever card has the most free VRAM at startup and re-picks on a CUDA
-OOM. Two traps worth knowing: **torch orders CUDA devices fastest-first**
-(torch `cuda:0` = the GTX 1060, which is nvidia-smi GPU **1**), and **Pascal
-runs fp16 at ~1/64 of fp32 throughput** — never enable half precision or AMP
-on this machine.
+<table>
+<tr>
+<td align="center"><b>6</b><br><sub>birds told apart by name</sub></td>
+<td align="center"><b>74% / 84%</b><br><sub>recall / precision, held-out split</sub></td>
+<td align="center"><b>33,160</b><br><sub>frames kept as memories</sub></td>
+<td align="center"><b>1,399</b><br><sub>photos withheld by the privacy screen</sub></td>
+</tr>
+</table>
 
-## Tooling
+---
 
-The whole repo is one [uv](https://docs.astral.sh/uv/) project. Install uv once
-(`curl -LsSf https://astral.sh/uv/install.sh | sh`), then from the repo root:
+## Telling six birds apart
+
+Two cockatiels, three lovebirds, one budgie. Three of the lovebirds are the same
+species and roughly the same size — the model separates them on plumage alone.
+
+The detector runs **one class per individual**, not one class per species. That
+is the whole difficulty of the project: `lovebird` is easy, `jynx` is not.
+
+<p align="center">
+  <img src="docs/images/night-ir.jpg" alt="Infrared night frame with birds labelled only by species" width="100%">
+</p>
+
+**At night it deliberately stops guessing.** Tapo cameras switch to infrared
+after dark, and in greyscale even a person who knows these birds can't tell
+Percy from Jynx. So the roster encodes a rule: colour frames get the
+individual's name, infrared frames fall back to `cockatiel` / `lovebird` /
+`budgie`. Anything genuinely ambiguous becomes `unknown_bird` rather than a
+confident lie.
+
+That rule is enforced in one place — [`training/roster.yaml`](training/roster.yaml) —
+which is simultaneously the label list for the annotation tool, the class map for
+both trained models, and the documentation for why the split exists.
+
+## What arrives on my phone
+
+<p align="center">
+  <img src="docs/images/telegram.png" alt="Telegram chat showing a labelled photo and a written summary of what each bird is doing" width="620">
+</p>
+
+The album is sent the instant the frame is processed, carrying just the header.
+The written summary then **streams into that same caption** as the language model
+generates it, via message edits — so the photo reaches me immediately instead of
+waiting on inference that can take tens of seconds on a 2016 card.
+
+The bot is not just a firehose. It takes 24 commands and free-form questions:
+`/detections percy 2026-08-19`, `/sleep`, `/find matcha`, `/snapshot`,
+`/weather`, or just asking it what the birds have been up to today.
+
+**Every outbound photo is screened for people first.** The screen is
+recall-biased and fail-closed — an image it can't decode counts as containing a
+person — because a missed face is unrecoverable while a false positive merely
+withholds one bird photo. In the current log window alone it has held back
+1,399 photos.
+
+## How it works
+
+<p align="center">
+  <img src="docs/images/architecture.svg" alt="Pipeline: cameras to detector to privacy screen to vision model to memory store to Telegram, with a training feedback loop" width="100%">
+</p>
+
+Cameras are **found, not configured**: the server scans the subnet for hosts
+serving a working RTSP stream, and an allowlist decides which of them it
+consumes. Send it `/discover` and it re-scans at runtime.
+
+## The labelling platform
+
+A detector that identifies individuals needs a dataset that identifies
+individuals, and nothing off the shelf does that. So the repo contains a full
+annotation tool — a Next.js app where the **filesystem is the database**: it
+reads images from disk and writes YOLO `.txt` labels back next to them. No
+database, no auth, no export step.
+
+<p align="center">
+  <img src="docs/images/annotation-dashboard.png" alt="Annotation dashboard showing 27,476 images, per-category progress, label counts and a model benchmark chart" width="100%">
+</p>
+
+It tracks 27,476 images through two phases — **box**, then **label** — and
+carries its own benchmark explorer, so every trained model's recall is visible
+next to the data that produced it.
+
+<table>
+<tr>
+<td width="50%">
+  <img src="docs/images/annotation-box-mode.jpg" alt="Box mode: five birds boxed in a room frame" width="100%">
+  <sub><b>Box mode.</b> Free-flying birds, five boxes. The motion-blurred one is
+  <code>unknown_bird</code> — the honest answer.</sub>
+</td>
+<td width="50%">
+  <img src="docs/images/annotation-review-grid.jpg" alt="Grid of 411 cropped boxes all labelled percy" width="100%">
+  <sub><b>Review grid.</b> All 411 boxes labelled <code>percy</code>, across day,
+  infrared, cage and phone — the fastest way to catch a mislabel.</sub>
+</td>
+</tr>
+</table>
+
+It also ships a web app manifest, so it installs to an iPad home screen as a
+standalone PWA — boxing birds on the couch beats doing it at a desk.
+
+## Results
+
+Deployed model `live-019`, scored on a **held-out test split** it never trained
+on — 121 images, 313 boxes, confidence 0.4, IoU 0.5.
+
+| | Recall | Precision | F1 |
+|---|---:|---:|---:|
+| **Overall** | **73.5%** | **83.9%** | **78.4%** |
+| Day (colour, individual names) | 66.1% | 80.1% | 72.5% |
+| Infrared (species only) | 83.9% | 88.6% | 86.2% |
+
+The gap between those two rows *is* the project. Naming an individual in colour
+is a materially harder problem than spotting a species in greyscale, and the
+numbers say so.
+
+<details>
+<summary><b>Per-label breakdown</b></summary>
+
+| Label | Recall | Precision | F1 | Ground truth |
+|---|---:|---:|---:|---:|
+| `cockatiel` (IR) | 87.5% | 97.2% | 92.1% | 40 |
+| `lovebird` (IR) | 82.7% | 89.9% | 86.1% | 75 |
+| `jynx` | 84.9% | 82.4% | 83.6% | 33 |
+| `bambi` | 74.4% | 90.6% | 81.7% | 39 |
+| `percy` | 64.1% | 86.2% | 73.5% | 39 |
+| `budgie` (IR) | 80.0% | 66.7% | 72.7% | 15 |
+| `pizza` | 56.2% | 75.0% | 64.3% | 16 |
+| `draft` | 55.6% | 71.4% | 62.5% | 18 |
+| `matcha` | 57.1% | 66.7% | 61.5% | 35 |
+| `unknown_bird` | 0.0% | — | — | 3 |
+
+Species labels outscore individuals, which is the expected shape: telling a
+lovebird from a budgie is a far easier problem than telling Jynx from Matcha.
+The two cockatiels (`draft`, `pizza`) are the weakest pair and are the current
+data-collection priority.
+
+`unknown_bird` scores zero on three ground-truth boxes — it is a deliberate
+catch-all for birds a human annotator couldn't identify either, and there is
+nowhere near enough of it to learn from. It is listed here rather than quietly
+dropped.
+
+</details>
+
+Training runs write **versioned weights** — `live-001.pt` through `live-019.pt` —
+so a new run can never clobber the model the server has loaded.
+
+## Choosing the language models
+
+The three model roles were not picked by vibes. There is a reproducible eval
+suite (`uv run llm-eval --all`) scoring 8 tasks across 3 roles against explicit
+pass thresholds, and a 10-candidate search was run against the incumbents.
+
+| Role | Model | Why it survived |
+|---|---|---|
+| Vision | `qwen2.5vl:7b` | double the next-best score on observation decoration; smaller models describe the *annotation overlay* instead of the bird |
+| Chat / intent | `gemma3:4b` | every sub-4B model passed intent parsing but failed grounding — inventing sightings, ignoring paused state |
+| Recall | `gemma3:12b` | a hard accuracy cliff below 12B: confabulated clock times, dropped yes/no polarity |
+
+Full write-up, including the known flaws still being tracked, is in
+[`MODEL_EVAL_REPORT.md`](MODEL_EVAL_REPORT.md).
+
+## The constraints that shaped it
+
+The hardware is a GTX 1060 6GB and a GTX 1050 Ti 4GB — both Pascal, both from
+2016 — and they are **shared with the language models**. Several design
+decisions fall directly out of that:
+
+- **`torch` is pinned to 2.7.1 / cu118.** It is the last release shipping Pascal
+  (sm_61) kernels; newer cu12x builds ship cuDNN 9, which refuses SM < 7.5 and
+  crashes every inference.
+- **Half precision is banned.** Pascal runs fp16 at roughly 1/64 of fp32
+  throughput, so AMP would make things dramatically *slower*.
+- **The detector re-picks its GPU on every CUDA OOM**, because the vision model
+  next to it may have just taken the VRAM it wanted.
+- **Camera frames are downscaled before upload.** A 2304×1296 frame times out on
+  a home uplink, and a timed-out alert is a silently dropped alert.
+
+## More from the cameras
+
+<p align="center">
+  <img src="docs/images/variety.jpg" alt="Four more annotated frames showing different cages, lighting and bird positions" width="100%">
+</p>
+
+<sub>Different cages, different light, different distances — all four birds
+identified in each.</sub>
+
+## Repository layout
+
+| Path | What lives there |
+|---|---|
+| `server/` | camera capture, detection, VLM, memory, Telegram bot (~24k lines) |
+| `annotation/` | the Next.js labelling tool |
+| `training/` | dataset prep, training, evaluation, and `roster.yaml` |
+| `docs/` | design notes and images |
+
+## Running it
+
+Setup, environment variables, every `uv run` command and the full operational
+guide live in **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**.
+
+The short version:
 
 ```bash
-uv sync                  # create .venv, install every subsystem's deps + cu118 torch
+uv sync                # installs every subsystem plus the cu118 torch build
+cp .env.example .env   # add TAPO_CREDENTIALS and a Telegram bot token
+uv run annotation      # the labelling tool, on :5000
+uv run server          # camera inference + alerts
 ```
-
-Run any subsystem with a short named command (think `npm run`):
-
-| Command | Runs |
-| --- | --- |
-| `uv run prepare-dataset` | normalize a YOLO label export into a training dataset |
-| `uv run train` | train the Ultralytics YOLO detector (low-level) |
-| `uv run train-live` | build the live CCTV detector end-to-end -> `data/models/live-NNN.pt` |
-| `uv run train-archive` | build the archive catalog detector end-to-end -> `data/models/archive-NNN.pt` |
-| `uv run evaluate` | evaluate a trained model |
-| `uv run benchmark` | score every `data/models/*.pt` (held-out `test` split by default) |
-| `uv run bench-speed` | measure detector inference latency/throughput at the live config |
-| `uv run suggest` | propose boxes + roster labels for annotation images |
-| `uv run import-collect-birds` | import server-collected frames into the annotation tree |
-| `uv run import-immich-albums` | download Immich "Birds" album photos into the annotation tree |
-| `uv run extract-frames` | extract frames from an RTSP stream or video |
-| `uv run synth-ir` | synthesize IR-style frames from day frames |
-| `uv run cut-paste-ir` | cut-paste IR augmentation |
-| `uv run server` | run the camera inference + alert server in the foreground (attaches to the background server if one is already up) |
-| `uv run server-up` | run the server in the background and start it on boot; re-run to attach to the live dashboard (Esc / Ctrl-C detaches) |
-| `uv run server-down` | stop the background server and remove the boot autostart |
-| `uv run tests` | run the pytest suite |
-
-Pass flags after the command, e.g. `uv run extract-frames --help`.
-Run from the repo root so the scripts' default relative paths resolve.
-
-## Quick Start
-
-1. Copy the environment template and fill in secrets:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Collect seed images:
-
-   - Put phone photos in `data/annotation/raw/phone/`.
-   - Extract Tapo day frames into `data/annotation/raw/tapo/day/`.
-   - Extract Tapo infrared frames into `data/annotation/raw/tapo/ir/`.
-
-3. Label images with the `/annotation` web tool — run `uv run annotation` (Next.js)
-   and open http://0.0.0.0:5000. It labels against `training/roster.yaml` (the
-   single label roster for both the live and archive models — see
-   `training/STRATEGY.md`) and writes YOLO `.txt` labels back next to each image.
-
-4. Build a model end-to-end — prepare its dataset from the labeled raw images,
-   train, and export versioned weights into `data/models/`:
-
-   ```bash
-   uv run train-live      # -> data/models/live-NNN.pt    (real-time CCTV detector)
-   uv run train-archive   # -> data/models/archive-NNN.pt (photo-library catalog)
-   ```
-
-   Each run writes the next zero-padded sequence number, so previous models are
-   preserved and never clobber the one the server may be loading. Flags pass
-   through to training, e.g. `uv run train-live --epochs 200 --device cuda:0`. To
-   run the prepare/train/evaluate steps by hand instead, see
-   [`training/README.md`](training/README.md).
-
-5. Set `TAPO_CREDENTIALS=user:password` in `.env` (only the Tapo camera-account
-   credentials), then run the server:
-
-   ```bash
-   uv run server
-   ```
-
-   Cameras are auto-discovered: the server scans the local subnet for hosts with
-   a working RTSP stream, then consumes each one. Set
-   `TAPO_DISCOVERY_CIDR` if auto-detect picks the wrong subnet. Send the bot
-   `/discover` to re-run the scan and pick up cameras at runtime. The scan port,
-   stream paths, and timeout knobs live in `DiscoveryConfig` and the quality
-   controller code under `server/lib/`.
-
-   Bot commands include `/status` (runtime health), `/discover` (re-scan the
-   LAN), `/restart` (re-exec the server process),
-   `/detections [bird] [YYYY-MM-DD]` (daily detection activity totals),
-   `/quality stream1|stream2|auto` (RTSP quality selection), and
-   `/snapshot` — grabs every camera's latest live frame, replies with them as a
-   photo album, and saves them to `data/server/collect/snapshots/`. Those saved
-   frames are swept into the annotation pool by `uv run import-collect-birds`
-   (the `snapshots` folder is imported by default).
-
-## Practical Dataset Targets
-
-Start with at least 100 to 200 labeled boxes per bird. Include day mode,
-infrared mode, cage bars, floor, perches, partial occlusion, close-up shots,
-far camera views, and frames with multiple birds.
-
-Phone photos are useful for bootstrapping identities. Camera frames are more
-important for validation because they match the deployment view.
-
-## Runtime Notes
-
-`uv run server` runs the server natively in the uv venv on the Linux host.
-`uv sync` already installs the cu118 torch build (pinned in `pyproject.toml`),
-so there is no separate GPU-install step.
-
-## External References
-
-- Ultralytics YOLO dataset / label format: https://docs.ultralytics.com/datasets/detect/
-- Ultralytics detection training: https://docs.ultralytics.com/tasks/detect/
-- Tapo RTSP/ONVIF guidance: https://www.tapo.com/faq/34/
