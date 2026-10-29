@@ -76,6 +76,7 @@ class MainActivity : Activity() {
     private var discovery: AviaryDiscovery? = null
     private var wallOverlay: View? = null
     private var wallFirst: View? = null
+    private var wallSoundButton: Button? = null
     private val appButtons = mutableListOf<View>()
     private val hideWallControls = Runnable {
         wallOverlay?.visibility = View.GONE
@@ -93,7 +94,6 @@ class MainActivity : Activity() {
         mode = if (api.connected) "grid" else "connect"
         savedInstanceState?.let {
             selected = it.getInt("selected", 0)
-            sound = it.getBoolean("sound", false)
         }
         if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(0) { goBack() }
     }
@@ -112,6 +112,7 @@ class MainActivity : Activity() {
     override fun onNewIntent(newIntent: Intent) {
         super.onNewIntent(newIntent)
         intent = newIntent
+        if (newIntent.hasCategory(Intent.CATEGORY_HOME)) muteHomeAudio()
         if (newIntent.hasCategory(Intent.CATEGORY_HOME) && api.connected) {
             val alreadyHome = mode == "grid"
             mode = "grid"
@@ -135,7 +136,6 @@ class MainActivity : Activity() {
     override fun onDestroy() { io.shutdownNow(); super.onDestroy() }
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putInt("selected", selected)
-        outState.putBoolean("sound", sound)
         super.onSaveInstanceState(outState)
     }
     @Deprecated("Older Android TV Back key")
@@ -193,7 +193,7 @@ class MainActivity : Activity() {
         fullStatus = null
         fullOverlay = null; fullBack = null
         playButton = null
-        wallOverlay = null; wallFirst = null
+        wallOverlay = null; wallFirst = null; wallSoundButton = null
         appButtons.clear()
     }
     private fun page(title: String): LinearLayout {
@@ -330,6 +330,7 @@ class MainActivity : Activity() {
 
     private fun showGrid() {
         mode = "grid"; fullClip = null
+        muteHomeAudio()
         clearScreen()
         val frame = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         setContentView(frame)
@@ -359,7 +360,8 @@ class MainActivity : Activity() {
         val toolbar = row()
         val replay = button("Replays") { cursors.clear(); cursors.add(null); showClips(true) }
         lateinit var audio: Button
-        audio = button(if (sound) "Sound on" else "Sound off") { sound = !sound; audio.text = if (sound) "Sound on" else "Sound off"; applyAudio() }
+        audio = button(if (sound) "Sound on" else "Sound off") { sound = !sound; audio.text = if (sound) "Sound on" else "Sound off"; audio.contentDescription = audio.text; applyAudio() }
+        wallSoundButton = audio
         val gridMode = button(if (allLive) "Grid: live" else "Grid: previews") {
             allLive = !allLive; getPreferences(MODE_PRIVATE).edit().putBoolean("allLive", allLive).apply(); showGrid()
         }
@@ -596,6 +598,12 @@ class MainActivity : Activity() {
     private fun startSelectedPreview() {
         slots.forEach { if (it.index == selected) { if (it.player == null) it.startLive() } else if (it.player != null) it.preview() }
     }
+    private fun muteHomeAudio() {
+        sound = false
+        wallSoundButton?.text = "Sound off"
+        wallSoundButton?.contentDescription = "Sound off"
+        applyAudio()
+    }
     private fun applyAudio() {
         if (sound && !audioGranted) audioGranted = audioManager.requestAudioFocus(audioRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         if (!sound && audioGranted) { audioManager.abandonAudioFocusRequest(audioRequest); audioGranted = false }
@@ -699,7 +707,7 @@ class MainActivity : Activity() {
             controls.addView(button("Forward 10s") { seek(10_000) })
         } else controls.addView(button("Go live") { slots.firstOrNull()?.player?.let { it.seekToDefaultPosition(); it.play() } })
         lateinit var audio: Button
-        audio = button(if (sound) "Sound on" else "Sound off") { sound = !sound; audio.text = if (sound) "Sound on" else "Sound off"; applyAudio() }
+        audio = button(if (sound) "Sound on" else "Sound off") { sound = !sound; audio.text = if (sound) "Sound on" else "Sound off"; audio.contentDescription = audio.text; applyAudio() }
         controls.addView(audio)
         controls.addView(button("Retry") { showFull() })
         overlay.addView(controls)
@@ -801,6 +809,7 @@ class MainActivity : Activity() {
             val source = DefaultMediaSourceFactory(factory)
             val instance = ExoPlayer.Builder(this@MainActivity).setMediaSourceFactory(source)
                 .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(2000, 10000, 1000, 1500).build()).build()
+            instance.volume = 0f
             player = instance; view.player = instance
             // A single selected stream has audible volume. Other grid decoders stay muted.
             instance.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), false)

@@ -17,7 +17,9 @@ directly to the home server over Wi-Fi or Ethernet. It does not need Tailscale.
 3. Use the D-pad to select a camera. OK opens full screen; Back returns to the
    grid with the same camera selected. The wall contains whole video frames
    without scrolling. There are no permanent headings or camera-name bands.
-4. **Sound on** plays only the selected camera. All other streams stay muted.
+4. Home starts muted on every visit, including Home pressed while already on
+   the wall. **Sound on** enables only the selected camera for that visit;
+   returning to the wall mutes it again without changing TV/system volume.
 5. Open **Replays** for approved Highlights or all Recordings. OK plays a clip;
    **Back 10s** and **Forward 10s** seek. Remote media keys also pause and seek.
    **Older** and **Newer** page through the archive. Back returns to the list,

@@ -108,6 +108,64 @@ class TvFlowTest {
         }
     }
 
+    @Test fun homeMuteOnEveryVisitUsingSavedConnection() {
+        org.junit.Assume.assumeTrue("Physical Home mute check not requested",
+            InstrumentationRegistry.getArguments().getString("aviaryPhysicalHomeMute") == "true")
+        org.junit.Assume.assumeTrue("No saved deployment session", AviaryApi(context).connected)
+        val cameraCount = AviaryApi(context).cameras().size.coerceAtMost(4)
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        val originalSystemVolume = audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        val observations = org.json.JSONObject()
+        fun homeIntent() = android.content.Intent(context, MainActivity::class.java)
+            .setAction(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        ActivityScenario.launch<MainActivity>(homeIntent()).use { scenario ->
+            fun assertMuted(stage: String) {
+                await("$stage muted Home players") {
+                    var muted = false
+                    scenario.onActivity { activity ->
+                        muted = players(activity).size == cameraCount && players(activity).all { it.volume == 0f }
+                    }
+                    muted
+                }
+                scenario.onActivity { activity ->
+                    val audio = all(activity).filterIsInstance<Button>().single { it.text == "Sound off" }
+                    assertEquals("Sound off", audio.contentDescription)
+                    observations.put(stage, org.json.JSONArray(players(activity).map { it.volume }))
+                }
+            }
+            fun unmute() {
+                click(scenario, "Sound off")
+                scenario.onActivity { activity ->
+                    assertEquals(1, players(activity).count { it.volume > 0f })
+                    assertEquals("Sound on", all(activity).filterIsInstance<Button>().single { it.text == "Sound on" }.contentDescription)
+                }
+            }
+            assertMuted("initial_home")
+            unmute()
+            var originalPlayers = emptyList<ExoPlayer>()
+            scenario.onActivity { activity ->
+                originalPlayers = players(activity)
+                activity.startActivity(homeIntent())
+            }
+            assertMuted("home_already_visible")
+            scenario.onActivity { activity -> assertEquals("Home mutes existing players without rebuilding", originalPlayers, players(activity)) }
+            unmute()
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            assertMuted("foreground_return")
+            unmute()
+            scenario.recreate()
+            assertMuted("restored_activity")
+            unmute()
+            scenario.onActivity { it.startActivity(homeIntent()) }
+            assertMuted("final_home")
+            assertEquals(originalSystemVolume, audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC))
+            observations.put("system_volume_unchanged", true).put("explicit_unmute_audible_players", 1)
+            java.io.File(context.filesDir, "home-muted-result.json").writeText(observations.toString())
+        }
+    }
+
     @Test fun expiredSessionReturnsToPasscode() {
         FixtureServer(expired = true).use { server ->
             context.getSharedPreferences("connection", Context.MODE_PRIVATE).edit().putString("server", server.url).putString("session", "aviary_session=expired").commit()
@@ -198,7 +256,10 @@ class TvFlowTest {
             scenario.onActivity { activity -> assertEquals("full", field(activity, "mode")) }
             instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
             ready(scenario, cameraCount)
-            click(scenario, "Sound on")
+            scenario.onActivity { activity ->
+                assertTrue(players(activity).all { it.volume == 0f })
+                assertTrue(all(activity).any { it is Button && it.text == "Sound off" })
+            }
             click(scenario, "Replays")
             click(scenario, "Recordings")
             await("physical recording list") {
