@@ -115,6 +115,11 @@ The installed helper is enabled on this authorized TV. All previously enabled
 Accessibility services were preserved, and Google TV and Setup Wizard remain
 enabled. Cold-boot and standby behavior were not tested.
 
+Developer instrumentation can stop the app process and leave Android marking
+the helper enabled but unbound. After such a test, toggle only this helper off
+and on in Android Accessibility settings and verify a real Home press. Do not
+infer active service binding from the enabled-service list alone.
+
 Fullscreen controls hide after six seconds. Press a D-pad direction or OK to
 show them. The first press wakes the controls; the next selects an action.
 Live playback always reconnects at the current live edge. A replay retains its
