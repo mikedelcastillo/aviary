@@ -8,8 +8,8 @@ android {
         minSdk = 26
         // LAN access on existing Android TVs without the Android 17 permission flow.
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.1.4"
+        versionCode = 6
+        versionName = "0.1.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {

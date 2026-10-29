@@ -47,6 +47,118 @@ class TvFlowTest {
         }
     }
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    @Test fun physicalWallGeometryAndWholeFrame() {
+        org.junit.Assume.assumeTrue("Only on an explicitly authorized TV with a saved session",
+            InstrumentationRegistry.getArguments().getString("aviaryPhysicalGeometry") == "true" && AviaryApi(context).connected)
+        val home = android.content.Intent(context, MainActivity::class.java)
+            .setAction(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        val scenario = ActivityScenario.launch<MainActivity>(home)
+        val receipt = org.json.JSONObject()
+        fun capture(name: String) {
+            instrumentation.uiAutomation.takeScreenshot().let { bitmap ->
+                java.io.File(context.filesDir, "$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                bitmap.recycle()
+            }
+        }
+        try {
+            ready(scenario, 3)
+            scenario.onActivity { activity ->
+                val wall = all(activity).first { it.tag == "camera-wall" }
+                val strip = all(activity).first { it.tag == "app-strip" }
+                val tiles = (0..2).map { index -> all(activity).first { it.tag == "camera-$index" } }
+                fun box(view: View): android.graphics.Rect {
+                    val point = IntArray(2); view.getLocationOnScreen(point)
+                    return android.graphics.Rect(point[0], point[1], point[0] + view.width, point[1] + view.height)
+                }
+                val bounds = tiles.map { box(it) }
+                val wallBox = box(wall)
+                assertEquals(wallBox.left, bounds[0].left)
+                assertEquals(wallBox.top, bounds[0].top)
+                assertEquals(wallBox.bottom, bounds[0].bottom)
+                assertEquals(bounds[0].right, bounds[1].left)
+                assertEquals(bounds[1].left, bounds[2].left)
+                assertEquals(bounds[1].bottom, bounds[2].top)
+                assertEquals(wallBox.right, bounds[2].right)
+                assertEquals(wallBox.bottom, bounds[2].bottom)
+                assertEquals(wallBox.bottom, box(strip).top)
+                assertEquals(activity.resources.displayMetrics.heightPixels, box(strip).bottom)
+                val surfaces = all(activity).filterIsInstance<androidx.media3.ui.PlayerView>()
+                assertEquals(3, surfaces.size)
+                surfaces.forEach { view ->
+                    assertEquals(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM, view.resizeMode)
+                    val texture = view.videoSurfaceView!!
+                    assertTrue("Video covers tile width", texture.width >= view.width - 2)
+                    assertTrue("Video covers tile height", texture.height >= view.height - 2)
+                    val size = view.player!!.videoSize
+                    assertEquals("Video retains its aspect ratio", size.width.toFloat() * size.pixelWidthHeightRatio / size.height,
+                        texture.width.toFloat() / texture.height, .02f)
+                }
+                assertTrue(players(activity).all { it.volume == 0f })
+                receipt.put("tile_bounds", org.json.JSONArray(bounds.map { it.toShortString() }))
+                    .put("wall_bounds", wallBox.toShortString()).put("strip_height", strip.height)
+                    .put("wall_zoom_no_gaps_or_stretch", true).put("home_muted", true)
+                tiles[0].requestFocus()
+            }
+            capture("tcl-polish-normal")
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT)
+            scenario.onActivity { assertEquals("camera-1", it.currentFocus?.tag) }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_DOWN)
+            scenario.onActivity { assertEquals("camera-2", it.currentFocus?.tag) }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_LEFT)
+            scenario.onActivity { assertEquals("camera-0", it.currentFocus?.tag) }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER)
+            ready(scenario)
+            scenario.onActivity { activity ->
+                val view = all(activity).filterIsInstance<androidx.media3.ui.PlayerView>().single()
+                assertEquals(androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT, view.resizeMode)
+                val texture = view.videoSurfaceView!!
+                assertTrue("Whole-frame video remains inside fullscreen", texture.width <= view.width + 2 && texture.height <= view.height + 2)
+                assertEquals(1, players(activity).size)
+            }
+            SystemClock.sleep(6200)
+            capture("tcl-polish-fullscreen")
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            ready(scenario, 3)
+            var before = emptyList<ExoPlayer>()
+            scenario.onActivity { before = players(it) }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_DOWN)
+            scenario.onActivity { assertTrue(it.currentFocus?.tag.toString().startsWith("app-")) }
+            val down = SystemClock.uptimeMillis()
+            instrumentation.sendKeySync(KeyEvent(down, down, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_CENTER, 0))
+            SystemClock.sleep(700)
+            instrumentation.sendKeySync(KeyEvent(down, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_CENTER, 0))
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER)
+            scenario.onActivity { activity ->
+                assertEquals(true, field(activity, "arrangingApps"))
+                assertNotNull(field(activity, "pickedApp"))
+                assertEquals(before, players(activity))
+            }
+            capture("tcl-polish-arrange")
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            scenario.onActivity { activity ->
+                assertEquals(false, field(activity, "arrangingApps"))
+                assertTrue(players(activity).all { it.volume == 0f })
+                MainActivity::class.java.getDeclaredMethod("refreshAppStrip", String::class.java)
+                    .apply { isAccessible = true }.invoke(activity, "manage-apps")
+                assertEquals(before, players(activity))
+            }
+            instrumentation.waitForIdleSync()
+            scenario.onActivity { activity ->
+                val tiles = (0..2).map { index -> all(activity).first { it.tag == "camera-$index" } }
+                val firstApp = (field(activity, "appButtons") as List<*>).first() as View
+                assertEquals(firstApp.id, tiles[0].nextFocusDownId)
+                assertEquals(tiles[2].id, tiles[1].nextFocusDownId)
+                assertEquals(firstApp.id, tiles[2].nextFocusDownId)
+                activity.startActivity(home)
+            }
+            receipt.put("geometric_dpad_navigation", true).put("fullscreen_fit_whole_frame", true)
+                .put("arrange_same_players", true).put("strip_refresh_keeps_geometry_and_players", true).put("owner_pins_untouched", true)
+            java.io.File(context.filesDir, "geometry-result.json").writeText(receipt.toString())
+        } finally { scenario.close() }
+    }
+
     @Test fun onboardingDpadPlaybackReplayAndLifecycle() {
         FixtureServer().use { server ->
             context.getSharedPreferences("connection", Context.MODE_PRIVATE).edit().clear().commit()

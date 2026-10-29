@@ -15,8 +15,9 @@ directly to the home server over Wi-Fi or Ethernet. It does not need Tailscale.
    exposes the manual URL field only when needed. Deployment details are never
    compiled into the APK.
 3. Use the D-pad to select a camera. OK opens full screen; Back returns to the
-   grid with the same camera selected. The wall contains whole video frames
-   without scrolling. There are no permanent headings or camera-name bands.
+   grid with the same camera selected. The wall fills its tiles with proportional
+   center cropping, without stretching or scrolling. Full screen shows the whole
+   frame. There are no permanent headings or camera-name bands.
 4. Home starts muted on every visit, including Home pressed while already on
    the wall. **Sound on** enables only the selected camera for that visit;
    returning to the wall mutes it again without changing TV/system volume.
@@ -31,6 +32,16 @@ screen has a device-local clock and a horizontal row of chosen apps below
 the camera wall. Left/right selects an app, OK opens it, and Up returns to a
 camera. Video players release when another app opens and return with Home.
 There are no recommendation feeds or advertisements.
+
+With three cameras, one larger view occupies the left two-thirds and two views
+stack on the right. All three tile shapes match, so each feed receives the same
+proportional crop; there is no empty fourth cell. Other camera counts use a filled
+grid. The wall uses Media3 `ZOOM`; full screen and replays retain `FIT`. On the
+tested 16:9 TV with three 16:9 feeds, the wall crops about 18% of the source width
+in total. Open a camera to inspect its complete edges. The app strip is 104 dp
+high and remains separate from video. Charcoal surfaces, warm text, sage focus
+accents and bundled Albert Sans match the web client; no font network request is
+required. The font's SIL Open Font License is included in the Android project.
 
 Pinned apps appear first; **Apps** and system **Settings** stay at the right end
 of the horizontal row. Native TV banners appear without outlined cards, with a
@@ -208,6 +219,17 @@ players on an already-visible Home intent, and unchanged TV/system volume.
 which injects long-OK/D-pad/Back, checks persistent order with the same players,
 selected camera and sound during moves, and restores the current pin preferences.
 Both passed on the authorized TCL; they remain skipped unless explicitly enabled.
+
+`aviaryPhysicalGeometry=true` enables `physicalWallGeometryAndWholeFrame` with
+the same saved session. It checks that the three tiles cover the wall with no
+gaps, video fills each tile without aspect distortion, full screen fits the whole
+frame, D-pad follows the layout, and arrange mode retains the same players. It
+captures normal, full-screen and arrange views without changing the owner's pins.
+Version 0.1.5 passed this check on the authorized TCL: a 1920×872 wall with
+1280×872 / 640×436 / 640×436 tiles, a 208-pixel app strip, and three decoded
+streams. The test also verified camera-to-app navigation after a strip-only
+refresh. The approved Home helper was rebound afterward and a real Home press
+returned to Aviary; Home remained muted.
 
 The synthetic test assets can be regenerated with FFmpeg:
 

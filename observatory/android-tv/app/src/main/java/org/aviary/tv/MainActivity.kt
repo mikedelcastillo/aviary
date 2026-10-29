@@ -33,6 +33,7 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.AspectRatioFrameLayout
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
@@ -92,8 +93,13 @@ class MainActivity : Activity() {
         cards.getOrNull(selected)?.requestFocus()
     }
     private var root: LinearLayout? = null
-    private val green = Color.rgb(181, 215, 171)
-    private val backgroundColor = Color.rgb(16, 25, 19)
+    private val green = Color.rgb(178, 200, 181)
+    private val backgroundColor = Color.rgb(11, 12, 14)
+    private val panelColor = Color.rgb(19, 20, 24)
+    private val ink = Color.rgb(233, 231, 225)
+    private val muted = Color.rgb(152, 156, 158)
+    private val appStripHeight = 104
+    private val appFont by lazy { resources.getFont(R.font.albert_sans) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -173,23 +179,23 @@ class MainActivity : Activity() {
     private fun text(value: String, size: Float = 18f, bold: Boolean = false) = TextView(this).apply {
         text = value
         textSize = size
-        setTextColor(Color.rgb(237, 241, 233))
-        typeface = Typeface.create("sans-serif", if (bold) Typeface.BOLD else Typeface.NORMAL)
+        setTextColor(ink)
+        typeface = Typeface.create(appFont, if (bold) Typeface.BOLD else Typeface.NORMAL)
         includeFontPadding = false
     }
     private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
     private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
     private fun fill(color: Int, stroke: Int = color, width: Int = 1) = GradientDrawable().apply {
-        setColor(color); cornerRadius = px(8).toFloat(); setStroke(px(width), stroke)
+        setColor(color); cornerRadius = px(4).toFloat(); setStroke(px(width), stroke)
     }
     private fun focusBackground() = StateListDrawable().apply {
-        addState(intArrayOf(android.R.attr.state_focused), fill(Color.rgb(48, 67, 47), green, 3))
-        addState(intArrayOf(), fill(Color.rgb(28, 40, 30), Color.rgb(60, 77, 58)))
+        addState(intArrayOf(android.R.attr.state_focused), fill(Color.rgb(40, 55, 47), green, 1))
+        addState(intArrayOf(), fill(panelColor, Color.rgb(41, 43, 48)))
     }
     private fun button(label: String, action: () -> Unit) = Button(this).apply {
         id = View.generateViewId(); text = label; contentDescription = label
         isFocusableInTouchMode = true
-        textSize = 16f; isAllCaps = false; setTextColor(Color.WHITE)
+        textSize = 16f; isAllCaps = false; setTextColor(ink); typeface = appFont
         minHeight = px(44); minimumHeight = px(44); minWidth = 0; minimumWidth = 0
         setPadding(px(18), px(8), px(18), px(8)); stateListAnimator = null
         background = focusBackground(); setOnClickListener { action() }
@@ -224,7 +230,7 @@ class MainActivity : Activity() {
         layout.addView(header, LinearLayout.LayoutParams(-1, px(42)))
         val shell = column().apply { setBackgroundColor(backgroundColor); clipChildren = false; clipToPadding = false }
         shell.addView(layout, LinearLayout.LayoutParams(-1, 0, 1f))
-        shell.addView(appStrip(), LinearLayout.LayoutParams(-1, px(94)))
+        shell.addView(appStrip(), LinearLayout.LayoutParams(-1, px(appStripHeight)))
         setContentView(shell); root = layout
         return layout
     }
@@ -349,11 +355,12 @@ class MainActivity : Activity() {
         setContentView(frame)
         val home = column().apply { clipChildren = false; clipToPadding = false }
         frame.addView(home, FrameLayout.LayoutParams(-1, -1))
-        val grid = column()
+        val grid = FrameLayout(this).apply { tag = "camera-wall" }
         home.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
-        home.addView(appStrip(), LinearLayout.LayoutParams(-1, px(94)))
-        val clock = text("", 20f, true).apply {
-            setPadding(px(10), px(5), px(10), px(5)); setBackgroundColor(0xB0101913.toInt())
+        home.addView(appStrip(), LinearLayout.LayoutParams(-1, px(appStripHeight)))
+        val clock = text("", 17f).apply {
+            typeface = Typeface.MONOSPACE
+            setPadding(px(9), px(5), px(9), px(5)); background = fill(0xD90B0C0E.toInt(), Color.TRANSPARENT, 0)
         }
         frame.addView(clock, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
             topMargin = px(12); marginEnd = px(24)
@@ -366,7 +373,7 @@ class MainActivity : Activity() {
         updateClock()
         val overlay = column().apply {
             setPadding(px(32), px(16), px(32), px(12))
-            setBackgroundColor(0xEB101913.toInt()); visibility = View.GONE
+            setBackgroundColor(0xF20B0C0E.toInt()); visibility = View.GONE
         }
         frame.addView(overlay, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
         wallOverlay = overlay
@@ -398,46 +405,66 @@ class MainActivity : Activity() {
         }
         selected = selected.coerceIn(cameras.indices)
         val columns = kotlin.math.ceil(kotlin.math.sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
-        cameras.chunked(columns).forEachIndexed { rowIndex, group ->
-            val line = row()
-            grid.addView(line, LinearLayout.LayoutParams(-1, 0, 1f))
-            group.forEachIndexed { colIndex, camera ->
-                val index = rowIndex * columns + colIndex
+        cameras.forEachIndexed { index, camera ->
                 val card = FrameLayout(this).apply {
                     id = View.generateViewId(); tag = "camera-$index"
                     isFocusable = true; isFocusableInTouchMode = true; isClickable = true
-                    background = StateListDrawable().apply {
-                        addState(intArrayOf(android.R.attr.state_focused), fill(Color.BLACK, green, 1))
-                        addState(intArrayOf(), fill(Color.BLACK))
+                    setBackgroundColor(backgroundColor)
+                    foreground = StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), fill(Color.TRANSPARENT, green, 1).apply { cornerRadius = 0f })
+                        addState(intArrayOf(), fill(Color.TRANSPARENT, Color.TRANSPARENT, 0))
                     }
                     setPadding(px(1), px(1), px(1), px(1))
-                    contentDescription = "${camera.name}, open full screen"
+                    clipChildren = true; clipToPadding = true
+                    contentDescription = "${camera.name}, cropped wall view. OK opens the whole frame."
                     setOnClickListener { selected = index; fullClip = null; showFull() }
                     setOnFocusChangeListener { _, focused -> if (focused) { selected = index; applyAudio(); if (!allLive) startSelectedPreview() } }
                     setOnKeyListener { _, key, event ->
-                        if (key == KeyEvent.KEYCODE_DPAD_UP && rowIndex == 0) {
+                        if (key == KeyEvent.KEYCODE_DPAD_UP && index < columns) {
                             if (event.action == KeyEvent.ACTION_DOWN) showWallControls()
                             true
                         } else false
                     }
                 }
-                line.addView(card, LinearLayout.LayoutParams(0, -1, 1f))
                 cards += card
-                val image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; setBackgroundColor(Color.BLACK) }
+                val image = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(backgroundColor) }
                 card.addView(image, FrameLayout.LayoutParams(-1, -1))
-                val playerView = playerView()
+                val playerView = playerView().apply { resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM }
                 card.addView(playerView, FrameLayout.LayoutParams(-1, -1))
-                val state = text("Connecting", 12f).apply { setBackgroundColor(0xC0101913.toInt()); setPadding(px(8), px(4), px(8), px(4)) }
+                val state = text("Connecting", 12f).apply { setBackgroundColor(0xE0131418.toInt()); setTextColor(muted); setPadding(px(8), px(4), px(8), px(4)) }
                 card.addView(state, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
                 slots += Slot(index, camera, playerView, state, image)
+        }
+        if (cards.size == 3) {
+            // A 2:1 split gives all three tiles the same aspect ratio: no empty
+            // fourth cell, and the same proportional center crop on every feed.
+            val split = row()
+            grid.addView(split, FrameLayout.LayoutParams(-1, -1))
+            split.addView(cards[0], LinearLayout.LayoutParams(0, -1, 2f))
+            val right = column()
+            split.addView(right, LinearLayout.LayoutParams(0, -1, 1f))
+            right.addView(cards[1], LinearLayout.LayoutParams(-1, 0, 1f))
+            right.addView(cards[2], LinearLayout.LayoutParams(-1, 0, 1f))
+        } else {
+            val rows = column()
+            grid.addView(rows, FrameLayout.LayoutParams(-1, -1))
+            cards.chunked(columns).forEach { group ->
+                val line = row()
+                rows.addView(line, LinearLayout.LayoutParams(-1, 0, 1f))
+                group.forEach { line.addView(it, LinearLayout.LayoutParams(0, -1, 1f)) }
             }
-            repeat(columns - group.size) { line.addView(View(this), LinearLayout.LayoutParams(0, -1, 1f)) }
         }
         cards.forEachIndexed { index, card ->
-            card.nextFocusLeftId = if (index % columns > 0) cards[index - 1].id else card.id
-            card.nextFocusRightId = if (index % columns < columns - 1) cards.getOrNull(index + 1)?.id ?: card.id else card.id
-            card.nextFocusUpId = cards.getOrNull(index - columns)?.id ?: replay.id
-            card.nextFocusDownId = cards.getOrNull(index + columns)?.id ?: appButtons.firstOrNull()?.id ?: card.id
+            if (cards.size == 3) {
+                card.nextFocusLeftId = cards[0].id
+                card.nextFocusRightId = if (index == 0) cards[1].id else card.id
+                card.nextFocusUpId = if (index == 2) cards[1].id else replay.id
+            } else {
+                card.nextFocusLeftId = if (index % columns > 0) cards[index - 1].id else card.id
+                card.nextFocusRightId = if (index % columns < columns - 1) cards.getOrNull(index + 1)?.id ?: card.id else card.id
+                card.nextFocusUpId = cards.getOrNull(index - columns)?.id ?: replay.id
+            }
+            card.nextFocusDownId = cameraDownId(index)
         }
         controls.forEachIndexed { index, control ->
             control.nextFocusDownId = cards[selected].id
@@ -508,7 +535,7 @@ class MainActivity : Activity() {
                 tag = "picked-badge"; visibility = View.GONE; gravity = Gravity.CENTER
                 setTextColor(Color.BLACK); setBackgroundColor(green); setPadding(px(6), px(2), px(6), px(2))
             }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
-            row.addView(tile, LinearLayout.LayoutParams(px(136), -1).apply { marginEnd = px(12) })
+            row.addView(tile, LinearLayout.LayoutParams(px(144), -1).apply { marginEnd = px(12) })
             appButtons += tile
             appLabels[tile.tag.toString()] = label
         }
@@ -525,6 +552,11 @@ class MainActivity : Activity() {
     }
 
     private fun pinnedTiles() = appButtons.filter { (it.tag as? String)?.startsWith("app-") == true && it.tag != "app-com.android.tv.settings" }
+    private fun cameraDownId(index: Int): Int {
+        val next = if (cards.size == 3) { if (index == 1) 2 else -1 }
+                   else index + kotlin.math.ceil(kotlin.math.sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
+        return cards.getOrNull(next)?.id ?: appButtons.firstOrNull()?.id ?: cards[index].id
+    }
     private fun wireAppFocus() {
         appButtons.forEachIndexed { index, app ->
             app.nextFocusLeftId = appButtons.getOrNull(index - 1)?.id ?: app.id
@@ -532,8 +564,7 @@ class MainActivity : Activity() {
             app.nextFocusDownId = app.id
             app.nextFocusUpId = cards.getOrNull(selected)?.id ?: View.NO_ID
         }
-        val columns = kotlin.math.ceil(kotlin.math.sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
-        cards.forEachIndexed { index, card -> card.nextFocusDownId = cards.getOrNull(index + columns)?.id ?: appButtons.firstOrNull()?.id ?: card.id }
+        cards.forEachIndexed { index, card -> card.nextFocusDownId = cameraDownId(index) }
     }
     private fun updateAppTileStyles() {
         val pins = pinnedTiles()
@@ -679,17 +710,17 @@ class MainActivity : Activity() {
         dialog.show()
     }
     private fun appStrip(): View {
-        val frame = FrameLayout(this).apply { clipChildren = false; clipToPadding = false }
+        val frame = FrameLayout(this).apply { tag = "app-strip"; clipChildren = false; clipToPadding = false }
         val apps = HorizontalScrollView(this).apply {
             isFocusable = false; isHorizontalScrollBarEnabled = false
             setBackgroundColor(backgroundColor); clipChildren = false; clipToPadding = false
         }
-        val row = row().apply { setPadding(px(28), px(8), px(28), px(8)); clipChildren = false; clipToPadding = false }
+        val row = row().apply { setPadding(px(28), px(10), px(28), px(10)); clipChildren = false; clipToPadding = false }
         appRow = row
         apps.addView(row)
         frame.addView(apps, FrameLayout.LayoutParams(-1, -1))
         arrangeHint = text("", 12f).apply {
-            setPadding(px(10), px(4), px(10), px(4)); setBackgroundColor(0xEE101913.toInt()); visibility = View.GONE
+            setPadding(px(10), px(4), px(10), px(4)); setBackgroundColor(0xF20B0C0E.toInt()); visibility = View.GONE
         }.also { frame.addView(it, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = -px(28) }) }
         populateApps(row)
         return frame
@@ -788,7 +819,7 @@ class MainActivity : Activity() {
         setContentView(frame)
         val video = playerView()
         frame.addView(video, FrameLayout.LayoutParams(-1, -1))
-        val overlay = column().apply { setPadding(px(36), px(18), px(36), px(18)); setBackgroundColor(0xDD101913.toInt()) }
+        val overlay = column().apply { setPadding(px(36), px(18), px(36), px(18)); setBackgroundColor(0xEB0B0C0E.toInt()) }
         fullOverlay = overlay
         frame.addView(overlay, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         val clip = fullClip
@@ -909,6 +940,7 @@ class MainActivity : Activity() {
     private fun playerView() = (layoutInflater.inflate(R.layout.player, null) as PlayerView).apply {
         isFocusable = false; descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         useController = false
+        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
     }
 
     private inner class Slot(val index: Int, val camera: Camera?, val view: PlayerView, val state: TextView, val image: ImageView?) {
