@@ -1,0 +1,23 @@
+{
+  "name": "aviary-home",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.4.3",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "hls.js": "1.6.15",
+    "lucide-react": "0.468.0"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/node": "26.6.2"
+  }
+}

@@ -14,6 +14,15 @@
 
 ---
 
+The new [Observatory application](observatory/README.md) adds a mobile live wall,
+video Reels, a chronological feed, daily annotation, and an Android TV Home
+launcher with a configurable app row. It uses Next.js/TypeScript, a Rust HTTP
+service and archive importer, and local Python camera/model workers. This is a
+development deployment: sustained stream interruptions remain under investigation,
+and automatic visual-model publishing is disabled pending reliable evaluation.
+See the [audit and benchmarks](docs/OBSERVATORY-FINDINGS.md) for measured results
+and limitations. The collector described below remains a separate installation.
+
 Aviary watches a bird room through cheap Tapo cameras. A YOLO detector finds every
 bird in every frame and says **which** bird it is — not "a bird", but *Percy*, by
 name. A vision-language model then reads the labelled frame and writes down what

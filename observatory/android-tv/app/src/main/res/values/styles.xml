@@ -1,0 +1,10 @@
+<resources>
+    <style name="AviaryTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#B5D7AB</item>
+        <item name="android:windowBackground">#101913</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
