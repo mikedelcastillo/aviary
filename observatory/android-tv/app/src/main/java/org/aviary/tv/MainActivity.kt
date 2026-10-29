@@ -78,6 +78,15 @@ class MainActivity : Activity() {
     private var wallFirst: View? = null
     private var wallSoundButton: Button? = null
     private val appButtons = mutableListOf<View>()
+    private var appRow: LinearLayout? = null
+    private var appCandidates = emptyList<android.content.pm.ResolveInfo>()
+    private val appLabels = mutableMapOf<String, String>()
+    private var arrangingApps = false
+    private var pickedApp: String? = null
+    private var confirmKeyHeld = false
+    private var consumeArrangeRelease = false
+    private var arrangeHint: TextView? = null
+    private val hideArrangeHint = Runnable { arrangeHint?.visibility = View.GONE }
     private val hideWallControls = Runnable {
         wallOverlay?.visibility = View.GONE
         cards.getOrNull(selected)?.requestFocus()
@@ -112,7 +121,7 @@ class MainActivity : Activity() {
     override fun onNewIntent(newIntent: Intent) {
         super.onNewIntent(newIntent)
         intent = newIntent
-        if (newIntent.hasCategory(Intent.CATEGORY_HOME)) muteHomeAudio()
+        if (newIntent.hasCategory(Intent.CATEGORY_HOME)) { finishArrangingApps(); muteHomeAudio() }
         if (newIntent.hasCategory(Intent.CATEGORY_HOME) && api.connected) {
             val alreadyHome = mode == "grid"
             mode = "grid"
@@ -142,6 +151,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() { goBack() }
 
     private fun goBack() {
+        if (arrangingApps) { finishArrangingApps(); return }
         if (mode == "connect" && currentFocus is EditText) {
             (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
                 .hideSoftInputFromWindow(currentFocus?.windowToken, 0)
@@ -195,6 +205,9 @@ class MainActivity : Activity() {
         playButton = null
         wallOverlay = null; wallFirst = null; wallSoundButton = null
         appButtons.clear()
+        appRow = null; appCandidates = emptyList(); appLabels.clear()
+        arrangingApps = false; pickedApp = null; arrangeHint = null
+        confirmKeyHeld = false; consumeArrangeRelease = false
     }
     private fun page(title: String): LinearLayout {
         clearScreen()
@@ -209,7 +222,7 @@ class MainActivity : Activity() {
         header.addView(text("AVIARY", 26f, true), LinearLayout.LayoutParams(0, -2, 1f))
         header.addView(text(title, 18f))
         layout.addView(header, LinearLayout.LayoutParams(-1, px(42)))
-        val shell = column().apply { setBackgroundColor(backgroundColor) }
+        val shell = column().apply { setBackgroundColor(backgroundColor); clipChildren = false; clipToPadding = false }
         shell.addView(layout, LinearLayout.LayoutParams(-1, 0, 1f))
         shell.addView(appStrip(), LinearLayout.LayoutParams(-1, px(94)))
         setContentView(shell); root = layout
@@ -334,7 +347,7 @@ class MainActivity : Activity() {
         clearScreen()
         val frame = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         setContentView(frame)
-        val home = column()
+        val home = column().apply { clipChildren = false; clipToPadding = false }
         frame.addView(home, FrameLayout.LayoutParams(-1, -1))
         val grid = column()
         home.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -449,43 +462,136 @@ class MainActivity : Activity() {
         } + listOfNotNull(packageManager.resolveActivity(Intent(android.provider.Settings.ACTION_SETTINGS), 0)))
             .distinctBy { it.activityInfo.packageName }.filter { it.activityInfo.packageName != packageName }
             .sortedBy { it.loadLabel(packageManager).toString().lowercase() }
+        appCandidates = candidates
         val configurable = candidates.filter { it.activityInfo.packageName != "com.android.tv.settings" }
         val available = configurable.map { it.activityInfo.packageName }
         val pins = AppPins.visible(readPins(), available)
         if (readPins() == null) writePins(pins)
-        val manage = button("Apps") { showAppsMenu(candidates) }.apply { tag = "manage-apps" }
-        row.addView(manage, LinearLayout.LayoutParams(px(112), -1).apply { marginEnd = px(8) })
-        appButtons += manage
-        val displayed = pins.mapNotNull { id -> configurable.firstOrNull { it.activityInfo.packageName == id } } +
-            candidates.filter { it.activityInfo.packageName == "com.android.tv.settings" }
-        for (info in displayed) {
+        fun addApp(info: android.content.pm.ResolveInfo, pinned: Boolean) {
             val label = info.loadLabel(packageManager).toString()
-            val tile = column().apply {
-                id = View.generateViewId(); tag = "app-${info.activityInfo.packageName}"
-                gravity = Gravity.CENTER; isFocusable = true; isFocusableInTouchMode = true; isClickable = true
-                background = focusBackground(); contentDescription = "Open $label"
-                setPadding(px(8), px(5), px(8), px(5))
+            val packageId = info.activityInfo.packageName
+            val tile = FrameLayout(this).apply {
+                id = View.generateViewId(); tag = "app-$packageId"
+                isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                setPadding(px(4), px(4), px(4), px(4))
+                clipChildren = false; clipToPadding = false
                 setOnClickListener {
-                    launchApp(info)
+                    if (arrangingApps && pinned) {
+                        pickedApp = if (pickedApp == packageId) null else packageId
+                        updateAppTileStyles(); showArrangeHint()
+                    } else if (!arrangingApps) launchApp(info)
                 }
-                if (info.activityInfo.packageName != "com.android.tv.settings") setOnLongClickListener {
-                    showPinActions(info.activityInfo.packageName, label); true
+                if (pinned) setOnLongClickListener {
+                    consumeArrangeRelease = confirmKeyHeld
+                    if (!arrangingApps) beginArrangingApps(packageId)
+                    true
                 }
+                setOnFocusChangeListener { _, _ -> updateAppTileStyles() }
             }
-            tile.addView(ImageView(this).apply {
-                setImageDrawable(info.loadIcon(packageManager)); scaleType = ImageView.ScaleType.FIT_CENTER
-            }, LinearLayout.LayoutParams(px(42), px(42)))
-            tile.addView(text(label, 12f).apply {
-                gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-                setPadding(0, px(4), 0, 0)
-            }, LinearLayout.LayoutParams(-1, -2))
-            row.addView(tile, LinearLayout.LayoutParams(px(112), -1).apply { marginEnd = px(8) })
+            val banner = if (pinned) runCatching { info.activityInfo.loadBanner(packageManager) }.getOrNull() else null
+            if (banner != null) {
+                tile.addView(ImageView(this).apply {
+                    setImageDrawable(banner); scaleType = ImageView.ScaleType.FIT_CENTER
+                }, FrameLayout.LayoutParams(-1, -1))
+            } else {
+                val fallback = column().apply { gravity = Gravity.CENTER }
+                fallback.addView(ImageView(this).apply {
+                    setImageDrawable(info.loadIcon(packageManager)); scaleType = ImageView.ScaleType.FIT_CENTER
+                }, LinearLayout.LayoutParams(px(40), px(40)))
+                fallback.addView(text(label, 12f).apply {
+                    gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(0, px(3), 0, 0)
+                }, LinearLayout.LayoutParams(-1, -2))
+                tile.addView(fallback, FrameLayout.LayoutParams(-1, -1))
+            }
+            tile.addView(text("‹  Move  ›", 11f, true).apply {
+                tag = "picked-badge"; visibility = View.GONE; gravity = Gravity.CENTER
+                setTextColor(Color.BLACK); setBackgroundColor(green); setPadding(px(6), px(2), px(6), px(2))
+            }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+            row.addView(tile, LinearLayout.LayoutParams(px(136), -1).apply { marginEnd = px(12) })
             appButtons += tile
+            appLabels[tile.tag.toString()] = label
         }
+        pins.mapNotNull { packageId -> configurable.firstOrNull { it.activityInfo.packageName == packageId } }
+            .forEach { addApp(it, true) }
+        val manage = button("Apps") { showAppsMenu(appCandidates) }.apply {
+            tag = "manage-apps"; background = null
+            setOnFocusChangeListener { _, _ -> updateAppTileStyles() }
+        }
+        row.addView(manage, LinearLayout.LayoutParams(px(112), -1).apply { marginEnd = px(12) })
+        appButtons += manage; appLabels["manage-apps"] = "Apps"
+        candidates.firstOrNull { it.activityInfo.packageName == "com.android.tv.settings" }?.let { addApp(it, false) }
+        wireAppFocus(); updateAppTileStyles()
+    }
+
+    private fun pinnedTiles() = appButtons.filter { (it.tag as? String)?.startsWith("app-") == true && it.tag != "app-com.android.tv.settings" }
+    private fun wireAppFocus() {
         appButtons.forEachIndexed { index, app ->
             app.nextFocusLeftId = appButtons.getOrNull(index - 1)?.id ?: app.id
             app.nextFocusRightId = appButtons.getOrNull(index + 1)?.id ?: app.id
             app.nextFocusDownId = app.id
+            app.nextFocusUpId = cards.getOrNull(selected)?.id ?: View.NO_ID
+        }
+        val columns = kotlin.math.ceil(kotlin.math.sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
+        cards.forEachIndexed { index, card -> card.nextFocusDownId = cards.getOrNull(index + columns)?.id ?: appButtons.firstOrNull()?.id ?: card.id }
+    }
+    private fun updateAppTileStyles() {
+        val pins = pinnedTiles()
+        appButtons.forEach { tile ->
+            val picked = pickedApp != null && tile.tag == "app-$pickedApp"
+            val scale = if (picked) 1.10f else if (tile.hasFocus()) 1.06f else 1f
+            tile.scaleX = scale; tile.scaleY = scale
+            tile.alpha = if (picked || tile.hasFocus()) 1f else 0.76f
+            tile.translationZ = if (picked) px(8).toFloat() else if (tile.hasFocus()) px(4).toFloat() else 0f
+            tile.findViewWithTag<TextView>("picked-badge")?.visibility = if (picked) View.VISIBLE else View.GONE
+            val label = appLabels[tile.tag.toString()].orEmpty()
+            val index = pins.indexOf(tile)
+            tile.contentDescription = if (arrangingApps && index >= 0)
+                "$label, ${index + 1} of ${pins.size}. ${if (picked) "Picked up. Left or right moves; OK drops." else "OK picks up."} Back finishes."
+                else if (tile.tag == "manage-apps") "Apps" else "Open $label"
+        }
+    }
+    private fun showArrangeHint() {
+        if (!arrangingApps) return
+        arrangeHint?.apply {
+            text = if (pickedApp == null) "Arrange apps   ·   ← → choose   ·   OK pick up   ·   Back done"
+                   else "← → move   ·   OK drop   ·   Back done"
+            visibility = View.VISIBLE
+        }
+        handler.removeCallbacks(hideArrangeHint); handler.postDelayed(hideArrangeHint, 4000)
+    }
+    private fun beginArrangingApps(packageId: String) {
+        arrangingApps = true; pickedApp = null
+        handler.removeCallbacks(hideWallControls); wallOverlay?.visibility = View.GONE
+        appButtons.firstOrNull { it.tag == "app-$packageId" }?.requestFocus()
+        updateAppTileStyles(); showArrangeHint()
+    }
+    private fun finishArrangingApps() {
+        arrangingApps = false; pickedApp = null
+        handler.removeCallbacks(hideArrangeHint); arrangeHint?.visibility = View.GONE
+        updateAppTileStyles()
+    }
+    private fun movePickedApp(offset: Int) {
+        val row = appRow ?: return
+        val pins = pinnedTiles()
+        val index = pins.indexOfFirst { it.tag == "app-$pickedApp" }
+        if (index < 0) return
+        val target = (index + offset).coerceIn(pins.indices)
+        if (target == index) return
+        val tile = pins[index]
+        val neighbor = pins[target]
+        // Move the unfocused neighbor: the picked tile never detaches or loses focus.
+        val params = neighbor.layoutParams
+        row.removeView(neighbor); row.addView(neighbor, index, params)
+        appButtons[index] = neighbor; appButtons[target] = tile
+        writePins(pinnedTiles().map { it.tag.toString().removePrefix("app-") })
+        wireAppFocus(); updateAppTileStyles(); showArrangeHint()
+        row.post {
+            if (appRow === row) {
+                tile.requestRectangleOnScreen(android.graphics.Rect(0, 0, tile.width, tile.height), false)
+                @Suppress("DEPRECATION")
+                tile.announceForAccessibility("${appLabels[tile.tag.toString()]}, position ${target + 1} of ${pins.size}")
+            }
         }
     }
 
@@ -495,13 +601,20 @@ class MainActivity : Activity() {
     private fun writePins(pins: List<String>) {
         getSharedPreferences("launcher", MODE_PRIVATE).edit().putString("pins", org.json.JSONArray(pins).toString()).apply()
     }
-    private fun refreshPage(focusTag: String? = null) {
-        when (mode) {
-            "connect" -> showConnect()
-            "clips" -> showClips(false)
-            else -> if (api.connected && cameras.isNotEmpty()) showGrid() else loadCameras()
+    private fun refreshAppStrip(focusTag: String = "manage-apps") {
+        val row = appRow ?: return
+        finishArrangingApps()
+        row.isFocusable = true; row.isFocusableInTouchMode = true
+        row.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS; row.requestFocus()
+        row.removeAllViews(); appButtons.clear(); appLabels.clear()
+        populateApps(row)
+        row.post {
+            if (appRow === row) {
+                row.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                (appButtons.firstOrNull { it.tag == focusTag } ?: appButtons.firstOrNull())?.requestFocus()
+                row.isFocusable = false; row.isFocusableInTouchMode = false
+            }
         }
-        if (focusTag != null) handler.post { appButtons.firstOrNull { it.tag == focusTag }?.requestFocus() }
     }
     private fun launchApp(info: android.content.pm.ResolveInfo) {
         val launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -517,12 +630,9 @@ class MainActivity : Activity() {
             when (index) {
                 0 -> showAppPicker(apps.filter { it.activityInfo.packageName != "com.android.tv.settings" })
                 1 -> {
-                    val pinned = (readPins() ?: emptyList()).mapNotNull { id -> apps.firstOrNull { it.activityInfo.packageName == id } }
-                    if (pinned.isEmpty()) showAppPicker(apps.filter { it.activityInfo.packageName != "com.android.tv.settings" })
-                    else AlertDialog.Builder(this).setTitle("Arrange the row")
-                        .setItems(pinned.map { it.loadLabel(packageManager).toString() }.toTypedArray()) { _, selected ->
-                            val item = pinned[selected]; showPinActions(item.activityInfo.packageName, item.loadLabel(packageManager).toString())
-                        }.setNegativeButton("Done", null).show()
+                    val first = pinnedTiles().firstOrNull()?.tag?.toString()?.removePrefix("app-")
+                    if (first == null) showAppPicker(apps.filter { it.activityInfo.packageName != "com.android.tv.settings" })
+                    else handler.post { beginArrangingApps(first) }
                 }
                 2 -> showHomeHandoff()
                 else -> launchApp(apps[index - 3])
@@ -553,7 +663,7 @@ class MainActivity : Activity() {
                 if (checked) selected.add(id) else selected.remove(id)
             }.setPositiveButton("Save") { _, _ ->
                 writePins(AppPins.select(before, apps.map { it.activityInfo.packageName }.filter { it in selected }))
-                refreshPage("manage-apps")
+                refreshAppStrip("manage-apps")
             }.setNegativeButton("Cancel", null).create()
         dialog.setOnShowListener {
             dialog.listView.setOnKeyListener { _, keyCode, event ->
@@ -568,25 +678,21 @@ class MainActivity : Activity() {
         }
         dialog.show()
     }
-    private fun showPinActions(id: String, label: String) {
-        AlertDialog.Builder(this).setTitle(label).setItems(arrayOf("Move left", "Move right", "Hide from row")) { _, action ->
-            val before = readPins() ?: emptyList()
-            val updated = if (action == 2) before.filter { it != id } else AppPins.move(before, id, if (action == 0) -1 else 1)
-            writePins(updated)
-            val focus = if (action == 2) updated.getOrNull(before.indexOf(id).coerceAtMost(updated.lastIndex)) else id
-            refreshPage(focus?.let { "app-$it" } ?: "manage-apps")
-        }.setNegativeButton("Cancel", null).show()
-    }
-
-    private fun appStrip(): HorizontalScrollView {
+    private fun appStrip(): View {
+        val frame = FrameLayout(this).apply { clipChildren = false; clipToPadding = false }
         val apps = HorizontalScrollView(this).apply {
             isFocusable = false; isHorizontalScrollBarEnabled = false
-            setBackgroundColor(backgroundColor)
+            setBackgroundColor(backgroundColor); clipChildren = false; clipToPadding = false
         }
-        val row = row().apply { setPadding(px(24), px(8), px(24), px(8)) }
+        val row = row().apply { setPadding(px(28), px(8), px(28), px(8)); clipChildren = false; clipToPadding = false }
+        appRow = row
         apps.addView(row)
+        frame.addView(apps, FrameLayout.LayoutParams(-1, -1))
+        arrangeHint = text("", 12f).apply {
+            setPadding(px(10), px(4), px(10), px(4)); setBackgroundColor(0xEE101913.toInt()); visibility = View.GONE
+        }.also { frame.addView(it, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = -px(28) }) }
         populateApps(row)
-        return apps
+        return frame
     }
 
     private fun showWallControls() {
@@ -732,6 +838,32 @@ class MainActivity : Activity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val confirm = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER
+        if (confirm) {
+            if (event.action == KeyEvent.ACTION_DOWN) confirmKeyHeld = true
+            if (event.action == KeyEvent.ACTION_UP) {
+                confirmKeyHeld = false
+                if (consumeArrangeRelease) {
+                    consumeArrangeRelease = false; currentFocus?.isPressed = false; return true
+                }
+            } else if (consumeArrangeRelease) return true
+        }
+        if (arrangingApps && event.keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_MENU)) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    val offset = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                    if (pickedApp != null) movePickedApp(offset)
+                    else {
+                        val pins = pinnedTiles()
+                        val index = pins.indexOf(currentFocus)
+                        if (index >= 0) pins[(index + offset).coerceIn(pins.indices)].requestFocus()
+                    }
+                }
+                showArrangeHint()
+            }
+            return true
+        }
         val navigation = event.keyCode in listOf(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT)
         if (mode == "grid") {

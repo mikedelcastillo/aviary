@@ -178,6 +178,106 @@ class TvFlowTest {
         }
     }
 
+    @Test fun physicalAppArrangeKeepsPlayersAndSound() {
+        org.junit.Assume.assumeTrue("Physical app arrange check not requested",
+            InstrumentationRegistry.getArguments().getString("aviaryPhysicalArrange") == "true")
+        org.junit.Assume.assumeTrue("No saved deployment session", AviaryApi(context).connected)
+        val prefs = context.getSharedPreferences("launcher", Context.MODE_PRIVATE)
+        val originalPins = prefs.getString("pins", null)
+        val home = android.content.Intent(context, MainActivity::class.java)
+            .setAction(android.content.Intent.ACTION_MAIN).addCategory(android.content.Intent.CATEGORY_HOME)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val scenario = ActivityScenario.launch<MainActivity>(home)
+        fun pins(activity: MainActivity) = (field(activity, "appButtons") as List<*>).filterIsInstance<View>()
+            .filter { it.tag.toString().startsWith("app-") && it.tag != "app-com.android.tv.settings" }
+        fun capture(name: String) {
+            instrumentation.uiAutomation.takeScreenshot().let { bitmap ->
+                java.io.File(context.filesDir, "$name.png").outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                bitmap.recycle()
+            }
+        }
+        try {
+            await("arrange camera players") {
+                var present = false; scenario.onActivity { present = players(it).size >= 2 && pins(it).size >= 3 }; present
+            }
+            var originalPlayers = emptyList<ExoPlayer>()
+            var before = emptyList<String>()
+            var generation: Any? = null
+            var selected: Any? = null
+            scenario.onActivity { activity ->
+                before = pins(activity).map { it.tag.toString() }
+                val appViews = (field(activity, "appButtons") as List<*>).filterIsInstance<View>()
+                assertEquals("manage-apps", appViews[before.size].tag)
+                assertEquals("app-com.android.tv.settings", appViews.last().tag)
+                assertTrue(appViews.all { it.background == null })
+                pins(activity).first().requestFocus()
+                originalPlayers = players(activity); generation = field(activity, "generation"); selected = field(activity, "selected")
+            }
+            capture("arrange-normal")
+            click(scenario, "Sound off")
+            val down = SystemClock.uptimeMillis()
+            instrumentation.sendKeySync(KeyEvent(down, down, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DPAD_CENTER, 0))
+            SystemClock.sleep(700)
+            instrumentation.sendKeySync(KeyEvent(down, SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DPAD_CENTER, 0))
+            scenario.onActivity { activity ->
+                assertEquals(true, field(activity, "arrangingApps"))
+                assertNull("Long OK release must not pick or launch", field(activity, "pickedApp"))
+                assertEquals(before[0], activity.currentFocus?.tag)
+                assertEquals(generation, field(activity, "generation"))
+            }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER)
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT)
+            val expected = before.toMutableList().apply { this[0] = before[1]; this[1] = before[0] }
+            scenario.onActivity { activity ->
+                assertEquals(before[0].removePrefix("app-"), field(activity, "pickedApp"))
+                assertEquals(expected, pins(activity).map { it.tag.toString() })
+                assertEquals(before[0], activity.currentFocus?.tag)
+                assertEquals(originalPlayers, players(activity))
+                assertEquals(generation, field(activity, "generation"))
+                assertEquals(selected, field(activity, "selected"))
+                assertEquals(1, players(activity).count { it.volume > 0f })
+            }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_UP)
+            scenario.onActivity { assertEquals(before[0], it.currentFocus?.tag) }
+            capture("arrange-picked")
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER)
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT)
+            scenario.onActivity { activity ->
+                assertNull(field(activity, "pickedApp"))
+                assertEquals(expected[2], activity.currentFocus?.tag)
+            }
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER)
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            scenario.onActivity { activity ->
+                assertEquals(false, field(activity, "arrangingApps")); assertNull(field(activity, "pickedApp"))
+                assertFalse(activity.isFinishing)
+                assertEquals(originalPlayers, players(activity)); assertEquals(generation, field(activity, "generation"))
+                assertEquals(1, players(activity).count { it.volume > 0f })
+            }
+            scenario.recreate()
+            await("persisted app order") {
+                var persisted = false; scenario.onActivity { persisted = pins(it).map { view -> view.tag.toString() } == expected }; persisted
+            }
+            java.io.File(context.filesDir, "arrange-result.json").writeText(org.json.JSONObject()
+                .put("long_ok_release_safe", true).put("pick_move_drop_next_back", true)
+                .put("players_unchanged_during_arrange", true).put("sound_preserved_during_arrange", true)
+                .put("utilities_fixed_right", true).put("borderless_tiles", true).put("order_persisted", true).toString())
+        } finally {
+            prefs.edit().apply { if (originalPins == null) remove("pins") else putString("pins", originalPins) }.commit()
+            scenario.onActivity { activity ->
+                val currentPlayers = players(activity)
+                val currentGeneration = field(activity, "generation")
+                MainActivity::class.java.getDeclaredMethod("refreshAppStrip", String::class.java)
+                    .apply { isAccessible = true }.invoke(activity, "manage-apps")
+                assertEquals("Visibility changes must refresh only the app strip", currentPlayers, players(activity))
+                assertEquals(currentGeneration, field(activity, "generation"))
+                activity.startActivity(home)
+            }
+            instrumentation.waitForIdleSync()
+            scenario.close()
+        }
+    }
+
     @Test fun physicalDiscoveryAndSmokeWhenConfigured() {
         val config = java.io.File(context.filesDir, "smoke-connection.json")
         org.junit.Assume.assumeTrue("No private deployment supplied", config.exists())

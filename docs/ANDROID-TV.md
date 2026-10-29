@@ -32,16 +32,28 @@ the camera wall. Left/right selects an app, OK opens it, and Up returns to a
 camera. Video players release when another app opens and return with Home.
 There are no recommendation feeds or advertisements.
 
+Pinned apps appear first; **Apps** and system **Settings** stay at the right end
+of the horizontal row. Native TV banners appear without outlined cards, with a
+centered icon/name fallback. Focus uses a modest scale and brightness change.
+
+Hold OK on a pinned app to enter arrange mode, then release. Press OK once to
+pick it up, use Left/Right to move it, and press OK again to drop it. When no
+app is picked up, Left/Right chooses another pin. Back drops the app and finishes
+arranging, saving the order. A Move badge identifies the picked app; short remote
+hints appear only during arrange mode. Up/Down stays in the row while arranging.
+Home also exits arrange mode and returns to the muted camera wall.
+
 The **Apps** tile opens the full installed-app drawer. **Choose apps for the
 row** shows checkboxes; OK toggles an app, Right focuses Save, and Up returns
-to the list. Save to show or hide apps. **Arrange the row** selects
-an app to move left, move right or hide. Holding OK on a pinned app opens those
-same actions directly. The chosen order persists on this TV. Missing or
-uninstalled apps are skipped. Apps and system Settings remain accessible even
-when every optional pin is hidden, the server is unreachable, or sign-in has
-expired. These choices never uninstall applications.
-Saving the picker returns focus to Apps. Moving an app keeps it selected;
-hiding it selects the next available app so arranging several pins is quick.
+to the list. Save to show or hide apps. **Arrange the row** is another entry to
+the same direct arrange mode. Reordering and visibility changes update only
+the app strip: existing camera players, selected camera and sound choice remain
+unchanged. Saving the picker returns focus to Apps.
+
+The chosen order persists on this TV. Missing or uninstalled apps are skipped.
+Apps and system Settings remain accessible even when every optional pin is
+hidden, the server is unreachable, or sign-in has expired. These choices never
+uninstall applications.
 
 ## Use Aviary as Home
 
@@ -187,6 +199,15 @@ passcode entry, simultaneous decoding, offline Home access, configurable app
 pins, native Settings launch, player release and return to Aviary. Run it only
 on the owner's authorized test TV; it opens Settings and changes then restores
 Aviary's pin preferences. It does not change the default Home.
+
+Two focused opt-in checks use an already saved, authorized deployment session:
+`aviaryPhysicalHomeMute=true` enables `homeMuteOnEveryVisitUsingSavedConnection`,
+which checks zero Home player volumes, explicit single-camera unmute, unchanged
+players on an already-visible Home intent, and unchanged TV/system volume.
+`aviaryPhysicalArrange=true` enables `physicalAppArrangeKeepsPlayersAndSound`,
+which injects long-OK/D-pad/Back, checks persistent order with the same players,
+selected camera and sound during moves, and restores the current pin preferences.
+Both passed on the authorized TCL; they remain skipped unless explicitly enabled.
 
 The synthetic test assets can be regenerated with FFmpeg:
 
