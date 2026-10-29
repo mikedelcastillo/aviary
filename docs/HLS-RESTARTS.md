@@ -1,0 +1,37 @@
+# HLS recorder restart boundaries
+
+A recorder replacement starts its encoded timestamps near zero. Natural captures reproduced that reset three times while the old public playlist supplied neither a discontinuity marker nor a discontinuity sequence. Individual old and new transport-stream segments decoded cleanly. This is a stream-boundary problem distinct from delayed source video, missing input, or incomplete recordings left by an interrupted encoder.
+
+RFC 8216 requires a discontinuity when the timestamp sequence changes. A sliding playlist must preserve a segment's media/discontinuity identity, increment the discontinuity sequence when a boundary leaves the window, keep target duration constant, and retain removed segment files long enough for existing clients. [RFC 8216, sections 4.3.2.3, 6.2.1 and 6.2.2](https://www.rfc-editor.org/rfc/rfc8216.html)
+
+FFmpeg provides `append_list`, `discont_start`, and `omit_endlist`. Its 6.1 HLS implementation appends a boundary when reopening a playlist, but does not maintain the discontinuity-sequence header needed when that marker rolls out. Combining epoch start numbers with old playlist import can also change the numbering associated with old URIs. [FFmpeg HLS options](https://ffmpeg.org/ffmpeg-formats.html#hls), [FFmpeg 6.1.1 HLS source](https://github.com/FFmpeg/FFmpeg/blob/n6.1.1/libavformat/hlsenc.c)
+
+## Publication protocol
+
+`backend/recorder_hls.py` owns each camera's public `live.m3u8`. FFmpeg writes complete TS files atomically and a private `incoming.m3u8`. The recorder publishes only complete segments, preserving the old public view until new output arrives. Both public servers allow `live.m3u8` and digit-named TS files; the incoming manifest is not exposed.
+
+The publisher keeps ten segments, continues media numbers across process starts, preserves existing URIs and program dates, and marks a new encoder generation with a discontinuity. The public playlist and an independent, atomically replaced, fsynced `continuity.m3u8` checkpoint persist sequence state. A valid public playlist takes precedence over the checkpoint. Boundaries that leave the window advance `EXT-X-DISCONTINUITY-SEQUENCE`. The public target duration remains constant. An oversized segment fails publication and stops the child instead of leaving an uncontrolled encoder running.
+
+Graceful shutdown does not publish `EXT-X-ENDLIST`: the camera is still a live source that can return. A long outage drops stale history instead of replaying minutes of old segments. Removed public files remain for at least 90 seconds from removal; cleanup also removes abandoned older TS and temporary files. Reference files and original recordings are untouched.
+
+The first start can read the previous FFmpeg playlist without a discontinuity-sequence header. A malformed persisted playlist is retained as `live.m3u8.invalid` and logs a quarantine warning. Recovery uses the checkpoint when available; otherwise it chooses one more than the largest existing digit-named TS file. It never invents a microsecond-based media-number jump. Valid streams already using high numbers continue from their current numbers and discontinuity state. Without a usable checkpoint, corrupt-state recovery can still require a client reconnect. Keep a backup of recorder modules when deploying, and restart cameras one at a time without deleting their HLS directories.
+
+During the first deployment, all three old recorder processes left zero-byte public manifests on shutdown, although their saved pre-restart manifests were nonempty. The initial recovery path chose microsecond-sized IDs rather than importing the prior ring. This introduced a migration regression: a running browser observer stopped producing samples at the transition, with its renderer using one CPU core. A subsequent same-player offline test reproduced failed playback across the enormous number jump. The exact live renderer call stack was not established. The corrected recovery above avoids that jump; it does not lower numbers for already-connected healthy clients. A frozen client requires reload or recreation. Existing TS files were preserved throughout.
+
+With the new publisher, FFmpeg shutdown writes only the private incoming manifest; the public playlist remains under the recorder's atomic publisher. Two cameras produced fresh output during the first deployment verification; the third had an active recorder but no fresh output and was not considered ready. Upstream availability and delayed source video remain separate problems.
+
+The bounded-recovery correction was deployed on October 29, 2026, 04:32:12.340–04:32:13.462 UTC. Verification at 04:33:37.851 UTC required each replacement child to have started after its restart and written a fresh continuity checkpoint and public playlist. All three met those checks. Their existing high media numbers advanced by 40–42 segments over approximately 85 seconds and each discontinuity number increased by one. This establishes fresh replacement output and bounded numbering; it does not measure source-image latency. The initially preserved shutdown heartbeat was excluded from the final verification.
+
+## Offline verification
+
+`tests/test_recorder_hls.py` checks stable URI/media-number/program-date identities, repeated restarts, boundary eviction, old-format migration, malformed-state recovery, incomplete-segment refusal, retention grace, and fixed target duration. Existing recorder-health tests cover startup/stall deadlines, private-memory limits, process-group isolation, and bounded shutdown.
+
+The final recorder suite passed 21 tests, including checkpoint recovery, preserving valid high-number streams, zero-byte legacy recovery without a large jump, and stopping the child after publication failure.
+
+`bench/benchmark_hls_restart.py` uses a local video copy, synthetic 16 kHz AAC, three CPU `libx264` encoders, and unmodified installed hls.js with the app's buffering settings. `hls_restart_browser.mjs` keeps the same three player instances throughout graceful restart, forced termination, and a 23-second outage; it performs no page reload or custom recovery.
+
+The first measured run used hls.js 1.6.15. All three players recovered with zero fatal errors and zero ended events. Across 127 published updates, segment identities remained stable. Final estimated delays behind the HLS live edge were 5.876, 3.867, and 2.374 seconds. The long outage produced one nonfatal stall. These are offline protocol results, not camera-to-screen latency measurements or proof of Android Media3 behavior.
+
+That clean-start experiment did not cover migration from the old publisher. `bench/hls_migration_browser.mjs` adds an already-playing, unchanged hls.js instance and an independent Node response deadline. A jump from approximately 1.8 billion to 1.8 quadrillion left playback at zero without reaching the replacement generation after 12 seconds. Consecutive small IDs and consecutive already-high IDs both reached the new generation and advanced to approximately 21.6 seconds. The worker-enabled offline renderer remained responsive, so this reproduces the playback regression without claiming the exact live main-thread hang mechanism.
+
+Keep full browser traces, screenshots, media, runtime configuration, and deployment logs in ignored audit storage. The benchmark refuses a nonempty output directory and never reads a camera, connects to a relay, or uses NVENC.

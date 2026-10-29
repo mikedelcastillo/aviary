@@ -1,0 +1,11 @@
+runtime/
+.env*
+!.env.example
+web/node_modules/
+web/dist/
+web/out/
+web/.next/
+web/*.tsbuildinfo
+.venv/
+*.sqlite*
+*.log

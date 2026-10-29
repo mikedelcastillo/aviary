@@ -139,6 +139,21 @@ important for validation because they match the deployment view.
 `uv sync` already installs the cu118 torch build (pinned in `pyproject.toml`),
 so there is no separate GPU-install step.
 
+For Telegram-only operation, `uv run server --headless` skips the terminal
+dashboard. When using a service, pass `--headless` to its existing server
+process command. The `server` launcher still attaches if a background session
+is already running; changing this flag requires a planned restart. Do not
+combine `--headless` with `--chat`.
+
+FFmpeg defaults to two decoding threads per camera. Override
+`OPENCV_FFMPEG_THREADS` to tune this; `0` restores automatic CPU-count sizing.
+This limits decoder buffer memory without reducing resolution or sampling.
+Validate sustained decoding with representative recordings before deploying.
+
+New collection metadata omits the RTSP URL so camera credentials do not become
+part of datasets. Existing archive metadata is unchanged and must be sanitized
+when generating exports or a browser API.
+
 ## External References
 
 - Ultralytics YOLO dataset / label format: https://docs.ultralytics.com/datasets/detect/

@@ -69,3 +69,11 @@ def test_is_deterministic_for_a_seed() -> None:
     a = stratified_group_split(keys, label_sets, val_ratio=0.2, test_ratio=0.1, seed=42)
     b = stratified_group_split(keys, label_sets, val_ratio=0.2, test_ratio=0.1, seed=42)
     assert a == b
+
+
+def test_daily_review_exports_keep_camera_angles_in_same_capture_group() -> None:
+    first = group_key('learn_20260101_072_' + 'a'*24 + '.jpg')
+    second = group_key('learn_20260101_072_' + 'b'*24 + '.jpg')
+    later = group_key('learn_20260101_073_' + 'c'*24 + '.jpg')
+    assert first == second
+    assert first != later

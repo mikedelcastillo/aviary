@@ -93,10 +93,16 @@ CAMERA_ACTION_POLL_SECONDS = 1.0
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--log-level", default=os.getenv("AVIARY_LOG_LEVEL", "INFO"))
-    parser.add_argument(
+    interface = parser.add_mutually_exclusive_group()
+    interface.add_argument(
         "--chat",
         action="store_true",
         help="interactive terminal chat instead of the live dashboard",
+    )
+    interface.add_argument(
+        "--headless",
+        action="store_true",
+        help="run Telegram and camera workers without rendering a terminal dashboard",
     )
     return parser.parse_args()
 
@@ -1641,7 +1647,7 @@ def main() -> None:
         root.addHandler(file_handler)
         stderr_redirect = NativeStderrRedirect(os.getenv("AVIARY_LOG_FILE", "aviary.log"))
         stderr_redirect.start()
-    else:
+    elif not args.headless:
         dashboard = Dashboard(
             stats,
             registry,

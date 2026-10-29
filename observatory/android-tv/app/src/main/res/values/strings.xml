@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="home_handoff_label">Aviary Home button helper</string>
+    <string name="home_handoff_description">Optional: open Aviary when the Google TV Home screen appears. This helper checks only that screen’s app and activity name. It does not read screen text, request window contents or intercept keys. It does not record activity or send data. Other apps and Settings are ignored. Turn this service off here to return to Google TV Home.</string>
+</resources>

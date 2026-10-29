@@ -1,0 +1,1045 @@
+package org.aviary.tv
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Intent
+import android.content.ComponentName
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.*
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.PlayerView
+import androidx.media3.ui.AspectRatioFrameLayout
+import java.util.concurrent.Executors
+import kotlin.math.roundToInt
+
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+class MainActivity : Activity() {
+    private lateinit var api: AviaryApi
+    private val handler = Handler(Looper.getMainLooper())
+    private val io = Executors.newFixedThreadPool(4)
+    private val slots = mutableListOf<Slot>()
+    private val cards = mutableListOf<View>()
+    private var generation = 0
+    private var started = false
+    private var mode = "connect"
+    private var cameras = emptyList<Camera>()
+    private var selected = 0
+    private var sound = false
+    private var audioGranted = false
+    private val audioManager by lazy { getSystemService(AUDIO_SERVICE) as AudioManager }
+    private val audioRequest by lazy {
+        AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).build())
+            .setOnAudioFocusChangeListener({ change ->
+                audioGranted = change == AudioManager.AUDIOFOCUS_GAIN
+                updateVolumes()
+            }, handler).build()
+    }
+    private var allLive = true
+    private var clipView = "highlights"
+    private var clipPage = ClipPage(emptyList(), null)
+    private val cursors = mutableListOf<String?>(null)
+    private var clipIndex = 0
+    private var fullClip: Clip? = null
+    private var replayPosition = 0L
+    private var replayPlaying = true
+    private var fullStatus: TextView? = null
+    private var fullOverlay: View? = null
+    private var fullBack: View? = null
+    private var playButton: Button? = null
+    private val hideControls = Runnable { fullOverlay?.visibility = View.GONE }
+    private var status: TextView? = null
+    private var discovery: AviaryDiscovery? = null
+    private var wallOverlay: View? = null
+    private var wallFirst: View? = null
+    private var wallSoundButton: Button? = null
+    private val appButtons = mutableListOf<View>()
+    private var appRow: LinearLayout? = null
+    private var appCandidates = emptyList<android.content.pm.ResolveInfo>()
+    private val appLabels = mutableMapOf<String, String>()
+    private var arrangingApps = false
+    private var pickedApp: String? = null
+    private var confirmKeyHeld = false
+    private var consumeArrangeRelease = false
+    private var arrangeHint: TextView? = null
+    private val hideArrangeHint = Runnable { arrangeHint?.visibility = View.GONE }
+    private val hideWallControls = Runnable {
+        wallOverlay?.visibility = View.GONE
+        cards.getOrNull(selected)?.requestFocus()
+    }
+    private var root: LinearLayout? = null
+    private val green = Color.rgb(178, 200, 181)
+    private val backgroundColor = Color.rgb(11, 12, 14)
+    private val panelColor = Color.rgb(19, 20, 24)
+    private val ink = Color.rgb(233, 231, 225)
+    private val muted = Color.rgb(152, 156, 158)
+    private val appStripHeight = 104
+    private val appFont by lazy { resources.getFont(R.font.albert_sans) }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        api = AviaryApi(this)
+        allLive = getPreferences(MODE_PRIVATE).getBoolean("allLive", true)
+        mode = if (api.connected) "grid" else "connect"
+        savedInstanceState?.let {
+            selected = it.getInt("selected", 0)
+        }
+        if (Build.VERSION.SDK_INT >= 33) onBackInvokedDispatcher.registerOnBackInvokedCallback(0) { goBack() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        started = true
+        when (mode) {
+            "connect" -> showConnect()
+            "full" -> showFull()
+            "clips" -> showClips(false)
+            else -> if (cameras.isEmpty()) loadCameras() else showGrid()
+        }
+    }
+
+    override fun onNewIntent(newIntent: Intent) {
+        super.onNewIntent(newIntent)
+        intent = newIntent
+        if (newIntent.hasCategory(Intent.CATEGORY_HOME)) { finishArrangingApps(); muteHomeAudio() }
+        if (newIntent.hasCategory(Intent.CATEGORY_HOME) && api.connected) {
+            val alreadyHome = mode == "grid"
+            mode = "grid"
+            if (started && (!alreadyHome || slots.isEmpty())) {
+                if (cameras.isEmpty()) loadCameras() else showGrid()
+            }
+        }
+    }
+
+    override fun onStop() {
+        if (mode == "full" && fullClip != null) slots.firstOrNull()?.player?.let {
+            replayPosition = it.currentPosition
+            replayPlaying = it.playWhenReady
+        }
+        started = false
+        audioManager.abandonAudioFocusRequest(audioRequest); audioGranted = false
+        clearScreen()
+        super.onStop()
+    }
+
+    override fun onDestroy() { io.shutdownNow(); super.onDestroy() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("selected", selected)
+        super.onSaveInstanceState(outState)
+    }
+    @Deprecated("Older Android TV Back key")
+    override fun onBackPressed() { goBack() }
+
+    private fun goBack() {
+        if (arrangingApps) { finishArrangingApps(); return }
+        if (mode == "connect" && currentFocus is EditText) {
+            (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(currentFocus?.windowToken, 0)
+            appButtons.firstOrNull()?.requestFocus()
+            return
+        }
+        when (mode) {
+            "full" -> if (fullClip == null) showGrid() else showClips(false)
+            "clips" -> showGrid()
+            "connect" -> if (api.connected) loadCameras()
+                         else if (intent.hasCategory(Intent.CATEGORY_HOME)) appButtons.firstOrNull()?.requestFocus()
+                         else finish()
+            else -> if (wallOverlay?.visibility == View.VISIBLE) hideWallControls.run()
+                    else if (!intent.hasCategory(Intent.CATEGORY_HOME)) finish()
+        }
+    }
+
+    private fun px(value: Int) = (value * resources.displayMetrics.density).roundToInt()
+    private fun text(value: String, size: Float = 18f, bold: Boolean = false) = TextView(this).apply {
+        text = value
+        textSize = size
+        setTextColor(ink)
+        typeface = Typeface.create(appFont, if (bold) Typeface.BOLD else Typeface.NORMAL)
+        includeFontPadding = false
+    }
+    private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+    private fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+    private fun fill(color: Int, stroke: Int = color, width: Int = 1) = GradientDrawable().apply {
+        setColor(color); cornerRadius = px(4).toFloat(); setStroke(px(width), stroke)
+    }
+    private fun focusBackground() = StateListDrawable().apply {
+        addState(intArrayOf(android.R.attr.state_focused), fill(Color.rgb(40, 55, 47), green, 1))
+        addState(intArrayOf(), fill(panelColor, Color.rgb(41, 43, 48)))
+    }
+    private fun button(label: String, action: () -> Unit) = Button(this).apply {
+        id = View.generateViewId(); text = label; contentDescription = label
+        isFocusableInTouchMode = true
+        textSize = 16f; isAllCaps = false; setTextColor(ink); typeface = appFont
+        minHeight = px(44); minimumHeight = px(44); minWidth = 0; minimumWidth = 0
+        setPadding(px(18), px(8), px(18), px(8)); stateListAnimator = null
+        background = focusBackground(); setOnClickListener { action() }
+        layoutParams = LinearLayout.LayoutParams(-2, px(46)).apply { marginEnd = px(10) }
+    }
+    private fun clearScreen() {
+        discovery?.stop(); discovery = null
+        generation++
+        handler.removeCallbacksAndMessages(null)
+        slots.forEach { it.release() }; slots.clear(); cards.clear()
+        fullStatus = null
+        fullOverlay = null; fullBack = null
+        playButton = null
+        wallOverlay = null; wallFirst = null; wallSoundButton = null
+        appButtons.clear()
+        appRow = null; appCandidates = emptyList(); appLabels.clear()
+        arrangingApps = false; pickedApp = null; arrangeHint = null
+        confirmKeyHeld = false; consumeArrangeRelease = false
+    }
+    private fun page(title: String): LinearLayout {
+        clearScreen()
+        val layout = column().apply {
+            setBackgroundColor(backgroundColor)
+            // A 5% safe area keeps controls inside older TV overscan.
+            val inset = (resources.displayMetrics.widthPixels * .05f).roundToInt()
+            val verticalInset = (resources.displayMetrics.heightPixels * .045f).roundToInt()
+            setPadding(inset, verticalInset, inset, verticalInset)
+        }
+        val header = row()
+        header.addView(text("AVIARY", 26f, true), LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(text(title, 18f))
+        layout.addView(header, LinearLayout.LayoutParams(-1, px(42)))
+        val shell = column().apply { setBackgroundColor(backgroundColor); clipChildren = false; clipToPadding = false }
+        shell.addView(layout, LinearLayout.LayoutParams(-1, 0, 1f))
+        shell.addView(appStrip(), LinearLayout.LayoutParams(-1, px(appStripHeight)))
+        setContentView(shell); root = layout
+        return layout
+    }
+    private fun note(parent: LinearLayout, value: String): TextView = text(value, 14f).apply {
+        setTextColor(green); setPadding(0, px(8), 0, px(8))
+        parent.addView(this, LinearLayout.LayoutParams(-1, -2))
+    }
+    private fun <T> async(work: () -> T, complete: (T) -> Unit, failure: (Exception) -> Unit = { showError(it) }) {
+        val ticket = generation
+        io.execute {
+            try {
+                val value = work()
+                handler.post { if (started && ticket == generation) complete(value) }
+            } catch (error: Exception) {
+                handler.post { if (started && ticket == generation) failure(error) }
+            }
+        }
+    }
+    private fun showError(error: Exception) {
+        if (error is LoginRequired) { api.signOut(); showConnect(error.message ?: "Sign in again.") }
+        else status?.text = error.message?.take(150) ?: "Could not reach the server. Try again."
+    }
+
+    private fun showConnect(message: String = "Looking for Aviary on your home network...") {
+        mode = "connect"
+        val parent = page("Connect your TV")
+        val form = column().apply { setPadding(px(60), px(12), px(60), 0) }
+        val formScroll = ScrollView(this).apply { isFocusable = false; addView(form) }
+        parent.addView(formScroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        form.addView(text("Your aviary, on the big screen", 28f, true))
+        status = note(form, message)
+        val discoveryControls = row()
+        val rescan = button("Scan again") { showConnect() }
+        discoveryControls.addView(rescan)
+        form.addView(discoveryControls)
+        val addressLabel = text("Local server URL", 15f).apply { visibility = View.GONE }
+        form.addView(addressLabel)
+        val server = EditText(this).apply {
+            id = View.generateViewId(); tag = "server"
+            setText(api.base); hint = "http://192.168.x.x:8740"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(); textSize = 19f; setTextColor(Color.WHITE)
+            setSelectAllOnFocus(true)
+            visibility = View.GONE
+        }
+        form.addView(server, LinearLayout.LayoutParams(-1, px(52)))
+        form.addView(text("Home passcode", 15f))
+        val pin = EditText(this).apply {
+            id = View.generateViewId(); tag = "passcode"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            setSingleLine(); textSize = 19f; setTextColor(Color.WHITE)
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+        }
+        form.addView(pin, LinearLayout.LayoutParams(-1, px(52)))
+        var manualMode = false
+        val manual = button("Enter address") {
+            manualMode = true
+            discovery?.stop(); discovery = null
+            addressLabel.visibility = View.VISIBLE; server.visibility = View.VISIBLE
+            pin.nextFocusUpId = server.id
+            status?.text = "Enter your server address and home passcode."
+            server.requestFocus()
+        }
+        discoveryControls.addView(manual)
+        lateinit var connect: Button
+        connect = button("Connect") {
+            val address = server.text.toString()
+            val code = pin.text.toString()
+            if (code.isBlank()) { status?.text = "Enter your home passcode."; pin.requestFocus() }
+            else {
+                connect.isEnabled = false; status?.text = "Connecting..."
+                async({ api.login(address, code) }, {
+                    pin.text.clear()
+                    (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(pin.windowToken, 0)
+                    loadCameras()
+                }, { error -> connect.isEnabled = true; status?.text = error.message ?: "Could not connect."; connect.requestFocus() })
+            }
+        }
+        form.addView(connect)
+        pin.setOnEditorActionListener { _, action, _ ->
+            if (action == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) { connect.performClick(); true } else false
+        }
+        note(form, "Aviary finds its server on the same home network. No VPN app is needed.")
+        server.nextFocusDownId = pin.id; pin.nextFocusUpId = server.id; pin.nextFocusDownId = connect.id
+        connect.nextFocusUpId = pin.id
+        pin.nextFocusUpId = rescan.id
+        rescan.nextFocusDownId = pin.id; manual.nextFocusDownId = pin.id
+        var matched = false
+        val ticket = generation
+        discovery = AviaryDiscovery(this, { candidate ->
+            async({ api.verifyDiscovery(candidate) }, { address ->
+                if (!matched && !manualMode && ticket == generation) {
+                    matched = true; server.setText(address)
+                    status?.text = "Aviary found. Enter your home passcode."
+                    discovery?.stop(); discovery = null
+                    pin.requestFocus()
+                }
+            }, { /* A service advertisement is only trusted after HTTP identity validation. */ })
+        }, {
+            if (!matched && ticket == generation) status?.text = if (api.base.isNotEmpty())
+                "No new server found. Your saved connection is ready, or scan again."
+                else "No Aviary server found. Check the home network, then scan again."
+        }).also { it.start() }
+        rescan.requestFocus()
+    }
+
+    private fun loadCameras() {
+        mode = "grid"
+        val parent = page("Cameras")
+        status = note(parent, "Connecting to your aviary...")
+        parent.addView(button("Retry") { loadCameras() })
+        parent.addView(button("Connection settings") { showConnect() })
+        async({ api.cameras() }, { cameras = it; showGrid() })
+    }
+
+    private fun showGrid() {
+        mode = "grid"; fullClip = null
+        muteHomeAudio()
+        clearScreen()
+        val frame = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        setContentView(frame)
+        val home = column().apply { clipChildren = false; clipToPadding = false }
+        frame.addView(home, FrameLayout.LayoutParams(-1, -1))
+        val grid = FrameLayout(this).apply { tag = "camera-wall" }
+        home.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
+        home.addView(appStrip(), LinearLayout.LayoutParams(-1, px(appStripHeight)))
+        val clock = text("", 17f).apply {
+            typeface = Typeface.MONOSPACE
+            setPadding(px(9), px(5), px(9), px(5)); background = fill(0xD90B0C0E.toInt(), Color.TRANSPARENT, 0)
+        }
+        frame.addView(clock, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply {
+            topMargin = px(12); marginEnd = px(24)
+        })
+        fun updateClock() {
+            if (mode != "grid" || !started) return
+            clock.text = android.text.format.DateFormat.getTimeFormat(this).format(java.util.Date())
+            handler.postDelayed({ updateClock() }, 1000)
+        }
+        updateClock()
+        val overlay = column().apply {
+            setPadding(px(32), px(16), px(32), px(12))
+            setBackgroundColor(0xF20B0C0E.toInt()); visibility = View.GONE
+        }
+        frame.addView(overlay, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        wallOverlay = overlay
+        val toolbar = row()
+        val replay = button("Replays") { cursors.clear(); cursors.add(null); showClips(true) }
+        lateinit var audio: Button
+        audio = button(if (sound) "Sound on" else "Sound off") { sound = !sound; audio.text = if (sound) "Sound on" else "Sound off"; audio.contentDescription = audio.text; applyAudio() }
+        wallSoundButton = audio
+        val gridMode = button(if (allLive) "Grid: live" else "Grid: previews") {
+            allLive = !allLive; getPreferences(MODE_PRIVATE).edit().putBoolean("allLive", allLive).apply(); showGrid()
+        }
+        val refresh = button("Refresh") { loadCameras() }
+        val settings = button("Settings") {
+            AlertDialog.Builder(this).setTitle("Aviary TV").setItems(arrayOf("Change connection", "Home button helper", "Sign out")) { _, which ->
+                when (which) {
+                    1 -> showHomeHandoff()
+                    2 -> { api.signOut(); showConnect() }
+                    else -> showConnect()
+                }
+            }.setNegativeButton("Cancel", null).show()
+        }
+        val controls = listOf(replay, audio, gridMode, refresh, settings)
+        controls.forEach { toolbar.addView(it) }; overlay.addView(toolbar)
+        wallFirst = replay
+        status = note(overlay, "").apply { visibility = View.GONE }
+        if (cameras.isEmpty()) {
+            status?.visibility = View.VISIBLE; status?.text = "No cameras are configured on this server."
+            overlay.visibility = View.VISIBLE; refresh.requestFocus(); return
+        }
+        selected = selected.coerceIn(cameras.indices)
+        val columns = kotlin.math.ceil(kotlin.math.sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
+        cameras.forEachIndexed { index, camera ->
+                val card = FrameLayout(this).apply {
+                    id = View.generateViewId(); tag = "camera-$index"
+                    isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                    setBackgroundColor(backgroundColor)
+                    foreground = StateListDrawable().apply {
+                        addState(intArrayOf(android.R.attr.state_focused), fill(Color.TRANSPARENT, green, 1).apply { cornerRadius = 0f })
+                        addState(intArrayOf(), fill(Color.TRANSPARENT, Color.TRANSPARENT, 0))
+                    }
+                    setPadding(px(1), px(1), px(1), px(1))
+                    clipChildren = true; clipToPadding = true
+                    contentDescription = "${camera.name}, cropped wall view. OK opens the whole frame."
+                    setOnClickListener { selected = index; fullClip = null; showFull() }
+                    setOnFocusChangeListener { _, focused -> if (focused) { selected = index; applyAudio(); if (!allLive) startSelectedPreview() } }
+                    setOnKeyListener { _, key, event ->
+                        if (key == KeyEvent.KEYCODE_DPAD_UP && index < columns) {
+                            if (event.action == KeyEvent.ACTION_DOWN) showWallControls()
+                            true
+                        } else false
+                    }
+                }
+                cards += card
+                val image = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(backgroundColor) }
+                card.addView(image, FrameLayout.LayoutParams(-1, -1))
+                val playerView = playerView().apply { resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM }
+                card.addView(playerView, FrameLayout.LayoutParams(-1, -1))
+                val state = text("Connecting", 12f).apply { setBackgroundColor(0xE0131418.toInt()); setTextColor(muted); setPadding(px(8), px(4), px(8), px(4)) }
+                card.addView(state, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
+                slots += Slot(index, camera, playerView, state, image)
+        }
+        if (cards.size == 3) {
+            // A 2:1 split gives all three tiles the same aspect ratio: no empty
+            // fourth cell, and the same proportional center crop on every feed.
+            val split = row()
+            grid.addView(split, FrameLayout.LayoutParams(-1, -1))
+            split.addView(cards[0], LinearLayout.LayoutParams(0, -1, 2f))
+            val right = column()
+            split.addView(right, LinearLayout.LayoutParams(0, -1, 1f))
+            right.addView(cards[1], LinearLayout.LayoutParams(-1, 0, 1f))
+            right.addView(cards[2], LinearLayout.LayoutParams(-1, 0, 1f))
+        } else {
+            val rows = column()
+            grid.addView(rows, FrameLayout.LayoutParams(-1, -1))
+            cards.chunked(columns).forEach { group ->
+                val line = row()
+                rows.addView(line, LinearLayout.LayoutParams(-1, 0, 1f))
+                group.forEach { line.addView(it, LinearLayout.LayoutParams(0, -1, 1f)) }
+            }
+        }
+        cards.forEachIndexed { index, card ->
+            if (cards.size == 3) {
+                card.nextFocusLeftId = cards[0].id
+                card.nextFocusRightId = if (index == 0) cards[1].id else card.id
+                card.nextFocusUpId = if (index == 2) cards[1].id else replay.id
+            } else {
+                card.nextFocusLeftId = if (index % columns > 0) cards[index - 1].id else card.id
+                card.nextFocusRightId = if (index % columns < columns - 1) cards.getOrNull(index + 1)?.id ?: card.id else card.id
+                card.nextFocusUpId = cards.getOrNull(index - columns)?.id ?: replay.id
+            }
+            card.nextFocusDownId = cameraDownId(index)
+        }
+        controls.forEachIndexed { index, control ->
+            control.nextFocusDownId = cards[selected].id
+            control.nextFocusLeftId = controls.getOrNull(index - 1)?.id ?: control.id
+            control.nextFocusRightId = controls.getOrNull(index + 1)?.id ?: control.id
+        }
+        appButtons.forEachIndexed { index, app ->
+            app.nextFocusUpId = cards[selected].id
+            app.nextFocusLeftId = appButtons.getOrNull(index - 1)?.id ?: app.id
+            app.nextFocusRightId = appButtons.getOrNull(index + 1)?.id ?: app.id
+            app.nextFocusDownId = app.id
+        }
+        slots.forEach { if (allLive && it.index < 4) it.startLive() else it.preview() }
+        cards[selected].requestFocus()
+        refreshSnapshots()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun populateApps(row: LinearLayout) {
+        val candidates = (listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER).flatMap { category ->
+            packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(category), 0)
+        } + listOfNotNull(packageManager.resolveActivity(Intent(android.provider.Settings.ACTION_SETTINGS), 0)))
+            .distinctBy { it.activityInfo.packageName }.filter { it.activityInfo.packageName != packageName }
+            .sortedBy { it.loadLabel(packageManager).toString().lowercase() }
+        appCandidates = candidates
+        val configurable = candidates.filter { it.activityInfo.packageName != "com.android.tv.settings" }
+        val available = configurable.map { it.activityInfo.packageName }
+        val pins = AppPins.visible(readPins(), available)
+        if (readPins() == null) writePins(pins)
+        fun addApp(info: android.content.pm.ResolveInfo, pinned: Boolean) {
+            val label = info.loadLabel(packageManager).toString()
+            val packageId = info.activityInfo.packageName
+            val tile = FrameLayout(this).apply {
+                id = View.generateViewId(); tag = "app-$packageId"
+                isFocusable = true; isFocusableInTouchMode = true; isClickable = true
+                setPadding(px(4), px(4), px(4), px(4))
+                clipChildren = false; clipToPadding = false
+                setOnClickListener {
+                    if (arrangingApps && pinned) {
+                        pickedApp = if (pickedApp == packageId) null else packageId
+                        updateAppTileStyles(); showArrangeHint()
+                    } else if (!arrangingApps) launchApp(info)
+                }
+                if (pinned) setOnLongClickListener {
+                    consumeArrangeRelease = confirmKeyHeld
+                    if (!arrangingApps) beginArrangingApps(packageId)
+                    true
+                }
+                setOnFocusChangeListener { _, _ -> updateAppTileStyles() }
+            }
+            val banner = if (pinned) runCatching { info.activityInfo.loadBanner(packageManager) }.getOrNull() else null
+            if (banner != null) {
+                tile.addView(ImageView(this).apply {
+                    setImageDrawable(banner); scaleType = ImageView.ScaleType.FIT_CENTER
+                }, FrameLayout.LayoutParams(-1, -1))
+            } else {
+                val fallback = column().apply { gravity = Gravity.CENTER }
+                fallback.addView(ImageView(this).apply {
+                    setImageDrawable(info.loadIcon(packageManager)); scaleType = ImageView.ScaleType.FIT_CENTER
+                }, LinearLayout.LayoutParams(px(40), px(40)))
+                fallback.addView(text(label, 12f).apply {
+                    gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                    setPadding(0, px(3), 0, 0)
+                }, LinearLayout.LayoutParams(-1, -2))
+                tile.addView(fallback, FrameLayout.LayoutParams(-1, -1))
+            }
+            tile.addView(text("‹  Move  ›", 11f, true).apply {
+                tag = "picked-badge"; visibility = View.GONE; gravity = Gravity.CENTER
+                setTextColor(Color.BLACK); setBackgroundColor(green); setPadding(px(6), px(2), px(6), px(2))
+            }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+            row.addView(tile, LinearLayout.LayoutParams(px(144), -1).apply { marginEnd = px(12) })
+            appButtons += tile
+            appLabels[tile.tag.toString()] = label
+        }
+        pins.mapNotNull { packageId -> configurable.firstOrNull { it.activityInfo.packageName == packageId } }
+            .forEach { addApp(it, true) }
+        val manage = button("Apps") { showAppsMenu(appCandidates) }.apply {
+            tag = "manage-apps"; background = null
+            setOnFocusChangeListener { _, _ -> updateAppTileStyles() }
+        }
+        row.addView(manage, LinearLayout.LayoutParams(px(112), -1).apply { marginEnd = px(12) })
+        appButtons += manage; appLabels["manage-apps"] = "Apps"
+        candidates.firstOrNull { it.activityInfo.packageName == "com.android.tv.settings" }?.let { addApp(it, false) }
+        wireAppFocus(); updateAppTileStyles()
+    }
+
+    private fun pinnedTiles() = appButtons.filter { (it.tag as? String)?.startsWith("app-") == true && it.tag != "app-com.android.tv.settings" }
+    private fun cameraDownId(index: Int): Int {
+        val next = if (cards.size == 3) { if (index == 1) 2 else -1 }
+                   else index + kotlin.math.ceil(kotlin.math.sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
+        return cards.getOrNull(next)?.id ?: appButtons.firstOrNull()?.id ?: cards[index].id
+    }
+    private fun wireAppFocus() {
+        appButtons.forEachIndexed { index, app ->
+            app.nextFocusLeftId = appButtons.getOrNull(index - 1)?.id ?: app.id
+            app.nextFocusRightId = appButtons.getOrNull(index + 1)?.id ?: app.id
+            app.nextFocusDownId = app.id
+            app.nextFocusUpId = cards.getOrNull(selected)?.id ?: View.NO_ID
+        }
+        cards.forEachIndexed { index, card -> card.nextFocusDownId = cameraDownId(index) }
+    }
+    private fun updateAppTileStyles() {
+        val pins = pinnedTiles()
+        appButtons.forEach { tile ->
+            val picked = pickedApp != null && tile.tag == "app-$pickedApp"
+            val scale = if (picked) 1.10f else if (tile.hasFocus()) 1.06f else 1f
+            tile.scaleX = scale; tile.scaleY = scale
+            tile.alpha = if (picked || tile.hasFocus()) 1f else 0.76f
+            tile.translationZ = if (picked) px(8).toFloat() else if (tile.hasFocus()) px(4).toFloat() else 0f
+            tile.findViewWithTag<TextView>("picked-badge")?.visibility = if (picked) View.VISIBLE else View.GONE
+            val label = appLabels[tile.tag.toString()].orEmpty()
+            val index = pins.indexOf(tile)
+            tile.contentDescription = if (arrangingApps && index >= 0)
+                "$label, ${index + 1} of ${pins.size}. ${if (picked) "Picked up. Left or right moves; OK drops." else "OK picks up."} Back finishes."
+                else if (tile.tag == "manage-apps") "Apps" else "Open $label"
+        }
+    }
+    private fun showArrangeHint() {
+        if (!arrangingApps) return
+        arrangeHint?.apply {
+            text = if (pickedApp == null) "Arrange apps   ·   ← → choose   ·   OK pick up   ·   Back done"
+                   else "← → move   ·   OK drop   ·   Back done"
+            visibility = View.VISIBLE
+        }
+        handler.removeCallbacks(hideArrangeHint); handler.postDelayed(hideArrangeHint, 4000)
+    }
+    private fun beginArrangingApps(packageId: String) {
+        arrangingApps = true; pickedApp = null
+        handler.removeCallbacks(hideWallControls); wallOverlay?.visibility = View.GONE
+        appButtons.firstOrNull { it.tag == "app-$packageId" }?.requestFocus()
+        updateAppTileStyles(); showArrangeHint()
+    }
+    private fun finishArrangingApps() {
+        arrangingApps = false; pickedApp = null
+        handler.removeCallbacks(hideArrangeHint); arrangeHint?.visibility = View.GONE
+        updateAppTileStyles()
+    }
+    private fun movePickedApp(offset: Int) {
+        val row = appRow ?: return
+        val pins = pinnedTiles()
+        val index = pins.indexOfFirst { it.tag == "app-$pickedApp" }
+        if (index < 0) return
+        val target = (index + offset).coerceIn(pins.indices)
+        if (target == index) return
+        val tile = pins[index]
+        val neighbor = pins[target]
+        // Move the unfocused neighbor: the picked tile never detaches or loses focus.
+        val params = neighbor.layoutParams
+        row.removeView(neighbor); row.addView(neighbor, index, params)
+        appButtons[index] = neighbor; appButtons[target] = tile
+        writePins(pinnedTiles().map { it.tag.toString().removePrefix("app-") })
+        wireAppFocus(); updateAppTileStyles(); showArrangeHint()
+        row.post {
+            if (appRow === row) {
+                tile.requestRectangleOnScreen(android.graphics.Rect(0, 0, tile.width, tile.height), false)
+                @Suppress("DEPRECATION")
+                tile.announceForAccessibility("${appLabels[tile.tag.toString()]}, position ${target + 1} of ${pins.size}")
+            }
+        }
+    }
+
+    private fun readPins(): List<String>? = getSharedPreferences("launcher", MODE_PRIVATE).getString("pins", null)?.let { value ->
+        runCatching { org.json.JSONArray(value).let { array -> (0 until array.length()).map { array.getString(it) } } }.getOrNull()
+    }
+    private fun writePins(pins: List<String>) {
+        getSharedPreferences("launcher", MODE_PRIVATE).edit().putString("pins", org.json.JSONArray(pins).toString()).apply()
+    }
+    private fun refreshAppStrip(focusTag: String = "manage-apps") {
+        val row = appRow ?: return
+        finishArrangingApps()
+        row.isFocusable = true; row.isFocusableInTouchMode = true
+        row.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS; row.requestFocus()
+        row.removeAllViews(); appButtons.clear(); appLabels.clear()
+        populateApps(row)
+        row.post {
+            if (appRow === row) {
+                row.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                (appButtons.firstOrNull { it.tag == focusTag } ?: appButtons.firstOrNull())?.requestFocus()
+                row.isFocusable = false; row.isFocusableInTouchMode = false
+            }
+        }
+    }
+    private fun launchApp(info: android.content.pm.ResolveInfo) {
+        val launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            .setComponent(ComponentName(info.activityInfo.packageName, info.activityInfo.name))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        runCatching { startActivity(launch) }.onFailure {
+            Toast.makeText(this, "This app could not open.", Toast.LENGTH_SHORT).show()
+        }
+    }
+    private fun showAppsMenu(apps: List<android.content.pm.ResolveInfo>) {
+        val labels = arrayOf("Choose apps for the row", "Arrange the row", "Home button helper") + apps.map { it.loadLabel(packageManager).toString() }
+        AlertDialog.Builder(this).setTitle("Apps").setItems(labels) { _, index ->
+            when (index) {
+                0 -> showAppPicker(apps.filter { it.activityInfo.packageName != "com.android.tv.settings" })
+                1 -> {
+                    val first = pinnedTiles().firstOrNull()?.tag?.toString()?.removePrefix("app-")
+                    if (first == null) showAppPicker(apps.filter { it.activityInfo.packageName != "com.android.tv.settings" })
+                    else handler.post { beginArrangingApps(first) }
+                }
+                2 -> showHomeHandoff()
+                else -> launchApp(apps[index - 3])
+            }
+        }.setNegativeButton("Close", null).show()
+    }
+    private fun showHomeHandoff() {
+        val manager = getSystemService(ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
+        val enabled = manager.getEnabledAccessibilityServiceList(android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .any { it.resolveInfo.serviceInfo.let { info -> info.packageName == packageName && info.name == HomeHandoffService::class.java.name } }
+        AlertDialog.Builder(this).setTitle("Home button helper: ${if (enabled) "On" else "Off"}")
+            .setMessage("Some TCL TVs keep Google TV as Home even after choosing Aviary. This optional helper opens Aviary when the Google TV Home screen appears.\n\n" +
+                "It checks only that screen’s app and activity name. It does not read screen text, request window contents or intercept keys. It does not record activity or send data. Other apps and Settings are ignored.\n\n" +
+                "Off by default. To use it, enable ‘Aviary Home button helper’ in Android Accessibility settings. Turn it off there at any time. Google TV and Setup Wizard stay installed and enabled.")
+            .setPositiveButton("Open Accessibility settings") { _, _ ->
+                runCatching { startActivity(Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.onFailure {
+                    Toast.makeText(this, "Open Accessibility from the TV’s system Settings.", Toast.LENGTH_LONG).show()
+                }
+            }.setNegativeButton("Close", null).show()
+    }
+    private fun showAppPicker(apps: List<android.content.pm.ResolveInfo>) {
+        val before = readPins() ?: emptyList()
+        val selected = before.toMutableSet()
+        val dialog = AlertDialog.Builder(this).setTitle("Choose apps for the row")
+            .setMultiChoiceItems(apps.map { it.loadLabel(packageManager).toString() }.toTypedArray(),
+                apps.map { it.activityInfo.packageName in selected }.toBooleanArray()) { _, index, checked ->
+                val id = apps[index].activityInfo.packageName
+                if (checked) selected.add(id) else selected.remove(id)
+            }.setPositiveButton("Save") { _, _ ->
+                writePins(AppPins.select(before, apps.map { it.activityInfo.packageName }.filter { it in selected }))
+                refreshAppStrip("manage-apps")
+            }.setNegativeButton("Cancel", null).create()
+        dialog.setOnShowListener {
+            dialog.listView.setOnKeyListener { _, keyCode, event ->
+                if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    dialog.getButton(AlertDialog.BUTTON_POSITIVE).requestFocus(); true
+                } else if (event.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).requestFocus(); true
+                } else false
+            }
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).nextFocusUpId = dialog.listView.id
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).nextFocusUpId = dialog.listView.id
+        }
+        dialog.show()
+    }
+    private fun appStrip(): View {
+        val frame = FrameLayout(this).apply { tag = "app-strip"; clipChildren = false; clipToPadding = false }
+        val apps = HorizontalScrollView(this).apply {
+            isFocusable = false; isHorizontalScrollBarEnabled = false
+            setBackgroundColor(backgroundColor); clipChildren = false; clipToPadding = false
+        }
+        val row = row().apply { setPadding(px(28), px(10), px(28), px(10)); clipChildren = false; clipToPadding = false }
+        appRow = row
+        apps.addView(row)
+        frame.addView(apps, FrameLayout.LayoutParams(-1, -1))
+        arrangeHint = text("", 12f).apply {
+            setPadding(px(10), px(4), px(10), px(4)); setBackgroundColor(0xF20B0C0E.toInt()); visibility = View.GONE
+        }.also { frame.addView(it, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = -px(28) }) }
+        populateApps(row)
+        return frame
+    }
+
+    private fun showWallControls() {
+        wallOverlay?.visibility = View.VISIBLE
+        wallFirst?.requestFocus()
+        handler.removeCallbacks(hideWallControls); handler.postDelayed(hideWallControls, 6000)
+    }
+
+    private fun startSelectedPreview() {
+        slots.forEach { if (it.index == selected) { if (it.player == null) it.startLive() } else if (it.player != null) it.preview() }
+    }
+    private fun muteHomeAudio() {
+        sound = false
+        wallSoundButton?.text = "Sound off"
+        wallSoundButton?.contentDescription = "Sound off"
+        applyAudio()
+    }
+    private fun applyAudio() {
+        if (sound && !audioGranted) audioGranted = audioManager.requestAudioFocus(audioRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        if (!sound && audioGranted) { audioManager.abandonAudioFocusRequest(audioRequest); audioGranted = false }
+        updateVolumes()
+    }
+    private fun updateVolumes() { slots.forEach { it.player?.volume = if (sound && audioGranted && (mode == "full" || it.index == selected)) 1f else 0f } }
+
+    private fun refreshSnapshots() {
+        if (mode != "grid") return
+        slots.filter { it.player == null && !it.snapshotBusy }.forEach { slot ->
+            val camera = slot.camera ?: return@forEach
+            slot.snapshotBusy = true
+            async({ api.snapshot(camera) }, { bitmap ->
+                slot.snapshotBusy = false
+                if (slot.player == null) {
+                    slot.image?.setImageBitmap(bitmap)
+                    slot.state.text = if (bitmap == null) "Preview unavailable" else "Preview / 5s"
+                }
+            }, { error -> slot.snapshotBusy = false; if (error is LoginRequired) showError(error) else if (slot.player == null) slot.state.text = "Preview unavailable" })
+        }
+        handler.postDelayed({ refreshSnapshots() }, 5000)
+    }
+
+    private fun showClips(reload: Boolean) {
+        mode = "clips"
+        val parent = page("Replays")
+        val toolbar = row()
+        val live = button("Live cameras") { showGrid() }
+        val highlights = button(if (clipView == "highlights") "Highlights selected" else "Highlights") {
+            clipView = "highlights"; cursors.clear(); cursors.add(null); showClips(true)
+        }
+        val recordings = button(if (clipView == "recordings") "Recordings selected" else "Recordings") {
+            clipView = "recordings"; cursors.clear(); cursors.add(null); showClips(true)
+        }
+        listOf(live, highlights, recordings).forEach { toolbar.addView(it) }; parent.addView(toolbar)
+        status = note(parent, if (reload) "Loading replays..." else "Choose a recording. Back returns to live cameras.")
+        if (reload) {
+            parent.addView(button("Retry") { showClips(true) })
+            async({ api.clips(clipView, cursors.last()) }, { clipPage = it; clipIndex = 0; showClips(false) })
+            return
+        }
+        val scroll = ScrollView(this).apply { isFocusable = false }
+        val list = column(); scroll.addView(list)
+        parent.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val entries = mutableListOf<View>()
+        clipPage.clips.forEachIndexed { index, clip ->
+            val cameraName = cameras.firstOrNull { it.id == clip.camera }?.name ?: clip.camera
+            val title = "${formatTime(clip.time)}  /  $cameraName  /  ${clip.duration.roundToInt()}s\n${clip.caption}"
+            val entry = button(title) { clipIndex = index; fullClip = clip; replayPosition = 0; replayPlaying = true; showFull() }.apply {
+                tag = "clip-$index"; gravity = Gravity.CENTER_VERTICAL or Gravity.START; maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            list.addView(entry, LinearLayout.LayoutParams(-1, px(72)).apply { bottomMargin = px(8) })
+            entries += entry
+        }
+        if (entries.isEmpty()) status?.text = if (clipView == "highlights") "No approved highlights yet. Open Recordings to watch recent footage." else "No recordings in this page."
+        val paging = row()
+        if (cursors.size > 1) paging.addView(button("Newer") { cursors.removeAt(cursors.lastIndex); showClips(true) }.also { entries += it })
+        if (clipPage.next != null) paging.addView(button("Older") { cursors.add(clipPage.next); showClips(true) }.also { entries += it })
+        list.addView(paging)
+        entries.forEachIndexed { index, entry ->
+            entry.nextFocusUpId = entries.getOrNull(index - 1)?.id ?: highlights.id
+            entry.nextFocusDownId = entries.getOrNull(index + 1)?.id ?: entry.id
+        }
+        listOf(live, highlights, recordings).forEach { it.nextFocusDownId = entries.firstOrNull()?.id ?: it.id }
+        (entries.getOrNull(clipIndex) ?: recordings).requestFocus()
+    }
+    private fun formatTime(value: String): String = try {
+        java.time.Instant.parse(value).atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("MMM d, h:mm a"))
+    } catch (_: Exception) { value.take(19).replace('T', ' ') }
+
+    private fun showFull() {
+        mode = "full"
+        clearScreen()
+        val frame = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        setContentView(frame)
+        val video = playerView()
+        frame.addView(video, FrameLayout.LayoutParams(-1, -1))
+        val overlay = column().apply { setPadding(px(36), px(18), px(36), px(18)); setBackgroundColor(0xEB0B0C0E.toInt()) }
+        fullOverlay = overlay
+        frame.addView(overlay, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        val clip = fullClip
+        val camera = if (clip == null) cameras.getOrNull(selected) else null
+        if (clip == null && camera == null) { loadCameras(); return }
+        overlay.addView(text(if (clip == null) camera!!.name else "${formatTime(clip.time)}  /  ${clip.caption}", 22f, true).apply {
+            maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        val state = note(overlay, "Connecting...")
+        fullStatus = state
+        val controls = row()
+        val back = button(if (clip == null) "Camera grid" else "Replays") { goBack() }; controls.addView(back)
+        fullBack = back
+        lateinit var toggle: Button
+        toggle = button("Pause") {
+            slots.firstOrNull()?.player?.let { it.playWhenReady = !it.playWhenReady; toggle.text = if (it.playWhenReady) "Pause" else "Play" }
+        }
+        controls.addView(toggle)
+        playButton = toggle
+        if (clip != null) {
+            controls.addView(button("Back 10s") { seek(-10_000) })
+            controls.addView(button("Forward 10s") { seek(10_000) })
+        } else controls.addView(button("Go live") { slots.firstOrNull()?.player?.let { it.seekToDefaultPosition(); it.play() } })
+        lateinit var audio: Button
+        audio = button(if (sound) "Sound on" else "Sound off") { sound = !sound; audio.text = if (sound) "Sound on" else "Sound off"; audio.contentDescription = audio.text; applyAudio() }
+        controls.addView(audio)
+        controls.addView(button("Retry") { showFull() })
+        overlay.addView(controls)
+        if (clip != null) note(overlay, "Remote left / right moves between controls. Rewind / fast-forward skips 10 seconds.")
+        val slot = Slot(selected, camera, video, state, null)
+        slots += slot
+        if (clip == null) slot.startLive() else slot.start(clip.video, false)
+        back.requestFocus()
+        handler.postDelayed(hideControls, 6000)
+        if (clip != null) updateReplayClock()
+    }
+
+    private fun updateReplayClock() {
+        if (mode != "full" || fullClip == null) return
+        slots.firstOrNull()?.player?.let { player ->
+            if (player.playbackState == Player.STATE_READY) {
+                fun clock(ms: Long): String = "%d:%02d".format(ms.coerceAtLeast(0) / 60000, (ms.coerceAtLeast(0) / 1000) % 60)
+                fullStatus?.text = "${if (player.playWhenReady) "Playing" else "Paused"}  ${clock(player.currentPosition)} / ${clock(player.duration)}"
+            }
+        }
+        handler.postDelayed({ updateReplayClock() }, 1000)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val confirm = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER
+        if (confirm) {
+            if (event.action == KeyEvent.ACTION_DOWN) confirmKeyHeld = true
+            if (event.action == KeyEvent.ACTION_UP) {
+                confirmKeyHeld = false
+                if (consumeArrangeRelease) {
+                    consumeArrangeRelease = false; currentFocus?.isPressed = false; return true
+                }
+            } else if (consumeArrangeRelease) return true
+        }
+        if (arrangingApps && event.keyCode in listOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_MENU)) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT || event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    val offset = if (event.keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+                    if (pickedApp != null) movePickedApp(offset)
+                    else {
+                        val pins = pinnedTiles()
+                        val index = pins.indexOf(currentFocus)
+                        if (index >= 0) pins[(index + offset).coerceIn(pins.indices)].requestFocus()
+                    }
+                }
+                showArrangeHint()
+            }
+            return true
+        }
+        val navigation = event.keyCode in listOf(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT)
+        if (mode == "grid") {
+            if (event.keyCode == KeyEvent.KEYCODE_MENU) {
+                if (event.action == KeyEvent.ACTION_DOWN) showWallControls()
+                return true
+            }
+            if (navigation && wallOverlay?.visibility == View.VISIBLE) {
+                handler.removeCallbacks(hideWallControls); handler.postDelayed(hideWallControls, 6000)
+            }
+        }
+        if (mode == "full" && navigation) {
+            if (fullOverlay?.visibility == View.GONE) {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    fullOverlay?.visibility = View.VISIBLE
+                    fullBack?.requestFocus()
+                    handler.removeCallbacks(hideControls); handler.postDelayed(hideControls, 6000)
+                }
+                return true
+            }
+            handler.removeCallbacks(hideControls); handler.postDelayed(hideControls, 6000)
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun seek(delta: Long) {
+        slots.firstOrNull()?.player?.let { player ->
+            val end = if (player.duration == C.TIME_UNSET) Long.MAX_VALUE else player.duration
+            player.seekTo((player.currentPosition + delta).coerceIn(0, end))
+        }
+    }
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (mode == "full") when (keyCode) {
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { slots.firstOrNull()?.player?.let { it.playWhenReady = !it.playWhenReady }; return true }
+            KeyEvent.KEYCODE_MEDIA_PLAY -> { slots.firstOrNull()?.player?.play(); return true }
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> { slots.firstOrNull()?.player?.pause(); return true }
+            KeyEvent.KEYCODE_MEDIA_REWIND -> { if (fullClip != null) seek(-10_000); return true }
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { if (fullClip != null) seek(10_000); return true }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    private fun playerView() = (layoutInflater.inflate(R.layout.player, null) as PlayerView).apply {
+        isFocusable = false; descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        useController = false
+        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+    }
+
+    private inner class Slot(val index: Int, val camera: Camera?, val view: PlayerView, val state: TextView, val image: ImageView?) {
+        var player: ExoPlayer? = null
+        var snapshotBusy = false
+        private var retries = 0
+        private var released = false
+        private var address = ""
+        private var live = true
+        private var bufferingSince = 0L
+        private var retryPending = false
+        private val ticket = generation
+        private val watchdog = object : Runnable {
+            override fun run() {
+                if (released || ticket != generation || player == null) return
+                val current = player!!
+                if (current.playWhenReady && current.playbackState == Player.STATE_BUFFERING) {
+                    if (bufferingSince == 0L) bufferingSince = android.os.SystemClock.elapsedRealtime()
+                    if (android.os.SystemClock.elapsedRealtime() - bufferingSince > 30_000) { bufferingSince = 0; retry() }
+                } else bufferingSince = 0
+                handler.postDelayed(this, 5000)
+            }
+        }
+        fun startLive() { camera?.let { start(api.url("/api/cameras/${android.net.Uri.encode(it.id)}/hls/live.m3u8"), true) } }
+        fun start(url: String, isLive: Boolean) {
+            player?.release(); released = false; address = url; live = isLive
+            view.visibility = View.VISIBLE
+            val factory = DefaultHttpDataSource.Factory().setConnectTimeoutMs(8000).setReadTimeoutMs(12000)
+                .setDefaultRequestProperties(mapOf("Cookie" to api.cookie)).setUserAgent("AviaryTV/0.1")
+            val source = DefaultMediaSourceFactory(factory)
+            val instance = ExoPlayer.Builder(this@MainActivity).setMediaSourceFactory(source)
+                .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(2000, 10000, 1000, 1500).build()).build()
+            instance.volume = 0f
+            player = instance; view.player = instance
+            // A single selected stream has audible volume. Other grid decoders stay muted.
+            instance.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MOVIE).build(), false)
+            instance.addListener(object : Player.Listener {
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                    if (!released && mode == "full") playButton?.text = if (playWhenReady) "Pause" else "Play"
+                }
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (released) return
+                    state.visibility = if (mode == "grid" && playbackState == Player.STATE_READY) View.INVISIBLE else View.VISIBLE
+                    state.text = when (playbackState) {
+                        Player.STATE_READY -> { retries = 0; if (live) "LIVE" else "Replay" }
+                        Player.STATE_ENDED -> if (live) "Reconnecting..." else "Replay finished"
+                        Player.STATE_BUFFERING -> "Buffering..."
+                        else -> "Connecting..."
+                    }
+                    if (live && playbackState == Player.STATE_ENDED) retry()
+                }
+                override fun onPlayerError(error: PlaybackException) {
+                    if (released) return
+                    var cause: Throwable? = error
+                    while (cause != null) {
+                        if (cause is HttpDataSource.InvalidResponseCodeException && cause.responseCode in listOf(401, 403)) {
+                            handler.post { if (ticket == generation) showError(LoginRequired()) }; return
+                        }
+                        cause = cause.cause
+                    }
+                    if (mode == "grid" && error.errorCode in 4000..4999) {
+                        handler.post { if (ticket == generation) { preview(); status?.text = "This TV reached its decoder limit. Preview tiles refresh every 5 seconds; select for full screen." } }
+                    } else retry()
+                }
+            })
+            prepare()
+            if (!live && replayPosition > 0) instance.seekTo(replayPosition)
+            instance.playWhenReady = live || replayPlaying
+            applyAudio()
+            handler.removeCallbacks(watchdog); handler.postDelayed(watchdog, 5000)
+        }
+        private fun prepare() {
+            player?.setMediaItem(MediaItem.Builder().setUri(address).setMimeType(if (live) MimeTypes.APPLICATION_M3U8 else MimeTypes.VIDEO_MP4).build())
+            player?.prepare()
+        }
+        private fun retry() {
+            if (retryPending || released || player == null) return
+            retryPending = true
+            val delay = (1000L shl retries.coerceAtMost(4)).coerceAtMost(15000)
+            retries++
+            state.text = "Reconnecting in ${delay / 1000}s..."
+            val position = if (live) 0L else player?.currentPosition ?: 0L
+            handler.postDelayed({
+                retryPending = false
+                if (!released && ticket == generation && started) {
+                    prepare()
+                    if (!live) player?.seekTo(position)
+                }
+            }, delay)
+        }
+        fun preview() {
+            player?.let { view.player = null; it.release() }; player = null
+            handler.removeCallbacks(watchdog); view.visibility = View.INVISIBLE
+            state.text = "Preview / 5s"
+            state.visibility = View.VISIBLE
+        }
+        fun release() {
+            released = true; handler.removeCallbacks(watchdog)
+            view.player = null; player?.release(); player = null
+        }
+    }
+}

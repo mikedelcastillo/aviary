@@ -118,9 +118,13 @@ class DetectionLogger:
                 )
                 entry["last_seen_at"] = _iso(observed_at)
                 entry["frame"] = {"width": width, "height": height}
-                self._merge_interval(entry["intervals"], observed_at.timestamp(), end_at)
+                # Only the last interval can change. Re-summing the whole day
+                # here made every positive frame slower as intervals accumulated.
+                added_seconds = self._merge_interval(
+                    entry["intervals"], observed_at.timestamp(), end_at
+                )
                 entry["total_detected_seconds"] = round(
-                    sum(float(item["duration_seconds"]) for item in entry["intervals"]), 3
+                    float(entry["total_detected_seconds"]) + added_seconds, 3
                 )
 
             data["updated_at"] = _iso(datetime.now(timezone.utc))
@@ -195,17 +199,19 @@ class DetectionLogger:
         rows.sort(key=lambda row: (row.label, row.camera))
         return rows
 
-    def _merge_interval(self, intervals: list[dict], start_ts: float, end_ts: float) -> None:
+    def _merge_interval(self, intervals: list[dict], start_ts: float, end_ts: float) -> float:
+        """Merge the sample and return the change in stored duration."""
         if intervals:
             last = intervals[-1]
             last_end = _parse_iso(last["end_at"]).timestamp()
             if start_ts <= last_end + self._merge_gap_seconds:
+                previous_duration = float(last["duration_seconds"])
                 merged_end = max(last_end, end_ts)
                 last["end_at"] = _iso(datetime.fromtimestamp(merged_end, timezone.utc))
                 last["duration_seconds"] = round(
                     merged_end - _parse_iso(last["start_at"]).timestamp(), 3
                 )
-                return
+                return float(last["duration_seconds"]) - previous_duration
         intervals.append(
             {
                 "start_at": _iso(datetime.fromtimestamp(start_ts, timezone.utc)),
@@ -213,6 +219,7 @@ class DetectionLogger:
                 "duration_seconds": round(end_ts - start_ts, 3),
             }
         )
+        return float(intervals[-1]["duration_seconds"])
 
     def _read_day(self, path: Path, observed_at: datetime) -> dict:
         if path.exists():

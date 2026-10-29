@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from lib.detection_log import DetectionLogger
 from lib.detector import Detection
@@ -9,6 +9,28 @@ from lib.detector import Detection
 
 def detection(label: str = "percy", confidence: float = 0.9) -> Detection:
     return Detection(label=label, confidence=confidence, bbox_xyxy=(10, 20, 30, 40))
+
+
+def test_duration_total_matches_intervals_after_gaps_overlap_and_reload(tmp_path) -> None:
+    logger = DetectionLogger(tmp_path, flush_interval_seconds=3600)
+    day = datetime(2026, 6, 27, 0, 0, tzinfo=timezone.utc)
+    # Fractional samples, merged gaps, contained observations, and a new bout.
+    for offset, duration in [(0, 0.333), (0.2, 0.333), (2, 0.777), (2.1, 0.2), (10, 1.123)]:
+        logger.record(
+            camera_name="camera-1", detections=[detection()], frame_size=(100, 100),
+            sample_interval_seconds=duration, observed_at=day + timedelta(seconds=offset),
+        )
+        row = logger.activity_for_day(day)[0]
+        assert row.total_seconds == round(sum(i["duration_seconds"] for i in row.intervals), 3)
+    logger.flush()
+    logger = DetectionLogger(tmp_path, flush_interval_seconds=3600)
+    logger.record(
+        camera_name="camera-1", detections=[detection()], frame_size=(100, 100),
+        sample_interval_seconds=0.5, observed_at=day + timedelta(seconds=12),
+    )
+    row = logger.activity_for_day(day)[0]
+    assert row.total_seconds == 5.277
+    assert row.total_seconds == round(sum(i["duration_seconds"] for i in row.intervals), 3)
 
 
 def test_detection_logger_writes_daily_json_and_merges_intervals(tmp_path) -> None:

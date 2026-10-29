@@ -46,3 +46,8 @@ _*.sh
 
 .venv-train/
 backups/
+
+# Private audit reports, rendered evidence, and deployment scratch files.
+/docs/reports/
+/output/
+/tmp/

@@ -1,0 +1,32 @@
+{
+  "runtime": "/absolute/private/aviary-runtime",
+  "timezone": "UTC",
+  "pin_salt": "GENERATE_RANDOM_HEX_SALT",
+  "pin_hash": "GENERATE_PBKDF2_SHA256_600000_ITERATIONS",
+  "birds": [
+    {"id": "example_bird", "name": "Example bird", "species": "Cockatiel"}
+  ],
+  "cameras": [
+    {"id": "example", "name": "Example view", "onvif_url": "http://CAMERA_HOST:2020/onvif/device_service", "ptz_supported": true}
+  ],
+  "onvif": {"username": "PRIVATE_CAMERA_ACCOUNT", "password": "PRIVATE_CAMERA_PASSWORD"},
+  "relay_http": "http://127.0.0.1:1985",
+  "relay_ws": "ws://127.0.0.1:1985",
+  "relay_rtsp": "rtsp://127.0.0.1:8555",
+  "bird_model": "/absolute/private/models/bird.pt",
+  "person_model": "/absolute/private/models/person.pt",
+  "shared_capture": true,
+  "video_encoder": "libx264",
+  "recording_budget_gb": 8,
+  "ollama_url": "http://127.0.0.1:11434",
+  "ollama_model": "qwen3.5:4b",
+  "curator_model": "qwen3.5:4b",
+  "curation_interval_seconds": 180,
+  "curation_auto_publish": false,
+  "annotation_labels": [
+    {"name": "example_bird", "kind": "individual", "models": ["live", "archive"]},
+    {"name": "cockatiel", "kind": "species", "models": ["live", "archive"]},
+    {"name": "unknown_bird", "kind": "unknown", "models": ["live", "archive"]}
+  ],
+  "photo_sources": []
+}
