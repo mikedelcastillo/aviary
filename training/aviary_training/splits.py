@@ -23,6 +23,7 @@ from random import Random
 
 # camera-N_{day,ir}_YYYY-MM-DD_HHMMSS_hash — the Tapo capture naming.
 _TAPO_RE = re.compile(r"^(?P<camera>camera-\d+)_(?:day|ir)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{6})_")
+_LEARN_RE = re.compile(r"^learn_(?P<date>\d{8})_(?P<bucket>\d{3})_[a-f0-9]{24}$")
 
 
 def group_key(name: str, group_minutes: int = 10) -> str:
@@ -33,6 +34,11 @@ def group_key(name: str, group_minutes: int = 10) -> str:
     never straddles splits. Phone photos and any other naming have no temporal
     bursts, so each is its own group (keyed by its stem).
     """
+    learning = _LEARN_RE.match(Path(name).stem)
+    if learning:
+        # The app exports one group across camera angles for a capture window.
+        # Encoding it in the filename survives later edits in the old annotator.
+        return f"capture:{learning.group('date')}:{learning.group('bucket')}"
     match = _TAPO_RE.match(name)
     if not match:
         return f"solo:{Path(name).stem}"

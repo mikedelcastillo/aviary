@@ -54,6 +54,13 @@ def configure_ffmpeg_capture(cameras: list[CameraConfig] | None = None) -> None:
     same defaults (discovery never customises transport/timeout), so the env
     option is identical whether or not a camera happens to be known yet.
     """
+    # FFmpeg otherwise allocates decoder threads and reference buffers based on
+    # host CPU count for EACH stream. Two threads keep the per-camera footprint
+    # bounded on many-core hosts. Preserve an operator's explicit override (0
+    # restores OpenCV's automatic choice). This does not change sampling or image
+    # resolution, including the frames used by the privacy screen.
+    os.environ.setdefault("OPENCV_FFMPEG_THREADS", "2")
+
     if cameras:
         transport = cameras[0].rtsp_transport
         # FFmpeg's ``timeout`` is the socket I/O timeout in microseconds.
@@ -206,12 +213,11 @@ def monitor_camera(
                         quality_changed = True
                         break
 
-                # grab() pulls the frame off the socket WITHOUT decoding it.
-                # The stream arrives at its native rate (~15fps of up to
-                # 2304x1296 H264) but inference samples at ~1fps, so decoding
-                # every frame burned most of a CPU core per camera for frames
-                # nobody looked at. Decode (retrieve) only when the frame is
-                # actually used: at the inference tick, or to keep the
+                # FFmpeg's grab() still decodes inter-frame video. Delaying
+                # retrieve() avoids conversion/copy into a BGR array for unused
+                # frames; it does not eliminate native-rate H264 decoding.
+                # Retrieve only when the frame is used: at the inference tick,
+                # or to keep the
                 # published /snapshot frame no staler than
                 # SNAPSHOT_REFRESH_SECONDS.
                 if not capture.grab():

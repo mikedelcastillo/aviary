@@ -15,7 +15,7 @@ def test_safe_path_component_removes_path_separators() -> None:
 
 def test_collect_alerted_detections_writes_raw_image_and_metadata(tmp_path) -> None:
     config = CollectConfig(objects=frozenset({"bird"}), directory=tmp_path)
-    camera = CameraConfig(name="camera-1", enabled=True, rtsp_url="rtsp://example")
+    camera = CameraConfig(name="camera-1", enabled=True, rtsp_url="rtsp://user:secret@example/stream1")
     frame = np.zeros((20, 30, 3), dtype=np.uint8)
     detection = Detection(label="bird", confidence=0.91, bbox_xyxy=(1, 2, 11, 12))
 
@@ -30,6 +30,8 @@ def test_collect_alerted_detections_writes_raw_image_and_metadata(tmp_path) -> N
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["object"] == "bird"
     assert metadata["camera"]["name"] == "camera-1"
+    assert "rtsp_url" not in metadata["camera"]
+    assert "secret" not in metadata_path.read_text()
     assert metadata["frame"] == {"width": 30, "height": 20}
     assert metadata["detection"]["bbox_xyxy"] == {"x1": 1, "y1": 2, "x2": 11, "y2": 12}
     assert metadata["detection"]["center"] == {"x": 6.0, "y": 7.0}

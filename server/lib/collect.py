@@ -47,8 +47,12 @@ def write_collection_instance(
 
     height, width = frame.shape[:2]
     x1, y1, x2, y2 = detection.bbox_xyxy
+    # Dataset consumers need the camera identity, never its connection secret.
+    # Keep credentials out of future archive copies and training exports.
+    camera_metadata = asdict(camera)
+    camera_metadata.pop("rtsp_url", None)
     metadata = {
-        "camera": asdict(camera),
+        "camera": camera_metadata,
         "object": detection.label,
         "collected_at": datetime.now(timezone.utc).isoformat(),
         "image_file": image_path.name,
