@@ -33,7 +33,8 @@ class HomeHandoffTest {
 
     @Test fun fabricatedEventsRespectFilterLifecycleAndHomeIntentWithoutPermission() {
         val service = Harness(context)
-        service.onAccessibilityEvent(event())
+        val homeEvent = event()
+        service.onAccessibilityEvent(homeEvent)
         assertTrue(service.launched.isEmpty())
         service.connect()
         service.onAccessibilityEvent(event(type = AccessibilityEvent.TYPE_VIEW_CLICKED))
@@ -41,14 +42,15 @@ class HomeHandoffTest {
         service.onAccessibilityEvent(event("com.android.tv.settings", "com.android.tv.settings.MainSettings"))
         service.onAccessibilityEvent(event(activity = "android.widget.FrameLayout"))
         assertTrue(service.launched.isEmpty())
-        service.onAccessibilityEvent(event())
+        val firstHome = event()
+        service.onAccessibilityEvent(firstHome)
         val launch = service.launched.single()
         assertEquals(Intent.ACTION_MAIN, launch.action)
         assertTrue(launch.hasCategory(Intent.CATEGORY_HOME))
         assertEquals(MainActivity::class.java.name, launch.component?.className)
         assertEquals(context.packageName, launch.component?.packageName)
         assertTrue(launch.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0)
-        service.onAccessibilityEvent(event())
+        service.onAccessibilityEvent(firstHome)
         assertEquals(1, service.launched.size)
         service.onUnbind(Intent())
         service.onAccessibilityEvent(event())
@@ -63,9 +65,10 @@ class HomeHandoffTest {
 
     @Test fun firmwareLaunchDenialDoesNotCrashOrRetryLoop() {
         val service = Harness(context).apply { connect(); denyLaunch = true }
-        service.onAccessibilityEvent(event())
+        val sameEvent = event()
+        service.onAccessibilityEvent(sameEvent)
         service.denyLaunch = false
-        service.onAccessibilityEvent(event())
+        service.onAccessibilityEvent(sameEvent)
         assertTrue(service.launched.isEmpty())
         service.onDestroy()
     }
@@ -79,6 +82,7 @@ class HomeHandoffTest {
         assertArrayEquals(arrayOf(HomeHandoffGate.STOCK_PACKAGE), info.packageNames)
         assertEquals(0, info.capabilities)
         assertEquals(0, info.flags)
+        assertEquals(0L, info.notificationTimeout)
         assertEquals("android.permission.BIND_ACCESSIBILITY_SERVICE", info.resolveInfo.serviceInfo.permission)
         // These fixture tests never enable the service or change global settings.
     }

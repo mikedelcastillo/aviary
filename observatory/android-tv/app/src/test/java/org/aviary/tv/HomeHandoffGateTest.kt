@@ -27,11 +27,12 @@ class HomeHandoffGateTest {
         assertTrue(gate.accept(stockPackage, stockActivity, 9900, 10000))
     }
 
-    @Test fun repeatedHomeEventsDoNotLoop() {
+    @Test fun duplicatesAreIgnoredButRapidRealHomePressesStillWork() {
         val gate = HomeHandoffGate().apply { connect() }
         assertTrue(gate.accept(stockPackage, stockActivity, 10000, 10000))
-        assertFalse(gate.accept(stockPackage, stockActivity, 11000, 11000))
-        assertTrue(gate.accept(stockPackage, stockActivity, 11500, 11500))
+        assertFalse(gate.accept(stockPackage, stockActivity, 10000, 10010))
+        assertFalse(gate.accept(stockPackage, stockActivity, 9999, 10010))
+        assertTrue(gate.accept(stockPackage, stockActivity, 10020, 10030))
     }
 
     @Test fun disconnectedLifecycleCannotLaunch() {

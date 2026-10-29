@@ -70,7 +70,7 @@ foreground; changing Home does not override that TV behavior.
 
 ### Optional Home button helper
 
-Version 0.1.1 includes an optional helper for Google TV firmware that ignores
+Version 0.1.2 includes an optional helper for Google TV firmware that ignores
 the default-Home selection. It is **off by default**. Open **Apps → Home button
 helper**, or the live overlay's **Settings → Home button helper**, to review its
 purpose and open Android Accessibility settings. Enabling **Aviary Home button
@@ -82,7 +82,11 @@ When enabled, it responds only to a window-state event whose package is
 `com.google.android.apps.tv.launcherx.home.HomeActivity`. It opens Aviary using
 an explicit Home intent. The Google TV screen may appear briefly first. Other
 activities, other applications, Settings, clicks and key events do not trigger
-it. Events older than two seconds are ignored; repeated launches are debounced.
+it. Events older than two seconds and duplicate event deliveries are ignored.
+A fresh Home press is accepted even immediately after the preceding one.
+`notificationTimeout` is zero so framework coalescing cannot replace the exact
+Home activity event with a generic window event; duplicate timestamps are
+discarded by the helper itself.
 
 The helper reads only event type, package/activity names and timing. It does not
 read event text or request window contents, intercept keys, perform gestures,
@@ -92,13 +96,24 @@ Android's service permission protects its binding. Disabling it in Android
 Accessibility settings restores ordinary Google TV Home behavior without
 uninstalling anything. Google TV and Setup Wizard stay enabled.
 
-The helper's 0.1.1 build passed ten JVM tests, lint, and three instrumented
+The helper passed ten JVM tests, lint, and three instrumented
 checks on the TCL using fabricated events without granting Accessibility.
 Those checks cover the exact event filter, lifecycle, launch denial handling,
 Home intent and manifest capability limits. Accessibility settings were
-unchanged before and after testing; the installed helper remains Off.
-Actual permission-enabled Home handoff on the intended TV remains a separate
-physical acceptance step. This does not establish cold-boot or standby behavior.
+unchanged before and after those fabricated-event tests. They did not enable
+the service.
+
+After explicit owner approval, the helper was enabled through the TCL's normal
+Accessibility confirmation on 2026-10-29. Physical Home → Aviary, Settings →
+Home and VLC → Home passed. Settings and VLC each remained foreground for an
+eight-second observation without the helper opening Aviary; root Back remained
+in Aviary for eight seconds. Version 0.1.2 also passed three rapid Home presses,
+settling in Aviary within 2.63 seconds of the batch beginning and remaining
+there. A prior broad cooldown could swallow the final Home press; the fix
+rejects only duplicate/older events and preserves each fresh activity event.
+The installed helper is enabled on this authorized TV. All previously enabled
+Accessibility services were preserved, and Google TV and Setup Wizard remain
+enabled. Cold-boot and standby behavior were not tested.
 
 Fullscreen controls hide after six seconds. Press a D-pad direction or OK to
 show them. The first press wakes the controls; the next selects an action.
@@ -216,8 +231,9 @@ then resolved Home to the OEM Setup Wizard recovery activity. That trial was
 immediately rolled back without opening the recovery activity; Setup Wizard
 was never changed. Android rejected the narrower request to disable only that
 recovery component with a `SecurityException`. The original Google TV launcher and Home preference are
-restored. Aviary remains available as a normal installed app with its own app
-strip. Firmware-specific Home replacement requires a separate solution.
+restored. The optional Home button helper above subsequently passed physical
+handoff tests with owner approval. The system's default Home role remains
+Google TV; the enabled helper opens Aviary when that Home activity appears.
 
 Long-duration source continuity, a physical cold boot and acoustic output
 measurement are separate acceptance checks. The test verifies only one player

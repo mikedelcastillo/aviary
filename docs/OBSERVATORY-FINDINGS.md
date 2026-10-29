@@ -186,13 +186,34 @@ stability pass.
 The already-playing browser observer stopped returning samples at 04:17:28 UTC
 during that migration while its renderer main thread consumed about one CPU
 core. The initial offline test began on the new publisher and omitted migration
-from old sequence numbers. That regression remains under investigation; fresh
-manifests or a newly opened browser cannot establish existing-session recovery.
+from old sequence numbers. An offline comparison reproduced failed playback
+on a huge sequence jump; contiguous low and already-high ranges both advanced
+normally. The exact live main-thread stack was not captured. A correction now
+persists a separate atomic continuity checkpoint and recovers sequence state
+from valid playlists or existing segment IDs rather than changing ranges.
+Twenty-one recorder checks passed. Following the 04:32:12-04:32:13 UTC restart,
+all three replacement children had fresh output/checkpoints at 04:33:37 UTC,
+with bounded sequence advances and one discontinuity increment each. This does
+not repair an already-frozen client or establish source continuity/latency.
 The future browser harness now bounds renderer evaluations and writes a
 two-second heartbeat from the separate Node process. Two isolated real-Chrome
 tests verified timeout detection, continued heartbeat during a renderer loop,
 and failed-result persistence by the complete observer. The original frozen
-session is preserved; changing the harness does not repair that run.
+session's raw data and CPU diagnostic were preserved before its authorized
+termination at 04:36:20 UTC. Changing the harness does not repair that run.
+
+At the report cutoff of 04:35:10 UTC, the ongoing server observation held 211
+samples over 52.5 minutes. All liveness requests succeeded, but playlist ages
+reached 42.14/42.78/360.82 seconds; thirty clip checks included three unreadable
+containers and one four-frame video-only clip. All four were independently
+verified excluded from the playable catalog. The browser's actual last sample
+was at 04:17:28 UTC after 37.75 minutes, before its renderer froze. Neither run
+is a passed two-hour stability test. A guarded ten-minute browser follow-up
+completed from 04:36:25 to 04:46:25 UTC: 41 samples, no hang or
+page/console/request errors, no sampled interval without frame progress, and
+0/1/1 observed playback resets. This is recovery evidence, not uninterrupted
+continuity. After it closed, one guarded two-hour follow-up began at 04:47:00
+UTC, scheduled through 06:47:00 UTC.
 
 Fresh file timestamps also do not establish fresh visual content. Readable
 camera overlays in three newly written capture images were roughly 12-16

@@ -19,6 +19,10 @@ tests are recorded in [Observatory findings](OBSERVATORY-FINDINGS.md).
    Tapo transport. Replace one development source at a time with rollback;
    avoid adding concurrent upstream connections. Do not change production jobs
    or flash firmware as part of this experiment.
+   The relay documents packet-copy input as an option for problematic RTSP
+   sources; compatibility and improvement still require measurement on these
+   cameras. [go2rtc RTSP guidance](https://github.com/AlexxIT/go2rtc/blob/v1.9.15/internal/rtsp/README.md),
+   [FFmpeg source options](https://github.com/AlexxIT/go2rtc/blob/v1.9.15/internal/ffmpeg/README.md).
 3. **Verify actual household devices.** Check Safari home-screen installation,
    audio activation, orientation and standby/resume on physical phones/tablets.
    Test TV remote navigation and Home separately from playback. OEM Home
